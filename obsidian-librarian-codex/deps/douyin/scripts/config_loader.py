@@ -158,7 +158,7 @@ def load_config(path: Optional[Path] = None) -> Config:
     if not config_file.exists():
         raise ConfigError(
             f"配置文件不存在：{config_file}\n"
-            f"请先运行：python3 -m scripts.config_loader init 生成模板"
+            f"请先运行：python3 deps/douyin/scripts/config_loader.py init 生成模板"
         )
 
     with config_file.open("rb") as f:
