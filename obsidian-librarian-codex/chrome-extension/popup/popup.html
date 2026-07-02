@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Obsidian Librarian</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="header">
+    <h1>知识库控制台</h1>
+    <div class="status-row">
+      <div class="status-dot" id="system-status"></div>
+      <div class="status-dot" id="connection-status" title="Agent 未连接"></div>
+    </div>
+  </div>
+
+  <main class="console">
+    <!-- Agent 状态 -->
+    <div class="section section-collapsible" id="agent-section" data-kind="agent" data-state="offline">
+      <button class="status-toggle" id="agent-toggle" type="button" aria-expanded="false" aria-controls="agent-panel">
+        <div class="status-toggle-main">
+          <span class="status-dot inline-dot offline" id="agent-status-dot"></span>
+          <div class="status-copy">
+            <span class="status-label">Agent</span>
+            <strong id="agent-status-text">未连接</strong>
+          </div>
+        </div>
+        <div class="status-toggle-meta">
+          <span class="time" id="agent-time"></span>
+          <span class="chevron" aria-hidden="true">⌄</span>
+        </div>
+      </button>
+      <div class="status-panel" id="agent-panel" aria-hidden="true" inert>
+        <div class="status-panel-inner">
+          <button class="secondary" id="refresh-status">刷新状态</button>
+          <div class="hint" id="notification-area"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 知识库状态 -->
+    <div class="section section-collapsible" id="vault-section" data-kind="vault" data-state="warning">
+      <button class="status-toggle" id="vault-toggle" type="button" aria-expanded="false" aria-controls="vault-panel">
+        <div class="status-toggle-main">
+          <span class="status-dot inline-dot warning" id="vault-status-dot"></span>
+          <div class="status-copy">
+            <span class="status-label">知识库</span>
+            <strong id="vault-status-text">等待识别</strong>
+          </div>
+        </div>
+        <div class="status-toggle-meta">
+          <span class="time" id="vault-time"></span>
+          <span class="chevron" aria-hidden="true">⌄</span>
+        </div>
+      </button>
+      <div class="status-panel" id="vault-panel" aria-hidden="true" inert>
+        <div class="status-panel-inner">
+          <div class="field">
+            <label>路径线索</label>
+            <input type="text" id="vault-path" placeholder="可留空，Agent 会自动查找">
+          </div>
+          <div class="button-row">
+            <button class="secondary" id="detect-vault">重新识别</button>
+            <button class="secondary" id="pick-vault">选择文件夹</button>
+          </div>
+          <div class="hint" id="vault-hint"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 模型状态 -->
+    <div class="section section-collapsible" id="model-section" data-kind="model" data-state="warning">
+      <button class="status-toggle" id="model-toggle" type="button" aria-expanded="false" aria-controls="model-panel">
+        <div class="status-toggle-main">
+          <span class="status-dot inline-dot warning" id="model-status-dot"></span>
+          <div class="status-copy">
+            <span class="status-label">模型</span>
+            <strong id="model-status-text">未检查</strong>
+          </div>
+        </div>
+        <div class="status-toggle-meta">
+          <span class="time" id="model-time"></span>
+          <span class="chevron" aria-hidden="true">⌄</span>
+        </div>
+      </button>
+      <div class="status-panel" id="model-panel" aria-hidden="true" inert>
+        <div class="status-panel-inner">
+          <div class="field">
+            <label>厂商</label>
+            <select id="provider">
+              <option value="doubao">豆包</option>
+              <option value="volcengine_agent_plan">火山 Agent Plan</option>
+            </select>
+            <div class="provider-note" id="provider-note"></div>
+          </div>
+          <div class="field">
+            <label>API Key</label>
+            <div class="input-shell">
+              <input type="password" id="api-key" placeholder="Ark API Key">
+              <button class="toggle-btn" id="toggle-key" type="button" aria-pressed="false">显示</button>
+            </div>
+          </div>
+          <div class="field">
+            <label>模型 ID</label>
+            <input type="text" id="model" placeholder="doubao-seed-2-0-lite-260428">
+          </div>
+          <div class="button-row">
+            <button class="primary" id="save-config">保存模型配置</button>
+            <button class="secondary" id="check-model">测试连接</button>
+          </div>
+          <div class="hint" id="model-hint"></div>
+          <div class="hint" id="config-hint"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cookie 抓取 -->
+    <div class="section section-collapsible" id="cookie-section" data-kind="cookie" data-state="warning">
+      <button class="status-toggle" id="cookie-toggle" type="button" aria-expanded="false" aria-controls="cookie-panel">
+        <div class="status-toggle-main">
+          <span class="status-dot inline-dot warning" id="cookie-status-dot"></span>
+          <div class="status-copy">
+            <span class="status-label">Cookie</span>
+            <strong id="cookie-status-text">未同步</strong>
+          </div>
+        </div>
+        <div class="status-toggle-meta">
+          <span class="time" id="cookie-time"></span>
+          <span class="chevron" aria-hidden="true">⌄</span>
+        </div>
+      </button>
+      <div class="status-panel" id="cookie-panel" aria-hidden="true" inert>
+        <div class="status-panel-inner">
+          <button class="primary" id="grab-cookie">抓取抖音 Cookie</button>
+          <div class="hint" id="cookie-hint">需要在抖音网页版登录后点击</div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

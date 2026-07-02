@@ -1,0 +1,20 @@
+# 抖音视频拆解工具依赖
+# 安装到独立 venv：deps/douyin/.venv/
+# 跑 deps/douyin/setup.sh 一键创建
+
+# === vendor 抖音爬虫库依赖（锁版本，因为风控敏感） ===
+httpx==0.27.*               # vendor 锁定 0.27（0.28 删了 proxies 参数）
+pyyaml>=6.0                 # vendor config.yaml
+pycryptodomex>=3.19         # xbogus 签名
+pydantic>=2.0               # vendor models
+gmssl>=3.2                  # abogus 签名
+browser-cookie3>=0.19       # vendor 工具函数
+qrcode>=7.4                 # vendor 二维码登录（未启用，但 import 链路要）
+rich>=13.0                  # vendor 日志
+importlib_resources>=6.0    # vendor 资源加载
+
+# === 火山方舟 SDK ===
+openai>=1.40.0              # 兼容 ark Files/Responses API
+
+# === 我们自己的依赖 ===
+tomli>=2.0                  # Python <3.11 读 toml（3.11+ 用内置 tomllib）

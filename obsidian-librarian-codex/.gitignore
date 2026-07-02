@@ -1,0 +1,20 @@
+# 虚拟环境
+deps/douyin/.venv/
+deps/douyin/logs/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# 状态文件（运行时生成）
+status/
+inbox/
+archive/
+failed/
+cache/
+cookie/
+
+# 测试配置
+test.toml

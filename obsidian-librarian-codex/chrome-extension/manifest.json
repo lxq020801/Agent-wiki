@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Obsidian Librarian",
+  "version": "0.1.0",
+  "description": "AI 知识库控制塔 — 配置、状态、Cookie 回传",
+  "permissions": [
+    "storage",
+    "cookies",
+    "activeTab",
+    "scripting",
+    "notifications",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://douyin.com/*",
+    "https://*.douyin.com/*",
+    "https://www.douyin.com/*",
+    "https://v.douyin.com/*",
+    "https://iesdouyin.com/*",
+    "https://*.iesdouyin.com/*"
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
+}

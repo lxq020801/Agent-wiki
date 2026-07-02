@@ -1,0 +1,3 @@
+# Obsidian Librarian control-plane dependencies
+websockets>=12.0
+
