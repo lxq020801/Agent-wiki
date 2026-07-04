@@ -19,6 +19,7 @@ analyzer.py — 火山方舟视频拆解
   ⑥ file_id 模式必须等 file.status == "active" 才能分析
   ⑦ file_id 模式同一视频换 quality 必须重新上传
   ⑧ 超 10 分钟先做最高 1fps 的动态全片概览规划，再按 240s 分片用 2-5fps 精拆
+     超长视频则改为分片 1fps 概览，合成全局策略后再精拆
 
 公共契约：
     analyze_video(video_path, prompt, *, config, quality="quality",
@@ -490,8 +491,16 @@ def _long_overview_fps(duration_sec: float) -> float:
     return max(_FPS_MIN, min(_LONG_OVERVIEW_FPS, fps))
 
 
+def _ultra_long_threshold_sec() -> float:
+    return _FRAMES_SAFE_TARGET / _FPS_MIN
+
+
+def _is_ultra_long_video(duration_sec: float) -> bool:
+    return duration_sec > _ultra_long_threshold_sec()
+
+
 def _long_overview_exceeds_safe_target(duration_sec: float) -> bool:
-    return duration_sec > 0 and duration_sec * _FPS_MIN > _FRAMES_SAFE_TARGET
+    return _is_ultra_long_video(duration_sec)
 
 
 def should_chunk_video(duration_sec: float) -> bool:
@@ -522,6 +531,55 @@ def _build_long_overview_prompt(
             json.dumps(chunk_plan, ensure_ascii=False, indent=2),
         )
         .replace("{ingest_intents}", ", ".join(intents))
+    )
+
+
+def _build_overview_chunk_prompt(
+    *,
+    duration_sec: float,
+    chunk_count: int,
+    plan_item: dict[str, float | int],
+    intents: list[str],
+) -> str:
+    return (
+        "你是长视频拆解链路的粗概览员。当前视频太长，不能一次性做全片概览，"
+        "所以你只需要粗略看懂当前切片，为后续生成全片分段策略提供依据。\n\n"
+        f"视频总时长：{duration_sec:.1f} 秒\n"
+        f"当前切片：第 {int(plan_item['part_index'])}/{chunk_count} 段\n"
+        f"时间范围：{float(plan_item['start_sec']):.1f}s - {float(plan_item['end_sec']):.1f}s\n"
+        f"用户入库意图：{', '.join(intents)}\n\n"
+        "请输出简洁文本，不要输出最终 JSON。必须包含：\n"
+        "- 本段大概讲了什么。\n"
+        "- 本段粗时间线。\n"
+        "- 可见的字幕/OCR、界面操作、镜头变化、动作细节、概念密度。\n"
+        "- 低 fps 精拆可能漏掉什么。\n"
+        "- 后续精拆本段建议重点关注什么。\n"
+    )
+
+
+def _build_chunked_overview_strategy_prompt(
+    *,
+    duration_sec: float,
+    chunk_plan: list[dict[str, float | int]],
+    intents: list[str],
+    overview_pieces: list[tuple[int, str]],
+) -> str:
+    ordered = "\n\n".join(
+        f"## 粗概览分片 {part_index}\n{text.strip()[:3000]}"
+        for part_index, text in sorted(overview_pieces, key=lambda item: item[0])
+    )
+    base = _build_long_overview_prompt(
+        duration_sec=duration_sec,
+        chunk_plan=chunk_plan,
+        intents=intents,
+    )
+    return (
+        "下面是同一个超长视频按固定切片用 1fps 得到的粗概览。"
+        "请把这些粗概览合成为全片概览与分段精拆策略。\n"
+        "你必须根据粗概览里的证据，为每一个固定切片给出 2、3、4 或 5fps 建议。\n"
+        "只输出最终 JSON，不要输出 Markdown，不要输出 JSON 外的内容。\n\n"
+        f"粗概览结果：\n{ordered}\n\n"
+        f"最终 JSON 结构和判断标准如下：\n{base}"
     )
 
 
@@ -1546,25 +1604,27 @@ async def analyze_video_many(
             "overlap_sec": _CHUNK_OVERLAP_SEC,
             "duration_sec": duration,
         })
-        strategy = await _prepare_long_video_strategy(
-            video_path,
-            chunk_plan,
-            list(prompts),
-            files_client=files_client,
-            responses_client=responses_client,
-            model=model,
-            strategy_model=strategy_model,
-            file_active_timeout_sec=file_active_timeout_sec,
-            response_timeout_sec=response_timeout_sec,
-            source_id=memory_source_id,
-            on_progress=on_progress,
-        )
         with tempfile.TemporaryDirectory(prefix="obsidian-librarian-chunks-") as tmpdir:
             chunk_paths = await asyncio.to_thread(
                 _split_video_for_chunks,
                 video_path,
                 chunk_plan,
                 Path(tmpdir),
+            )
+            strategy = await _prepare_long_video_strategy(
+                video_path,
+                chunk_plan,
+                list(prompts),
+                files_client=files_client,
+                responses_client=responses_client,
+                model=model,
+                strategy_model=strategy_model,
+                file_active_timeout_sec=file_active_timeout_sec,
+                response_timeout_sec=response_timeout_sec,
+                source_id=memory_source_id,
+                chunk_paths=chunk_paths,
+                chunk_concurrency=chunk_concurrency,
+                on_progress=on_progress,
             )
             return await _analyze_video_chunks(
                 chunk_paths,
@@ -1673,80 +1733,68 @@ async def _prepare_long_video_strategy(
     source_id: str,
     file_active_timeout_sec: int,
     response_timeout_sec: int,
+    chunk_paths: Optional[list[Path]] = None,
+    chunk_concurrency: int = _CHUNK_ANALYSIS_CONCURRENCY,
     on_progress: ProgressCb,
 ) -> dict[str, Any]:
     """Run a dynamic-fps full-video overview and return a validated per-chunk strategy."""
     overview_duration = float(chunk_plan[-1]["end_sec"]) if chunk_plan else 0.0
-    if _long_overview_exceeds_safe_target(overview_duration):
-        min_frames = int(math.ceil(overview_duration * _FPS_MIN))
-        reason = (
-            f"长视频 {overview_duration:.0f}s 即使用官方最低 {_FPS_MIN:g}fps 概览也会达到 "
-            f"{min_frames} 帧，超过 {_FRAMES_SAFE_TARGET} 安全目标，跳过全片概览并按 5fps 分片兜底"
-        )
-        strategy = _strategy_fallback(chunk_plan, reason=reason)
-        _write_strategy_log("overview_strategy_skipped_frame_budget", {
-            "source_id": source_id,
-            "strategy_model": strategy_model,
-            "analysis_model": model,
-            "duration_sec": overview_duration,
-            "min_fps": _FPS_MIN,
-            "estimated_frames": min_frames,
-            "safe_target": _FRAMES_SAFE_TARGET,
-            "fallback": "fallback_to_5fps",
-        })
-        await _call_progress(on_progress, "overview_strategy_decided", {
-            "ok": False,
-            "fallback_reason": reason,
-            "model": strategy_model,
-            "chunk_count": len(chunk_plan),
-            "fps_plan": [
-                {"part_index": item["part_index"], "fps": _LONG_CHUNK_FPS_MAX}
-                for item in chunk_plan
-            ],
-        })
-        return strategy
-
-    overview_fps = _long_overview_fps(overview_duration)
-    await _call_progress(on_progress, "overview_uploading", {
-        "fps": overview_fps,
-        "chunk_count": len(chunk_plan),
-        "model": strategy_model,
-    })
     try:
-        file_obj = await _upload_with_preprocess(
-            files_client, video_path, fps=overview_fps, model=strategy_model
-        )
-        file_id = getattr(file_obj, "id", None) or getattr(file_obj, "file_id", None)
-        if not file_id:
-            raise APIError(f"Files API 概览上传返回缺 id: {file_obj!r}")
-        await _call_progress(on_progress, "overview_uploaded", {
-            "file_id": file_id,
-            "fps": overview_fps,
-        })
-        await _wait_for_active(
-            files_client,
-            file_id,
-            timeout_sec=file_active_timeout_sec,
-            on_progress=on_progress,
-        )
-        overview_prompt = _build_long_overview_prompt(
-            duration_sec=overview_duration,
-            chunk_plan=chunk_plan,
-            intents=intents,
-        )
-        await _call_progress(on_progress, "analyzing_overview", {
-            "file_id": file_id,
-            "model": strategy_model,
-            "fps": overview_fps,
-        })
-        call = _as_response_call_result(await _stream_responses(
-            responses_client,
-            model=strategy_model,
-            file_id=file_id,
-            prompt=overview_prompt,
-            on_progress=on_progress,
-            timeout_sec=response_timeout_sec,
-        ))
+        if _is_ultra_long_video(overview_duration):
+            call = await _prepare_chunked_overview_strategy(
+                chunk_paths or [],
+                chunk_plan,
+                intents,
+                files_client=files_client,
+                responses_client=responses_client,
+                strategy_model=strategy_model,
+                duration_sec=overview_duration,
+                file_active_timeout_sec=file_active_timeout_sec,
+                response_timeout_sec=response_timeout_sec,
+                chunk_concurrency=chunk_concurrency,
+                on_progress=on_progress,
+            )
+        else:
+            overview_fps = _long_overview_fps(overview_duration)
+            await _call_progress(on_progress, "overview_uploading", {
+                "fps": overview_fps,
+                "chunk_count": len(chunk_plan),
+                "model": strategy_model,
+            })
+            file_obj = await _upload_with_preprocess(
+                files_client, video_path, fps=overview_fps, model=strategy_model
+            )
+            file_id = getattr(file_obj, "id", None) or getattr(file_obj, "file_id", None)
+            if not file_id:
+                raise APIError(f"Files API 概览上传返回缺 id: {file_obj!r}")
+            await _call_progress(on_progress, "overview_uploaded", {
+                "file_id": file_id,
+                "fps": overview_fps,
+            })
+            await _wait_for_active(
+                files_client,
+                file_id,
+                timeout_sec=file_active_timeout_sec,
+                on_progress=on_progress,
+            )
+            overview_prompt = _build_long_overview_prompt(
+                duration_sec=overview_duration,
+                chunk_plan=chunk_plan,
+                intents=intents,
+            )
+            await _call_progress(on_progress, "analyzing_overview", {
+                "file_id": file_id,
+                "model": strategy_model,
+                "fps": overview_fps,
+            })
+            call = _as_response_call_result(await _stream_responses(
+                responses_client,
+                model=strategy_model,
+                file_id=file_id,
+                prompt=overview_prompt,
+                on_progress=on_progress,
+                timeout_sec=response_timeout_sec,
+            ))
         if not call.text.strip():
             raise APIError("Responses API 未返回长视频概览策略文本")
         strategy = _normalize_long_video_strategy(call.text, chunk_plan)
@@ -1866,6 +1914,159 @@ async def _prepare_long_video_strategy(
             ],
         })
         return strategy
+
+
+async def _prepare_chunked_overview_strategy(
+    chunk_paths: list[Path],
+    chunk_plan: list[dict[str, float | int]],
+    intents: list[str],
+    *,
+    files_client: Any,
+    responses_client: Any,
+    strategy_model: str,
+    duration_sec: float,
+    file_active_timeout_sec: int,
+    response_timeout_sec: int,
+    chunk_concurrency: int,
+    on_progress: ProgressCb,
+) -> ResponseCallResult:
+    """Build ultra-long-video strategy from 1fps overview chunks."""
+    if len(chunk_paths) != len(chunk_plan):
+        raise AnalyzerError("超长视频概览切片数量与计划不一致")
+
+    min_frames = int(math.ceil(duration_sec * _FPS_MIN))
+    chunk_concurrency = max(1, min(4, int(chunk_concurrency or _CHUNK_ANALYSIS_CONCURRENCY)))
+    total = len(chunk_plan)
+    await _call_progress(on_progress, "overview_chunking", {
+        "mode": "ultra_long_video",
+        "chunk_count": total,
+        "fps": _LONG_OVERVIEW_FPS,
+        "concurrency": chunk_concurrency,
+        "estimated_full_overview_frames": min_frames,
+        "safe_target": _FRAMES_SAFE_TARGET,
+        "ultra_long_threshold_sec": _ultra_long_threshold_sec(),
+    })
+
+    _write_strategy_log("overview_strategy_chunked_started", {
+        "mode": "ultra_long_video",
+        "duration_sec": duration_sec,
+        "min_fps": _FPS_MIN,
+        "estimated_full_overview_frames": min_frames,
+        "safe_target": _FRAMES_SAFE_TARGET,
+        "ultra_long_threshold_sec": _ultra_long_threshold_sec(),
+        "chunk_count": total,
+        "chunk_overview_fps": _LONG_OVERVIEW_FPS,
+        "concurrency": chunk_concurrency,
+    })
+
+    pieces: list[tuple[int, str]] = []
+    usages: list[dict[str, Any]] = []
+    lock = asyncio.Lock()
+    semaphore = asyncio.Semaphore(chunk_concurrency)
+
+    async def process_overview_chunk(
+        chunk_path: Path,
+        plan_item: dict[str, float | int],
+    ) -> None:
+        part_index = int(plan_item["part_index"])
+        await _call_progress(on_progress, "overview_chunk_uploading", {
+            "part_index": part_index,
+            "chunk_count": total,
+            "fps": _LONG_OVERVIEW_FPS,
+            "model": strategy_model,
+            "concurrency": chunk_concurrency,
+        })
+        file_obj = await _upload_with_preprocess(
+            files_client,
+            chunk_path,
+            fps=_LONG_OVERVIEW_FPS,
+            model=strategy_model,
+        )
+        file_id = getattr(file_obj, "id", None) or getattr(file_obj, "file_id", None)
+        if not file_id:
+            raise APIError(f"Files API 超长概览切片返回缺 id part={part_index}: {file_obj!r}")
+        await _call_progress(on_progress, "overview_chunk_uploaded", {
+            "part_index": part_index,
+            "chunk_count": total,
+            "file_id": file_id,
+        })
+        await _wait_for_active(
+            files_client,
+            file_id,
+            timeout_sec=file_active_timeout_sec,
+            on_progress=on_progress,
+        )
+        prompt = _build_overview_chunk_prompt(
+            duration_sec=duration_sec,
+            chunk_count=total,
+            plan_item=plan_item,
+            intents=intents,
+        )
+        await _call_progress(on_progress, "analyzing_overview_chunk", {
+            "part_index": part_index,
+            "chunk_count": total,
+            "file_id": file_id,
+            "model": strategy_model,
+            "fps": _LONG_OVERVIEW_FPS,
+        })
+        call = _as_response_call_result(await _stream_responses(
+            responses_client,
+            model=strategy_model,
+            file_id=file_id,
+            prompt=prompt,
+            on_progress=on_progress,
+            timeout_sec=response_timeout_sec,
+        ))
+        if not call.text.strip():
+            raise APIError(f"Responses API 未返回超长概览切片文本 part={part_index}")
+        async with lock:
+            pieces.append((part_index, call.text.strip()))
+            usages.append(call.usage)
+        await _call_progress(on_progress, "overview_chunk_done", {
+            "part_index": part_index,
+            "chunk_count": total,
+            "text_length": len(call.text),
+        })
+
+    async def process_overview_chunk_guarded(
+        chunk_path: Path,
+        plan_item: dict[str, float | int],
+    ) -> None:
+        async with semaphore:
+            await process_overview_chunk(chunk_path, plan_item)
+
+    await asyncio.gather(*(
+        process_overview_chunk_guarded(chunk_path, plan_item)
+        for chunk_path, plan_item in zip(chunk_paths, chunk_plan)
+    ))
+
+    synth_prompt = _build_chunked_overview_strategy_prompt(
+        duration_sec=duration_sec,
+        chunk_plan=chunk_plan,
+        intents=intents,
+        overview_pieces=pieces,
+    )
+    await _call_progress(on_progress, "synthesizing_overview_strategy", {
+        "chunk_count": total,
+        "model": strategy_model,
+    })
+    synth = await _call_text_responses(
+        responses_client,
+        model=strategy_model,
+        prompt=synth_prompt,
+        on_progress=on_progress,
+        timeout_sec=response_timeout_sec,
+    )
+    _write_strategy_log("overview_strategy_chunked_synthesized", {
+        "chunk_count": total,
+        "usage": _combine_usage(usages + [synth.usage]),
+        "response_stored": bool(synth.response_id),
+    })
+    return ResponseCallResult(
+        text=synth.text,
+        usage=_combine_usage(usages + [synth.usage]),
+        response_id=synth.response_id,
+    )
 
 
 async def _analyze_video_chunks(

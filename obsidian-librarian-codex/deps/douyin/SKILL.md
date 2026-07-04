@@ -82,15 +82,20 @@ The WebSocket control server writes:
 - Videos longer than 10 minutes first run a full-video overview at dynamic fps,
   capped at `1fps` and lowered against the 1250-frame safety target, with the
   strategy model (`models.strategy`, default mini). If even the official minimum
-  `0.2fps` would exceed the safety target, skip the overview, log the reason,
-  and fall back to conservative `5fps` chunks. The overview extracts rough
-  content and a per-chunk strategy, then 240s chunks with 10s overlap are
-  uploaded/analyzed independently at `2-5fps` by the main analyzer model with
-  default 2-way concurrency, configurable from 1 to 4. Invalid JSON, missing
-  segments, or missing required fields may be repaired once by the same strategy
-  model via `previous_response_id`; missing evidence, low confidence, or high
-  low-fps risk must fall back conservatively toward `5fps`. Text-only Responses
-  then synthesizes the final asset body from the overview and chunk results.
+  `0.2fps` would exceed the safety target, treat it as an ultra-long video:
+  split the overview phase too, analyze each 240s chunk at `1fps`, synthesize
+  those rough overviews into the same global strategy JSON, then continue through
+  the normal long-video precision pass. This means duration scales by chunk
+  count; the practical limits are still file size, download time, task timeout,
+  and model context windows. The overview extracts rough content and a per-chunk
+  strategy, then
+  240s chunks with 10s overlap are uploaded/analyzed independently at `2-5fps`
+  by the main analyzer model with default 2-way concurrency, configurable from
+  1 to 4. Invalid JSON, missing segments, or missing required fields may be
+  repaired once by the same strategy model via `previous_response_id`; missing
+  evidence, low confidence, or high low-fps risk must fall back conservatively
+  toward `5fps`. Text-only Responses then synthesizes the final asset body from
+  the overview and chunk results.
 - Strategy fallbacks and JSON repair results are logged to
   `~/.obsidian-librarian/logs/video-strategy-events.jsonl` without API keys,
   Cookies, Bearer tokens, or `response_id`.

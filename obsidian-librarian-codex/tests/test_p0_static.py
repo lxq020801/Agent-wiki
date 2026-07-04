@@ -871,8 +871,9 @@ def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
     assert analyzer._long_overview_fps(1800) == 0.69
     assert int(analyzer._long_overview_fps(1800) * 1800) <= 1250
     assert analyzer._long_overview_fps(7200) == 0.2
-    assert analyzer._long_overview_exceeds_safe_target(6250) is False
-    assert analyzer._long_overview_exceeds_safe_target(6251) is True
+    assert analyzer._ultra_long_threshold_sec() == 6250.0
+    assert analyzer._is_ultra_long_video(6250) is False
+    assert analyzer._is_ultra_long_video(6251) is True
     plan = analyzer._chunk_plan(601)
     assert len(plan) == 3
     assert plan[0]["start_sec"] == 0
@@ -1229,7 +1230,7 @@ def test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp: Path)
     assert "resp-overview" not in log_text
 
 
-def test_prepare_long_video_strategy_skips_unsafe_full_overview(tmp: Path) -> None:
+def test_prepare_long_video_strategy_chunks_unsafe_full_overview(tmp: Path) -> None:
     import asyncio
     import sys
 
@@ -1240,19 +1241,86 @@ def test_prepare_long_video_strategy_skips_unsafe_full_overview(tmp: Path) -> No
     video = tmp / "very-long.mp4"
     video.write_bytes(b"fake-video")
     plan = analyzer._chunk_plan(7200)
+    chunk_paths = []
+    for item in plan:
+        path = tmp / f"part-{int(item['part_index']):03d}.mp4"
+        path.write_bytes(b"fake-chunk")
+        chunk_paths.append(path)
     upload_calls = []
+    stream_calls = []
+    synth_calls = []
     progress = []
 
     async def fake_upload(client, path, *, fps, model):
-        upload_calls.append((fps, model))
-        raise AssertionError("unsafe full overview should not upload")
+        assert path != video
+        upload_calls.append((Path(path).name, fps, model))
+        return SimpleNamespace(id=f"file-{Path(path).stem}")
+
+    async def fake_wait(*args, **kwargs):
+        return SimpleNamespace(status="active")
+
+    async def fake_stream(client, *, model, file_id, prompt, on_progress, previous_response_id=None, timeout_sec=None):
+        stream_calls.append((model, file_id, previous_response_id))
+        return analyzer.ResponseCallResult(
+            text=f"{file_id} 粗概览：画面稳定，主要是口播和字幕。",
+            usage={"total_tokens": 1},
+            response_id=f"resp-{file_id}",
+        )
+
+    async def fake_text(client, *, model, prompt, on_progress, previous_response_id=None, timeout_sec=None):
+        synth_calls.append((model, previous_response_id, "粗概览结果" in prompt))
+        strategy = {
+            "overview": {
+                "summary": "超长视频按切片粗概览后，整体以稳定口播和字幕讲解为主。",
+                "timeline": [],
+                "important_points": ["稳定口播"],
+                "uncertain_points": [],
+            },
+            "strategy": {
+                "global_notes": "画面稳定，低 fps 漏细节风险低。",
+                "segments": [
+                    {
+                        "part_index": item["part_index"],
+                        "start_sec": item["start_sec"],
+                        "end_sec": item["end_sec"],
+                        "rough_summary": "稳定讲解",
+                        "recommended_fps": 2,
+                        "confidence": 0.9,
+                        "scores": {
+                            "visual_change": 1,
+                            "ocr_subtitle_density": 1,
+                            "operation_density": 0,
+                            "motion_detail": 0,
+                            "concept_density": 2,
+                            "risk_if_low_fps": 1,
+                        },
+                        "evidence": ["粗概览显示画面稳定"],
+                        "focus": ["口播结论"],
+                        "risk_flags": [],
+                        "why_not_lower_fps": "低风险",
+                    }
+                    for item in plan
+                ],
+            },
+        }
+        return analyzer.ResponseCallResult(
+            text=json.dumps(strategy, ensure_ascii=False),
+            usage={"total_tokens": 2},
+            response_id="resp-chunked-overview-strategy",
+        )
 
     async def on_progress(stage, info):
         progress.append((stage, info))
 
     old_upload = analyzer._upload_with_preprocess
+    old_wait = analyzer._wait_for_active
+    old_stream = analyzer._stream_responses
+    old_text = analyzer._call_text_responses
     try:
         analyzer._upload_with_preprocess = fake_upload
+        analyzer._wait_for_active = fake_wait
+        analyzer._stream_responses = fake_stream
+        analyzer._call_text_responses = fake_text
         strategy = asyncio.run(analyzer._prepare_long_video_strategy(
             video,
             plan,
@@ -1264,19 +1332,31 @@ def test_prepare_long_video_strategy_skips_unsafe_full_overview(tmp: Path) -> No
             source_id="aweme-too-long",
             file_active_timeout_sec=120,
             response_timeout_sec=900,
+            chunk_paths=chunk_paths,
+            chunk_concurrency=4,
             on_progress=on_progress,
         ))
     finally:
         analyzer._upload_with_preprocess = old_upload
+        analyzer._wait_for_active = old_wait
+        analyzer._stream_responses = old_stream
+        analyzer._call_text_responses = old_text
 
-    assert upload_calls == []
-    assert strategy["ok"] is False
-    assert all(item["recommended_fps"] == 5.0 for item in strategy["chunks"])
+    assert len(upload_calls) == len(plan)
+    assert all(call[1] == 1.0 for call in upload_calls)
+    assert len(stream_calls) == len(plan)
+    assert synth_calls == [("doubao-seed-2-0-mini-260428", None, True)]
+    assert strategy["ok"] is True
+    assert all(item["recommended_fps"] == 2.0 for item in strategy["chunks"])
+    assert any(stage == "overview_chunking" for stage, _ in progress)
+    assert any(stage == "synthesizing_overview_strategy" for stage, _ in progress)
     assert any(stage == "overview_strategy_decided" for stage, _ in progress)
     log_path = tmp / "strategy-too-long-runtime" / "logs" / "video-strategy-events.jsonl"
     assert log_path.exists()
     log_text = log_path.read_text(encoding="utf-8")
-    assert "overview_strategy_skipped_frame_budget" in log_text
+    assert "overview_strategy_chunked_started" in log_text
+    assert "overview_strategy_chunked_synthesized" in log_text
+    assert "ultra_long_video" in log_text
     assert "response_id" not in log_text
 
 
@@ -2332,7 +2412,7 @@ def main() -> int:
         test_long_video_strategy_validation_falls_back_to_5fps()
         test_long_video_strategy_missing_required_fields_requests_repair()
         test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp)
-        test_prepare_long_video_strategy_skips_unsafe_full_overview(tmp)
+        test_prepare_long_video_strategy_chunks_unsafe_full_overview(tmp)
         test_strategy_log_redacts_sensitive_values(tmp)
         test_chunk_analysis_uses_strategy_fps_and_context(tmp)
         test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp)
