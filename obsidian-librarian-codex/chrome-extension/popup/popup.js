@@ -64,6 +64,10 @@ function debugLog(...args) {
   if (DEBUG_LOGS) console.log(...args);
 }
 
+function hasExtensionApis() {
+  return typeof chrome !== 'undefined' && !!chrome.runtime?.sendMessage && !!chrome.storage?.local;
+}
+
 function normalizeProvider(value) {
   return PROVIDERS[value] ? value : DEFAULT_PROVIDER;
 }
@@ -148,6 +152,21 @@ function readStoredStrategyModel(source) {
   return configured === providerInfo(DEFAULT_PROVIDER).strategyModel
     ? configured
     : providerInfo(DEFAULT_PROVIDER).strategyModel;
+}
+
+function setControlValue(id, value, { notify = false } = {}) {
+  const input = document.getElementById(id);
+  if (!input) return;
+  const normalizedValue = String(value ?? '');
+  input.value = normalizedValue;
+  document.querySelectorAll(`[data-control="${id}"]`).forEach(button => {
+    const selected = String(button.dataset.value) === normalizedValue;
+    button.classList.toggle('selected', selected);
+    if (button.getAttribute('role') === 'radio') {
+      button.setAttribute('aria-checked', selected ? 'true' : 'false');
+    }
+  });
+  if (notify) input.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
 function selectedVideoConfig() {
@@ -408,15 +427,15 @@ function applyModelStatus(status) {
 
 function applyVideoStatus(status) {
   if (status.modelPreset) {
-    document.getElementById('analysis-model-preset').value = normalizeModelPreset(status.modelPreset);
+    setControlValue('analysis-model-preset', normalizeModelPreset(status.modelPreset));
   } else if (status.analyzerModel) {
-    document.getElementById('analysis-model-preset').value = presetFromModel(status.analyzerModel);
+    setControlValue('analysis-model-preset', presetFromModel(status.analyzerModel));
   }
   if (status.taskConcurrency) {
-    document.getElementById('task-concurrency').value = String(normalizeTaskConcurrency(status.taskConcurrency));
+    setControlValue('task-concurrency', normalizeTaskConcurrency(status.taskConcurrency));
   }
   if (status.chunkConcurrency) {
-    document.getElementById('chunk-concurrency').value = String(normalizeChunkConcurrency(status.chunkConcurrency));
+    setControlValue('chunk-concurrency', normalizeChunkConcurrency(status.chunkConcurrency));
   }
   updateVideoSettingsSummary();
 }
@@ -443,7 +462,7 @@ function applyTaskStatus(snapshot) {
   const done = Number(snapshot.done || 0);
   const latest = items[0] || null;
   if (snapshot.taskConcurrency) {
-    document.getElementById('task-concurrency').value = String(normalizeTaskConcurrency(snapshot.taskConcurrency));
+    setControlValue('task-concurrency', normalizeTaskConcurrency(snapshot.taskConcurrency));
     chrome.storage.local.set({
       taskConcurrency: normalizeTaskConcurrency(snapshot.taskConcurrency),
       serverTaskConcurrency: normalizeTaskConcurrency(snapshot.taskConcurrency)
@@ -599,12 +618,12 @@ async function loadConfig() {
   const provider = normalizeProvider(result.llmProvider || result.provider);
   const info = providerInfo(provider);
   document.getElementById('api-key').value = readStoredApiKey(result);
-  document.getElementById('provider').value = provider;
+  setControlValue('provider', provider);
   document.getElementById('endpoint-url').value = result.arkEndpoint || result.endpoint || info.endpoint;
   document.getElementById('vault-path').value = result.vaultPath || '';
-  document.getElementById('analysis-model-preset').value = readStoredModelPreset(result);
-  document.getElementById('task-concurrency').value = String(normalizeTaskConcurrency(result.serverTaskConcurrency || result.taskConcurrency));
-  document.getElementById('chunk-concurrency').value = String(normalizeChunkConcurrency(result.videoChunkConcurrency));
+  setControlValue('analysis-model-preset', readStoredModelPreset(result));
+  setControlValue('task-concurrency', normalizeTaskConcurrency(result.serverTaskConcurrency || result.taskConcurrency));
+  setControlValue('chunk-concurrency', normalizeChunkConcurrency(result.videoChunkConcurrency));
   updateVideoSettingsSummary();
   if (result.modelStatus) applyModelStatus(result.modelStatus);
   if (result.videoAnalysisStatus) applyVideoStatus(result.videoAnalysisStatus);
@@ -1049,7 +1068,7 @@ function openSettingsIndex() {
   hideAllDetailSections();
   updateVideoSettingsSummary();
   setView('settings-index-view');
-  requestAnimationFrame(() => document.getElementById('back-home-from-index')?.focus());
+  requestAnimationFrame(() => document.getElementById('settings-index-view')?.focus({ preventScroll: true }));
 }
 
 function openSettingsDetail(targetId) {
@@ -1140,6 +1159,14 @@ function bindClick(id, handler) {
   if (el) el.addEventListener('click', handler);
 }
 
+function bindOptionControls() {
+  document.querySelectorAll('[data-control][data-value]').forEach(button => {
+    button.addEventListener('click', () => {
+      setControlValue(button.dataset.control, button.dataset.value, { notify: true });
+    });
+  });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('open-settings').addEventListener('click', openSettingsIndex);
   document.getElementById('back-home').addEventListener('click', closeToHome);
@@ -1175,6 +1202,16 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('douyin-preview-image').addEventListener('error', () => {
     setPreviewImage('', 'video');
   });
+  bindOptionControls();
+  if (!hasExtensionApis()) {
+    renderDouyinPreview({
+      ok: false,
+      source: 'current',
+      message: '打开扩展后自动识别抖音内容'
+    });
+    updateSystemSummary();
+    return;
+  }
   loadConfig();
   refreshCookieStatusFromStorage();
   startDouyinPreviewLoop();

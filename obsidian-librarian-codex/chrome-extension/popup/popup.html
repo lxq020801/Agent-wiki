@@ -65,7 +65,7 @@
     </section>
   </main>
 
-  <main class="view" id="settings-index-view" aria-hidden="true" inert>
+  <main class="view" id="settings-index-view" aria-hidden="true" tabindex="-1" inert>
     <div class="settings-page-head">
       <button class="back-button" id="back-home-from-index" type="button">← 首页</button>
       <h2>设置</h2>
@@ -149,32 +149,45 @@
         <p>这里只控制拆解模型和并发，不保存 API Key。</p>
       </div>
       <div class="field">
-        <label for="analysis-model-preset">拆解模型</label>
-        <select id="analysis-model-preset">
-          <option value="lite">Lite · 默认质量档</option>
-          <option value="mini">Mini · 轻量测试</option>
-        </select>
-      </div>
-      <div class="field-row">
-        <div class="field half">
-          <label for="task-concurrency">任务队列并发</label>
-          <select id="task-concurrency">
-            <option value="1">1 个任务</option>
-            <option value="2">2 个任务</option>
-            <option value="3">3 个任务</option>
-            <option value="4">4 个任务</option>
-          </select>
-          <p class="microcopy">同时处理几个入库任务。</p>
+        <label id="analysis-model-label">拆解模型</label>
+        <input type="hidden" id="analysis-model-preset" value="lite">
+        <div class="segmented-control" role="radiogroup" aria-labelledby="analysis-model-label">
+          <button class="option-button selected" type="button" role="radio" aria-checked="true" data-control="analysis-model-preset" data-value="lite">
+            <span>Lite</span>
+            <em>默认质量档</em>
+          </button>
+          <button class="option-button" type="button" role="radio" aria-checked="false" data-control="analysis-model-preset" data-value="mini">
+            <span>Mini</span>
+            <em>轻量测试</em>
+          </button>
         </div>
-        <div class="field half">
-          <label for="chunk-concurrency">长视频分片并发</label>
-          <select id="chunk-concurrency">
-            <option value="1">1 路</option>
-            <option value="2">2 路</option>
-            <option value="3">3 路</option>
-            <option value="4">4 路</option>
-          </select>
-          <p class="microcopy">单个长视频内几个切片同时分析。</p>
+      </div>
+      <div class="control-stack">
+        <div class="control-card">
+          <div class="control-card-head">
+            <label id="task-concurrency-label">任务队列并发</label>
+            <p class="microcopy">同时处理几个入库任务。</p>
+          </div>
+          <input type="hidden" id="task-concurrency" value="2">
+          <div class="choice-group" role="radiogroup" aria-labelledby="task-concurrency-label">
+            <button class="choice-button" type="button" role="radio" aria-checked="false" data-control="task-concurrency" data-value="1">1</button>
+            <button class="choice-button selected" type="button" role="radio" aria-checked="true" data-control="task-concurrency" data-value="2">2</button>
+            <button class="choice-button" type="button" role="radio" aria-checked="false" data-control="task-concurrency" data-value="3">3</button>
+            <button class="choice-button" type="button" role="radio" aria-checked="false" data-control="task-concurrency" data-value="4">4</button>
+          </div>
+        </div>
+        <div class="control-card">
+          <div class="control-card-head">
+            <label id="chunk-concurrency-label">长视频分片并发</label>
+            <p class="microcopy">单个长视频内几个切片同时分析。</p>
+          </div>
+          <input type="hidden" id="chunk-concurrency" value="2">
+          <div class="choice-group" role="radiogroup" aria-labelledby="chunk-concurrency-label">
+            <button class="choice-button" type="button" role="radio" aria-checked="false" data-control="chunk-concurrency" data-value="1">1</button>
+            <button class="choice-button selected" type="button" role="radio" aria-checked="true" data-control="chunk-concurrency" data-value="2">2</button>
+            <button class="choice-button" type="button" role="radio" aria-checked="false" data-control="chunk-concurrency" data-value="3">3</button>
+            <button class="choice-button" type="button" role="radio" aria-checked="false" data-control="chunk-concurrency" data-value="4">4</button>
+          </div>
         </div>
       </div>
       <button class="primary" id="save-video-config" type="button">保存拆解设置</button>
