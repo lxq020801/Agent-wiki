@@ -1025,6 +1025,7 @@ function updateSystemSummary() {
 }
 
 function setView(viewId) {
+  document.body.dataset.view = viewId;
   ['home-view', 'settings-index-view', 'settings-detail-view'].forEach(id => {
     const view = document.getElementById(id);
     if (!view) return;
