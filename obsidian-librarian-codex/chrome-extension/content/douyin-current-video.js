@@ -1,12 +1,10 @@
 (() => {
-  const SCRIPT_VERSION = '2026-07-04-no-page-widget-v1';
+  const SCRIPT_VERSION = '2026-07-05-popup-ingest-v1';
 
   if (
     window.__obsidianLibrarianDouyinCurrentVideoLoaded &&
     window.__obsidianLibrarianDouyinCurrentVideoVersion === SCRIPT_VERSION
   ) {
-    document.getElementById('obsidian-librarian-douyin-widget')?.remove();
-    document.getElementById('obsidian-librarian-douyin-intent-menu')?.remove();
     return;
   }
   window.__obsidianLibrarianDouyinCurrentVideoLoaded = true;
@@ -14,9 +12,9 @@
 
   const MAX_PARENT_DEPTH = 10;
   const CONTEXT_TTL_MS = 15000;
-  const WIDGET_ID = 'obsidian-librarian-douyin-widget';
-  const MENU_ID = 'obsidian-librarian-douyin-intent-menu';
+  const COLLECT_CACHE_TTL_MS = 1200;
   let lastContextCandidate = null;
+  let currentCandidateCache = null;
 
   function now() {
     return Date.now();
@@ -225,7 +223,7 @@
   function extractTitleFromRoot(root) {
     if (!isElement(root)) return '';
     const candidates = [];
-    const elements = [root, ...Array.from(root.querySelectorAll?.('*') || [])];
+    const elements = [root, ...Array.from(root.querySelectorAll?.('*') || []).slice(0, 320)];
     for (const parent of elements) {
       if (isInsideIgnoredNode(parent) || !isVisibleElement(parent, 12, 8)) continue;
       for (const node of Array.from(parent.childNodes || [])) {
@@ -272,6 +270,7 @@
 
     const badImagePattern = /avatar|head|icon|logo|emoji|sodaicon/i;
     const images = Array.from(root?.querySelectorAll?.('img') || [])
+      .slice(0, 80)
       .map((img) => {
         const rect = img.getBoundingClientRect();
         const src = absoluteUrl(img.currentSrc || img.src);
@@ -310,6 +309,18 @@
   }
 
   function collectCurrentCandidate() {
+    const cacheKey = `${location.href}|${lastContextCandidate?.at || 0}`;
+    if (
+      currentCandidateCache &&
+      currentCandidateCache.key === cacheKey &&
+      now() - currentCandidateCache.at < COLLECT_CACHE_TTL_MS
+    ) {
+      return {
+        ...currentCandidateCache.result,
+        collectedAt: new Date().toISOString()
+      };
+    }
+
     const candidate = best([
       candidateFromContext(),
       candidateFromUrl(),
@@ -317,21 +328,24 @@
       candidateFromVideos()
     ]);
 
+    let result;
     if (candidate) {
-      return {
+      result = {
         ...candidate,
         ...collectCurrentMetadata(),
         collectedAt: new Date().toISOString()
       };
+    } else {
+      result = {
+        ok: false,
+        reason: 'douyin_current_video_not_found',
+        pageUrl: location.href,
+        pageTitle: document.title || '',
+        collectedAt: new Date().toISOString()
+      };
     }
-
-    return {
-      ok: false,
-      reason: 'douyin_current_video_not_found',
-      pageUrl: location.href,
-      pageTitle: document.title || '',
-      collectedAt: new Date().toISOString()
-    };
+    currentCandidateCache = { key: cacheKey, at: now(), result };
+    return result;
   }
 
   function activeVideoElement() {
@@ -343,17 +357,18 @@
     ];
     const activeElements = activeSelectors
       .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
-      .filter((element) => visibleScore(element) > 0)
-      .sort((a, b) => visibleScore(b) - visibleScore(a));
-    if (activeElements[0]) return activeElements[0];
+      .map((element) => ({ element, score: visibleScore(element) }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score);
+    if (activeElements[0]) return activeElements[0].element;
 
     return Array.from(document.querySelectorAll('video'))
-      .filter((video) => visibleScore(video) > 0)
-      .sort((a, b) => {
-        const aPlaying = !a.paused && !a.ended && a.readyState >= 2 ? 1000000 : 0;
-        const bPlaying = !b.paused && !b.ended && b.readyState >= 2 ? 1000000 : 0;
-        return (visibleScore(b) + bPlaying) - (visibleScore(a) + aPlaying);
-      })[0] || null;
+      .map((video) => ({
+        video,
+        score: visibleScore(video) + (!video.paused && !video.ended && video.readyState >= 2 ? 1000000 : 0)
+      }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)[0]?.video || null;
   }
 
   function isVisibleElement(element, minWidth = 8, minHeight = 8) {
@@ -375,11 +390,6 @@
     );
   }
 
-  function removeInjectedWidget() {
-    document.getElementById(WIDGET_ID)?.remove();
-    document.getElementById(MENU_ID)?.remove();
-  }
-
   document.addEventListener('contextmenu', (event) => {
     const path = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
     const candidates = path
@@ -392,6 +402,7 @@
       y: event.clientY,
       candidate
     };
+    currentCandidateCache = null;
   }, true);
 
   chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
@@ -405,6 +416,4 @@
     sendResponse(collectCurrentCandidate());
     return false;
   });
-
-  removeInjectedWidget();
 })();

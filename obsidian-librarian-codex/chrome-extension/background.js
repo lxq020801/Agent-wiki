@@ -6,8 +6,8 @@
 
 const WS_URL = 'ws://127.0.0.1:8765';
 const MODEL_HEALTH_ALARM = 'obsidian-librarian-model-health';
-const INGEST_CONTEXT_MENU_ID = 'obsidian-librarian-ingest-current-douyin';
 const NOTIFICATION_ICON = 'icons/icon-128.png';
+const DEBUG_LOGS = false;
 const PROVIDERS = {
   doubao: {
     endpoint: 'https://ark.cn-beijing.volces.com/api/v3',
@@ -25,6 +25,7 @@ const DEFAULT_TASK_CONCURRENCY = 2;
 const DEFAULT_CHUNK_CONCURRENCY = 2;
 const MIN_TASK_CONCURRENCY = 1;
 const MAX_TASK_CONCURRENCY = 4;
+const TRUSTED_ARK_HOSTS = new Set(['ark.cn-beijing.volces.com']);
 const INGEST_INTENTS = {
   knowledge_ingest: '知识入库',
   viral_breakdown: '爆款拆解',
@@ -40,9 +41,13 @@ let pendingModelHealthCheck = false;
 let pendingModelConfigSync = false;
 let pendingTaskRequests = new Map();
 
+function debugLog(...args) {
+  if (DEBUG_LOGS) console.log(...args);
+}
+
 function notifyUser(title, message) {
   if (!chrome.notifications) {
-    console.log(`[Librarian BG] ${title}: ${message}`);
+    debugLog(`[Librarian BG] ${title}: ${message}`);
     return;
   }
   chrome.notifications.create({
@@ -91,6 +96,9 @@ function normalizeEndpoint(value, provider) {
     const url = new URL(endpoint);
     if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) {
       throw new Error('Endpoint 必须是有效 HTTPS 地址，且不能包含账号密码');
+    }
+    if (!TRUSTED_ARK_HOSTS.has(url.hostname.toLowerCase())) {
+      throw new Error('Endpoint 必须使用可信 Ark 官方域名');
     }
     if (endpoint.endsWith('/api/plan/v3')) {
       throw new Error('Agent Plan endpoint 不能作为普通 Ark API 使用');
@@ -232,7 +240,7 @@ async function storedAgentConfig() {
 // ─────────────────────────────────────────
 
 function connectWebSocket() {
-  console.log('[Librarian BG] 连接 WebSocket:', WS_URL);
+  debugLog('[Librarian BG] 连接 WebSocket:', WS_URL);
   
   if (ws) {
     ws.close();
@@ -242,7 +250,7 @@ function connectWebSocket() {
     ws = new WebSocket(WS_URL);
     
     ws.onopen = () => {
-      console.log('[Librarian BG] WebSocket 已连接');
+      debugLog('[Librarian BG] WebSocket 已连接');
       clearTimeout(reconnectTimer);
       
       // 发送握手
@@ -268,7 +276,7 @@ function connectWebSocket() {
     };
     
     ws.onclose = () => {
-      console.log('[Librarian BG] WebSocket 已断开，3秒后重连');
+      debugLog('[Librarian BG] WebSocket 已断开，3秒后重连');
       ws = null;
       reconnectTimer = setTimeout(connectWebSocket, 3000);
     };
@@ -420,36 +428,10 @@ function reloadOpenDouyinTabs(reason = 'extension_updated') {
         if (chrome.runtime.lastError) {
           console.warn('[Librarian BG] 刷新抖音标签页失败:', chrome.runtime.lastError.message);
         } else {
-          console.log('[Librarian BG] 已刷新抖音标签页，清理旧 content script:', reason);
+          debugLog('[Librarian BG] 已刷新抖音标签页，清理旧 content script:', reason);
         }
       });
     }
-  });
-}
-
-// ─────────────────────────────────────────
-// 抖音右键入库入口
-// ─────────────────────────────────────────
-
-function setupContextMenu() {
-  if (!chrome.contextMenus) return;
-
-  chrome.contextMenus.remove(INGEST_CONTEXT_MENU_ID, () => {
-    // 菜单不存在时会有 lastError，这里属于正常初始化路径。
-    chrome.runtime.lastError;
-    chrome.contextMenus.create({
-      id: INGEST_CONTEXT_MENU_ID,
-      title: '拆解并收入知识库',
-      contexts: ['page', 'video', 'link'],
-      documentUrlPatterns: [
-        'https://douyin.com/*',
-        'https://*.douyin.com/*'
-      ]
-    }, () => {
-      if (chrome.runtime.lastError) {
-        console.warn('[Librarian BG] 右键菜单创建失败:', chrome.runtime.lastError.message);
-      }
-    });
   });
 }
 
@@ -457,21 +439,6 @@ function cleanExtractedUrl(value) {
   return String(value || '')
     .trim()
     .replace(/[，。,.!！)）\]】>]+$/g, '');
-}
-
-function isSupportedDouyinUrl(value) {
-  try {
-    const url = new URL(value);
-    const host = url.hostname.toLowerCase();
-    return url.protocol.startsWith('http') && (
-      host === 'douyin.com' ||
-      host.endsWith('.douyin.com') ||
-      host === 'iesdouyin.com' ||
-      host.endsWith('.iesdouyin.com')
-    );
-  } catch (_err) {
-    return false;
-  }
 }
 
 function isPotentialIngestDouyinUrl(value) {
@@ -762,7 +729,7 @@ async function submitDouyinIngestTask(candidate, info, tab) {
   const payload = {
     type: 'task_request',
     requestId,
-    source: info?.source || 'extension_context_menu',
+    source: info?.source || 'extension_popup',
     taskType: 'douyin_ingest',
     ingest_intent: ingestIntents[0],
     ingest_intents: ingestIntents,
@@ -863,26 +830,6 @@ async function previewDouyinIngest(request) {
   return normalizePreviewCandidate(candidate, 'current');
 }
 
-async function handleDouyinContextMenu(info, tab) {
-  const candidate = await currentDouyinCandidate(info, tab);
-  if (!candidate?.ok || !candidate.url) {
-    notifyUser('未识别到当前视频', '请进入视频详情页，或复制分享链接后交给 Agent。');
-    return;
-  }
-
-  await submitDouyinIngestTask(candidate, info, tab);
-}
-
-if (chrome.contextMenus?.onClicked) {
-  chrome.contextMenus.onClicked.addListener((info, tab) => {
-    if (info.menuItemId !== INGEST_CONTEXT_MENU_ID) return;
-    handleDouyinContextMenu(info, tab).catch((err) => {
-      console.error('[Librarian BG] 右键入库失败:', err);
-      notifyUser('发送失败', err.message || '右键入库时发生未知错误。');
-    });
-  });
-}
-
 // ─────────────────────────────────────────
 // 处理 Agent 推送的消息
 // ─────────────────────────────────────────
@@ -891,7 +838,7 @@ function handleAgentMessage(msg) {
   switch (msg.type) {
     case 'config_synced':
     case 'cookie_synced':
-      console.log('[Librarian BG] 控制面同步:', msg.type);
+      debugLog('[Librarian BG] 控制面同步:', msg.type);
       break;
 
     case 'status_snapshot':
@@ -937,25 +884,25 @@ function handleAgentMessage(msg) {
       break;
       
     case 'agent_ready':
-      console.log('[Librarian BG] Agent 已就绪');
+      debugLog('[Librarian BG] Agent 已就绪');
       break;
 
     case 'task_rejected':
-      console.log('[Librarian BG] Agent 拒绝任务:', msg.reason);
+      debugLog('[Librarian BG] Agent 拒绝任务:', msg.reason);
       if (!resolveTaskAck(msg)) {
         notifyUser('Agent 暂未接收任务', msg.message || 'Agent 未接收任务。');
       }
       break;
 
     case 'task_accepted':
-      console.log('[Librarian BG] Agent 已接收任务:', msg.task?.id || '');
+      debugLog('[Librarian BG] Agent 已接收任务:', msg.task?.id || '');
       if (!resolveTaskAck(msg)) {
         notifyUser('Agent 已接收任务', '入库任务已进入队列。');
       }
       break;
       
     default:
-      console.log('[Librarian BG] 未知消息类型:', msg.type);
+      debugLog('[Librarian BG] 未知消息类型:', msg.type);
   }
 }
 
@@ -964,8 +911,7 @@ function handleAgentMessage(msg) {
 // ─────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener((details) => {
-  console.log('[Librarian BG] Extension installed');
-  setupContextMenu();
+  debugLog('[Librarian BG] Extension installed');
   ensureModelHealthAlarm();
   if (details?.reason === 'install' || details?.reason === 'update') {
     reloadOpenDouyinTabs(details.reason);
@@ -975,8 +921,7 @@ chrome.runtime.onInstalled.addListener((details) => {
 
 // 启动时连接
 chrome.runtime.onStartup.addListener(() => {
-  console.log('[Librarian BG] Extension started');
-  setupContextMenu();
+  debugLog('[Librarian BG] Extension started');
   ensureModelHealthAlarm();
   connectWebSocket();
 });
@@ -994,44 +939,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       connectWebSocket();
     }
     sendResponse({ connected: ws && ws.readyState === WebSocket.OPEN });
+    return false;
   } else if (request.action === 'modelHealthCheck') {
     sendModelHealthCheck().then(() => {
       sendResponse({ accepted: true });
     });
+    return true;
   } else if (request.action === 'syncModelConfigAndCheck') {
     sendModelConfigAndHealthCheck().then((accepted) => {
       sendResponse({ accepted });
     });
-  } else if (request.action === 'submitCurrentDouyinVideo') {
-    const candidate = request.candidate || {};
-    if (!candidate.ok || !candidate.url) {
-      sendResponse({
-        ok: false,
-        message: '没有识别到当前视频，请进入详情页或复制分享链接。'
-      });
-      return true;
-    }
-    submitDouyinIngestTask(
-      candidate,
-      {
-        pageUrl: candidate.pageUrl || sender.tab?.url || '',
-        source: 'extension_inline_button',
-        ingestIntent: request.ingestIntent
-      },
-      sender.tab
-    ).then((result) => {
-      sendResponse({
-        ok: Boolean(result?.ok),
-        task: result?.task || null,
-        url: candidate.url,
-        message: result?.message || (result?.ok ? '任务已进入队列。' : '发送失败，请确认 Agent 已连接。')
-      });
-    }).catch((err) => {
-      sendResponse({
-        ok: false,
-        message: err.message || '发送失败，请确认 Agent 已连接。'
-      });
-    });
+    return true;
   } else if (request.action === 'submitDouyinIngestFromPopup') {
     submitDouyinIngestFromPopup(request).then((result) => {
       sendResponse({
@@ -1045,6 +963,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         message: err.message || '发送失败，请确认 Agent 已连接。'
       });
     });
+    return true;
   } else if (request.action === 'previewDouyinIngest') {
     previewDouyinIngest(request).then((result) => {
       sendResponse(result);
@@ -1055,6 +974,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         message: err.message || '预览识别失败'
       });
     });
+    return true;
   }
-  return true;
+  return false;
 });

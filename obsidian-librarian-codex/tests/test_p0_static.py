@@ -76,6 +76,7 @@ def test_config_loader_rejects_invalid_ark_endpoints(tmp: Path) -> None:
     vault.mkdir()
     invalid_cases = [
         ("http://evil.example.invalid/api/v3", "HTTPS"),
+        ("https://evil.example.invalid/api/v3", "可信 Ark 官方域名"),
         ("https://user:pass@ark.cn-beijing.volces.com/api/v3", "账号密码"),
         ("https://ark.cn-beijing.volces.com/api/plan/v3", "Agent Plan endpoint"),
     ]
@@ -866,6 +867,12 @@ def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
 
     assert analyzer.should_chunk_video(600) is False
     assert analyzer.should_chunk_video(601) is True
+    assert analyzer._long_overview_fps(1200) == 1.0
+    assert analyzer._long_overview_fps(1800) == 0.69
+    assert int(analyzer._long_overview_fps(1800) * 1800) <= 1250
+    assert analyzer._long_overview_fps(7200) == 0.2
+    assert analyzer._long_overview_exceeds_safe_target(6250) is False
+    assert analyzer._long_overview_exceeds_safe_target(6251) is True
     plan = analyzer._chunk_plan(601)
     assert len(plan) == 3
     assert plan[0]["start_sec"] == 0
@@ -1222,6 +1229,57 @@ def test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp: Path)
     assert "resp-overview" not in log_text
 
 
+def test_prepare_long_video_strategy_skips_unsafe_full_overview(tmp: Path) -> None:
+    import asyncio
+    import sys
+
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "strategy-too-long-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    video = tmp / "very-long.mp4"
+    video.write_bytes(b"fake-video")
+    plan = analyzer._chunk_plan(7200)
+    upload_calls = []
+    progress = []
+
+    async def fake_upload(client, path, *, fps, model):
+        upload_calls.append((fps, model))
+        raise AssertionError("unsafe full overview should not upload")
+
+    async def on_progress(stage, info):
+        progress.append((stage, info))
+
+    old_upload = analyzer._upload_with_preprocess
+    try:
+        analyzer._upload_with_preprocess = fake_upload
+        strategy = asyncio.run(analyzer._prepare_long_video_strategy(
+            video,
+            plan,
+            ["knowledge_ingest"],
+            files_client=SimpleNamespace(),
+            responses_client=SimpleNamespace(),
+            model="doubao-seed-2-0-lite-260428",
+            strategy_model="doubao-seed-2-0-mini-260428",
+            source_id="aweme-too-long",
+            file_active_timeout_sec=120,
+            response_timeout_sec=900,
+            on_progress=on_progress,
+        ))
+    finally:
+        analyzer._upload_with_preprocess = old_upload
+
+    assert upload_calls == []
+    assert strategy["ok"] is False
+    assert all(item["recommended_fps"] == 5.0 for item in strategy["chunks"])
+    assert any(stage == "overview_strategy_decided" for stage, _ in progress)
+    log_path = tmp / "strategy-too-long-runtime" / "logs" / "video-strategy-events.jsonl"
+    assert log_path.exists()
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "overview_strategy_skipped_frame_budget" in log_text
+    assert "response_id" not in log_text
+
+
 def test_strategy_log_redacts_sensitive_values(tmp: Path) -> None:
     import sys
 
@@ -1410,6 +1468,8 @@ def test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp: Path) 
     chunk_path.write_bytes(b"fake")
     plan = [{"part_index": 1, "start_sec": 0.0, "end_sec": 120.0, "overlap_sec": 0.0}]
     saves = []
+    stream_previous = []
+    synth_previous = []
 
     async def fake_upload(client, path, *, fps, model):
         return SimpleNamespace(id="file-part-001")
@@ -1418,6 +1478,7 @@ def test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp: Path) 
         return SimpleNamespace(status="active")
 
     async def fake_stream(client, *, model, file_id, prompt, on_progress, previous_response_id=None, timeout_sec=None):
+        stream_previous.append(previous_response_id)
         return analyzer.ResponseCallResult(
             text="分片分析",
             usage={"total_tokens": 1},
@@ -1425,6 +1486,7 @@ def test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp: Path) 
         )
 
     async def fake_text(client, *, model, prompt, on_progress, previous_response_id=None, timeout_sec=None):
+        synth_previous.append(previous_response_id)
         return analyzer.ResponseCallResult(
             text="最终汇总",
             usage={"total_tokens": 1},
@@ -1474,8 +1536,12 @@ def test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp: Path) 
         analyzer.save_response_memory = old_save
 
     assert results["knowledge_ingest"].response_id == "resp-old"
+    assert stream_previous == [None]
+    assert synth_previous == ["resp-old"]
     assert saves and saves[0]["response_id"] is None
     assert saves[0]["file_id"] == "file-part-001"
+    assert saves[0]["flow_version"] == "chunked-v1"
+    assert saves[0]["chunked"] is True
 
 
 def test_websocket_config_writer_rejects_agent_plan_payload_key(tmp: Path) -> None:
@@ -1534,6 +1600,17 @@ def test_websocket_config_writer_rejects_invalid_explicit_endpoints(tmp: Path) -
                 "vaultPath": str(vault),
             },
             "HTTPS",
+        ),
+        (
+            {
+                "llm": {
+                    "provider": "doubao",
+                    "apiKey": "test-key",
+                    "endpoint": "https://evil.example.invalid/api/v3",
+                },
+                "vaultPath": str(vault),
+            },
+            "可信 Ark 官方域名",
         ),
         (
             {
@@ -1891,6 +1968,19 @@ def test_analyzer_rejects_agent_plan_endpoint(tmp: Path) -> None:
     else:
         raise AssertionError("non-HTTPS endpoint must be rejected")
 
+    try:
+        asyncio.run(analyzer.analyze_video(
+            video,
+            "prompt",
+            api_key="key",
+            endpoint="https://evil.example.invalid/api/v3",
+            model="doubao-seed-2-0-lite-260428",
+        ))
+    except analyzer.AnalyzerError as e:
+        assert "可信 Ark 官方域名" in str(e)
+    else:
+        raise AssertionError("untrusted endpoint host must be rejected")
+
 
 def test_analyzer_rejects_invalid_image_endpoint(tmp: Path) -> None:
     import asyncio
@@ -1904,6 +1994,7 @@ def test_analyzer_rejects_invalid_image_endpoint(tmp: Path) -> None:
     invalid_cases = [
         ("https://ark.cn-beijing.volces.com/api/plan/v3", "Agent Plan 不再作为运行通道"),
         ("http://evil.example.invalid/api/v3", "HTTPS"),
+        ("https://evil.example.invalid/api/v3", "可信 Ark 官方域名"),
         ("https://user:pass@ark.cn-beijing.volces.com/api/v3", "账号密码"),
     ]
     for endpoint, expected in invalid_cases:
@@ -2077,6 +2168,17 @@ def test_model_health_check_redacts_secret(tmp: Path) -> None:
             assert "HTTPS" in str(exc)
         else:
             raise AssertionError("invalid endpoint must be rejected")
+        try:
+            server._check_model_health_sync({
+                "provider": "doubao",
+                "apiKey": "secret-health-key",
+                "model": "doubao-seed-2-0-lite-260428",
+                "endpoint": "https://evil.example.invalid/api/v3",
+            })
+        except ValueError as exc:
+            assert "可信 Ark 官方域名" in str(exc)
+        else:
+            raise AssertionError("untrusted endpoint host must be rejected")
     finally:
         websocket_server.urllib.request.urlopen = old_urlopen
 
@@ -2153,7 +2255,7 @@ def test_websocket_accepts_task_request(tmp: Path) -> None:
     asyncio.run(server.handle_message(socket, {
         "type": "task_request",
         "requestId": "req-1",
-        "source": "extension_inline_button",
+        "source": "extension_popup",
         "taskType": "douyin_ingest",
         "ingest_intents": ["knowledge_ingest", "viral_breakdown"],
         "url": "https://www.douyin.com/video/7390000000000000000",
@@ -2175,7 +2277,7 @@ def test_websocket_accepts_task_request(tmp: Path) -> None:
     assert status_file.exists()
     status = json.loads(status_file.read_text(encoding="utf-8"))
     assert status["stage"] == "queued"
-    assert status["source"] == "extension_inline_button"
+    assert status["source"] == "extension_popup"
     assert status["ingest_intent"] == "knowledge_ingest"
     assert status["ingest_intents"] == ["knowledge_ingest", "viral_breakdown"]
 
@@ -2230,6 +2332,7 @@ def main() -> int:
         test_long_video_strategy_validation_falls_back_to_5fps()
         test_long_video_strategy_missing_required_fields_requests_repair()
         test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp)
+        test_prepare_long_video_strategy_skips_unsafe_full_overview(tmp)
         test_strategy_log_redacts_sensitive_values(tmp)
         test_chunk_analysis_uses_strategy_fps_and_context(tmp)
         test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp)

@@ -163,7 +163,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 {
   "type": "task_request",
   "requestId": "1700000000000-abcd",
-  "source": "extension_inline_button",
+  "source": "extension_popup",
   "taskType": "douyin_ingest",
   "ingest_intent": "knowledge_ingest",
   "ingest_intents": ["knowledge_ingest", "viral_breakdown"],

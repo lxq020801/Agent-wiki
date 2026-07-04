@@ -49,8 +49,10 @@ The WebSocket control server writes:
    - `knowledge_ingest` -> `知识资产/知识入库/` with `asset_family: knowledge_asset`
    - `viral_breakdown` -> `知识资产/创作模式/` with `asset_family: creative_pattern`
    It then updates `index.md` and commits only the files touched by this ingest.
-   If a task contains both intents, the video path downloads once and ordinary
-   Ark reuses one active `file_id` for both prompt runs.
+   If a task contains both intents, the source downloads once. Non-long videos
+   reuse one active `file_id` for both prompt runs; long videos reuse one
+   download but create separate overview/chunk `file_id`s for the strategy and
+   chunk analysis chain.
 
 `--task` is used by the WebSocket task queue and remains useful for debugging.
 
@@ -77,15 +79,18 @@ The WebSocket control server writes:
 - Responses memory is short-term only. Store returned `response_id` under
   `~/.obsidian-librarian/responses-memory/` for 3 days; never write it into
   vault Markdown, task status, or strategy logs.
-- Videos longer than 10 minutes first run a full-video `1fps` overview with
-  the strategy model (`models.strategy`, default mini). The overview extracts
-  rough content and a per-chunk strategy, then 240s chunks with 10s overlap are
+- Videos longer than 10 minutes first run a full-video overview at dynamic fps,
+  capped at `1fps` and lowered against the 1250-frame safety target, with the
+  strategy model (`models.strategy`, default mini). If even the official minimum
+  `0.2fps` would exceed the safety target, skip the overview, log the reason,
+  and fall back to conservative `5fps` chunks. The overview extracts rough
+  content and a per-chunk strategy, then 240s chunks with 10s overlap are
   uploaded/analyzed independently at `2-5fps` by the main analyzer model with
-  2-way concurrency. Invalid JSON, missing segments, or missing required fields
-  may be repaired once by the same strategy model via `previous_response_id`;
-  missing evidence, low confidence, or high low-fps risk must fall back
-  conservatively toward `5fps`. Text-only Responses then synthesizes the final
-  asset body from the overview and chunk results.
+  default 2-way concurrency, configurable from 1 to 4. Invalid JSON, missing
+  segments, or missing required fields may be repaired once by the same strategy
+  model via `previous_response_id`; missing evidence, low confidence, or high
+  low-fps risk must fall back conservatively toward `5fps`. Text-only Responses
+  then synthesizes the final asset body from the overview and chunk results.
 - Strategy fallbacks and JSON repair results are logged to
   `~/.obsidian-librarian/logs/video-strategy-events.jsonl` without API keys,
   Cookies, Bearer tokens, or `response_id`.

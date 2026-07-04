@@ -18,7 +18,7 @@ analyzer.py — 火山方舟视频拆解
   ⑤ Files API 默认托管空间支持 ≤512MB；超过 512MB P0 直接失败
   ⑥ file_id 模式必须等 file.status == "active" 才能分析
   ⑦ file_id 模式同一视频换 quality 必须重新上传
-  ⑧ 超 10 分钟先 1fps 全片概览规划，再按 240s 分片用 2-5fps 精拆
+  ⑧ 超 10 分钟先做最高 1fps 的动态全片概览规划，再按 240s 分片用 2-5fps 精拆
 
 公共契约：
     analyze_video(video_path, prompt, *, config, quality="quality",
@@ -213,6 +213,7 @@ _FRAMES_SAFE_TARGET = 1250
 # fps 取值范围（火山官方文档）
 _FPS_MIN = 0.2
 _FPS_MAX = 5.0
+_TRUSTED_ARK_HOSTS = {"ark.cn-beijing.volces.com"}
 
 
 def calc_fps(
@@ -324,12 +325,24 @@ def _response_memory_dir() -> Path:
     return _runtime_root() / "responses-memory"
 
 
-def _memory_key(*, media_type: str, source_id: str, ingest_intent: str, model: str) -> str:
+def _memory_key(
+    *,
+    media_type: str,
+    source_id: str,
+    ingest_intent: str,
+    model: str,
+    prompt_hash: str = "",
+    flow_version: str = "responses-v1",
+    chunked: bool = False,
+) -> str:
     raw = json.dumps({
         "media_type": media_type,
         "source_id": source_id,
         "ingest_intent": ingest_intent,
         "model": model,
+        "prompt_hash": prompt_hash,
+        "flow_version": flow_version,
+        "chunked": bool(chunked),
     }, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -344,6 +357,9 @@ def load_response_memory(
     source_id: str,
     ingest_intent: str,
     model: str,
+    prompt_hash: str = "",
+    flow_version: str = "responses-v1",
+    chunked: bool = False,
     ttl_sec: int = _RESPONSE_MEMORY_TTL_SEC,
 ) -> dict[str, Any] | None:
     key = _memory_key(
@@ -351,13 +367,20 @@ def load_response_memory(
         source_id=source_id,
         ingest_intent=ingest_intent,
         model=model,
+        prompt_hash=prompt_hash,
+        flow_version=flow_version,
+        chunked=chunked,
     )
     path = _memory_path(key)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
-    except Exception:
+    except Exception as e:
+        _write_strategy_log("response_memory_load_failed", {
+            "path": str(path),
+            "error": str(e),
+        })
         return None
     response_id = payload.get("response_id")
     updated_at = float(payload.get("updated_at") or 0)
@@ -373,6 +396,8 @@ def save_response_memory(
     ingest_intent: str,
     model: str,
     response_id: Optional[str],
+    prompt_hash: str = "",
+    flow_version: str = "responses-v1",
     file_id: str = "",
     chunked: bool = False,
 ) -> None:
@@ -383,6 +408,9 @@ def save_response_memory(
         source_id=source_id,
         ingest_intent=ingest_intent,
         model=model,
+        prompt_hash=prompt_hash,
+        flow_version=flow_version,
+        chunked=chunked,
     )
     directory = _response_memory_dir()
     directory.mkdir(parents=True, exist_ok=True)
@@ -392,6 +420,8 @@ def save_response_memory(
         "source_id": source_id,
         "ingest_intent": ingest_intent,
         "model": model,
+        "prompt_hash": prompt_hash,
+        "flow_version": flow_version,
         "response_id": response_id,
         "file_id": file_id,
         "chunked": bool(chunked),
@@ -446,6 +476,22 @@ def _chunk_plan(duration_sec: float) -> list[dict[str, float | int]]:
         start += stride
         index += 1
     return plan
+
+
+def _prompt_hash(prompt: str) -> str:
+    return hashlib.sha256(str(prompt or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _long_overview_fps(duration_sec: float) -> float:
+    if duration_sec <= 0:
+        return _LONG_OVERVIEW_FPS
+    raw = min(_LONG_OVERVIEW_FPS, _FRAMES_SAFE_TARGET / duration_sec)
+    fps = math.floor(max(_FPS_MIN, raw) * 100) / 100.0
+    return max(_FPS_MIN, min(_LONG_OVERVIEW_FPS, fps))
+
+
+def _long_overview_exceeds_safe_target(duration_sec: float) -> bool:
+    return duration_sec > 0 and duration_sec * _FPS_MIN > _FRAMES_SAFE_TARGET
 
 
 def should_chunk_video(duration_sec: float) -> bool:
@@ -997,6 +1043,8 @@ def _validate_ark_endpoint(endpoint: str) -> str:
         raise AnalyzerError("Ark endpoint 必须是有效的 HTTPS 地址")
     if parsed.username or parsed.password:
         raise AnalyzerError("Ark endpoint 不能包含账号密码")
+    if parsed.hostname.lower() not in _TRUSTED_ARK_HOSTS:
+        raise AnalyzerError("Ark endpoint 必须使用可信 Ark 官方域名")
     if _is_agent_plan_endpoint(normalized):
         raise AnalyzerError("Agent Plan 不再作为运行通道；请使用普通豆包 Ark API endpoint")
     return normalized
@@ -1559,11 +1607,15 @@ async def analyze_video_many(
     # 6. 用同一个 file_id 按多个 prompt 顺序拆解
     results: dict[str, AnalyzeResult] = {}
     for intent, prompt in prompts.items():
+        prompt_hash = _prompt_hash(prompt)
         memory = load_response_memory(
             media_type="douyin_video",
             source_id=memory_source_id,
             ingest_intent=intent,
             model=model,
+            prompt_hash=prompt_hash,
+            flow_version="single-v1",
+            chunked=False,
         )
         previous_response_id = memory.get("response_id") if memory else None
         await _call_progress(on_progress, "analyzing", {
@@ -1586,6 +1638,8 @@ async def analyze_video_many(
             source_id=memory_source_id,
             ingest_intent=intent,
             model=model,
+            prompt_hash=prompt_hash,
+            flow_version="single-v1",
             response_id=call.response_id,
             file_id=file_id,
             chunked=False,
@@ -1621,22 +1675,53 @@ async def _prepare_long_video_strategy(
     response_timeout_sec: int,
     on_progress: ProgressCb,
 ) -> dict[str, Any]:
-    """Run a 1fps full-video overview and return a validated per-chunk strategy."""
+    """Run a dynamic-fps full-video overview and return a validated per-chunk strategy."""
+    overview_duration = float(chunk_plan[-1]["end_sec"]) if chunk_plan else 0.0
+    if _long_overview_exceeds_safe_target(overview_duration):
+        min_frames = int(math.ceil(overview_duration * _FPS_MIN))
+        reason = (
+            f"长视频 {overview_duration:.0f}s 即使用官方最低 {_FPS_MIN:g}fps 概览也会达到 "
+            f"{min_frames} 帧，超过 {_FRAMES_SAFE_TARGET} 安全目标，跳过全片概览并按 5fps 分片兜底"
+        )
+        strategy = _strategy_fallback(chunk_plan, reason=reason)
+        _write_strategy_log("overview_strategy_skipped_frame_budget", {
+            "source_id": source_id,
+            "strategy_model": strategy_model,
+            "analysis_model": model,
+            "duration_sec": overview_duration,
+            "min_fps": _FPS_MIN,
+            "estimated_frames": min_frames,
+            "safe_target": _FRAMES_SAFE_TARGET,
+            "fallback": "fallback_to_5fps",
+        })
+        await _call_progress(on_progress, "overview_strategy_decided", {
+            "ok": False,
+            "fallback_reason": reason,
+            "model": strategy_model,
+            "chunk_count": len(chunk_plan),
+            "fps_plan": [
+                {"part_index": item["part_index"], "fps": _LONG_CHUNK_FPS_MAX}
+                for item in chunk_plan
+            ],
+        })
+        return strategy
+
+    overview_fps = _long_overview_fps(overview_duration)
     await _call_progress(on_progress, "overview_uploading", {
-        "fps": _LONG_OVERVIEW_FPS,
+        "fps": overview_fps,
         "chunk_count": len(chunk_plan),
         "model": strategy_model,
     })
     try:
         file_obj = await _upload_with_preprocess(
-            files_client, video_path, fps=_LONG_OVERVIEW_FPS, model=strategy_model
+            files_client, video_path, fps=overview_fps, model=strategy_model
         )
         file_id = getattr(file_obj, "id", None) or getattr(file_obj, "file_id", None)
         if not file_id:
             raise APIError(f"Files API 概览上传返回缺 id: {file_obj!r}")
         await _call_progress(on_progress, "overview_uploaded", {
             "file_id": file_id,
-            "fps": _LONG_OVERVIEW_FPS,
+            "fps": overview_fps,
         })
         await _wait_for_active(
             files_client,
@@ -1645,14 +1730,14 @@ async def _prepare_long_video_strategy(
             on_progress=on_progress,
         )
         overview_prompt = _build_long_overview_prompt(
-            duration_sec=float(chunk_plan[-1]["end_sec"]),
+            duration_sec=overview_duration,
             chunk_plan=chunk_plan,
             intents=intents,
         )
         await _call_progress(on_progress, "analyzing_overview", {
             "file_id": file_id,
             "model": strategy_model,
-            "fps": _LONG_OVERVIEW_FPS,
+            "fps": overview_fps,
         })
         call = _as_response_call_result(await _stream_responses(
             responses_client,
@@ -1803,17 +1888,7 @@ async def _analyze_video_chunks(
     """Analyze fixed video chunks and return one aggregated result per intent."""
     per_intent_texts: dict[str, list[tuple[int, str]]] = {intent: [] for intent in prompts}
     per_intent_usages: dict[str, list[dict[str, Any]]] = {intent: [] for intent in prompts}
-    previous_memory_response: dict[str, Optional[str]] = {
-        intent: (
-            (load_response_memory(
-                media_type="douyin_video",
-                source_id=source_id,
-                ingest_intent=intent,
-                model=model,
-            ) or {}).get("response_id")
-        )
-        for intent in prompts
-    }
+    previous_memory_response: dict[str, Optional[str]] = {}
     per_intent_chunks: dict[str, list[dict[str, Any]]] = {intent: [] for intent in prompts}
     total = len(chunk_paths)
     raw_strategy_chunks = (strategy or {}).get("chunks", [])
@@ -1870,7 +1945,6 @@ async def _analyze_video_chunks(
         )
 
         for intent, prompt in prompts.items():
-            previous_response_id = previous_memory_response.get(intent)
             strategy_context = _chunk_strategy_context(strategy, part_index)
             chunk_prompt = f"{prompt}\n\n"
             if overview_context:
@@ -1892,7 +1966,7 @@ async def _analyze_video_chunks(
                 "model": model,
                 "intent": intent,
                 "concurrency": chunk_concurrency,
-                "has_previous_response": bool(previous_response_id),
+                "has_previous_response": False,
             })
             call = _as_response_call_result(await _stream_responses(
                 responses_client,
@@ -1901,7 +1975,6 @@ async def _analyze_video_chunks(
                 prompt=chunk_prompt,
                 on_progress=on_progress,
                 timeout_sec=response_timeout_sec,
-                previous_response_id=previous_response_id,
             ))
             if not call.text.strip():
                 raise APIError(f"Responses API 未返回可写入的分片分析文本: {intent} part={part_index}")
@@ -1949,6 +2022,17 @@ async def _analyze_video_chunks(
 
     results: dict[str, AnalyzeResult] = {}
     for intent in prompts:
+        prompt_hash = _prompt_hash(prompts[intent])
+        memory = load_response_memory(
+            media_type="douyin_video",
+            source_id=source_id,
+            ingest_intent=intent,
+            model=model,
+            prompt_hash=prompt_hash,
+            flow_version="chunked-v1",
+            chunked=True,
+        )
+        previous_memory_response[intent] = memory.get("response_id") if memory else None
         ordered_texts = [
             text
             for _, text in sorted(per_intent_texts[intent], key=lambda item: item[0])
@@ -1965,7 +2049,7 @@ async def _analyze_video_chunks(
             "下面是同一个长视频按时间切片得到的多段拆解结果。"
             "请合并成一份可直接写入 Obsidian 的最终资产正文：去重重叠片段，"
             "保留时间顺序、关键细节、结论和不确定点，不要提到内部 file_id 或 response_id。\n\n"
-            f"全片 1fps 概览与策略：\n{overview_context or '无'}\n\n"
+            f"全片低 fps 概览与策略：\n{overview_context or '无'}\n\n"
             f"原始分析指令：\n{prompts[intent]}\n\n"
             f"分片结果：\n{body}"
         )
@@ -1988,6 +2072,8 @@ async def _analyze_video_chunks(
             source_id=source_id,
             ingest_intent=intent,
             model=model,
+            prompt_hash=prompt_hash,
+            flow_version="chunked-v1",
             response_id=synth.response_id,
             file_id=representative_file_id,
             chunked=True,

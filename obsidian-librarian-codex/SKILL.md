@@ -47,7 +47,7 @@ obsidian-librarian 是一个 Agent 驱动的个人知识资产系统。它把外
 
 ## 当前标准工作流
 
-当用户在 Agent 会话里发来抖音链接时，默认按“知识入库”路径走；当用户明确要求爆款拆解，或扩展提交 `ingest_intent = viral_breakdown` 时，走“创作模式”路径。扩展里的“完整入库”不是第三类资产，而是一次任务同时提交 `ingest_intents = [knowledge_ingest, viral_breakdown]`，同一来源生成两份资产。
+当用户在 Agent 会话里发来抖音链接时，默认按“知识入库”路径走；当用户明确要求爆款拆解，或扩展提交 `ingest_intent = viral_breakdown` 时，走“创作模式”路径。协议层仍支持 `ingest_intents = [knowledge_ingest, viral_breakdown]`，用于同一来源生成两份资产；当前扩展首页只暴露“知识入库”和“爆款拆解”两个入口，不把“完整入库”作为主按钮。
 
 1. 先跑 `python3 install/bootstrap.py`
 2. 如果发现缺 `API Key` 或 `Cookie`，不要让用户把秘密贴进聊天；只提示去扩展里补

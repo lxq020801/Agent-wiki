@@ -48,6 +48,7 @@ def default_config_path() -> Path:
 DEFAULT_CONFIG_PATH = default_config_path()
 DEFAULT_PROVIDER = "doubao"
 DEFAULT_DOUBAO_ENDPOINT = "https://ark.cn-beijing.volces.com/api/v3"
+TRUSTED_ARK_HOSTS = {"ark.cn-beijing.volces.com"}
 
 
 def _normalize_provider(value: object) -> str:
@@ -80,6 +81,8 @@ def _validate_ark_endpoint(value: object) -> str:
         raise ConfigError("Ark endpoint 必须是有效的 HTTPS 地址")
     if parsed.username or parsed.password:
         raise ConfigError("Ark endpoint 不能包含账号密码")
+    if parsed.hostname.lower() not in TRUSTED_ARK_HOSTS:
+        raise ConfigError("Ark endpoint 必须使用可信 Ark 官方域名")
     if endpoint.endswith("/api/plan/v3"):
         raise ConfigError("Agent Plan endpoint 不能作为普通 Ark API 使用")
     return endpoint

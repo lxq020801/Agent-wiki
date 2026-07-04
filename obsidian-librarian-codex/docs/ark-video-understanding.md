@@ -22,7 +22,7 @@
 
 - Agent 模型：不在本工具内部配置。它读取 Harness/Skill，决定何时调用工具、如何维护知识库、是否做旧笔记去重或相似判断。
 - 主分析模型：默认 `doubao-seed-2-0-lite-260428`，负责正式视频精拆、最终汇总、标题/摘要/标签候选和派生任务线索。
-- 策略模型：默认 `doubao-seed-2-0-mini-260428`，只负责长视频 `1fps` 概览、分段 fps 决策和策略 JSON 修复。
+- 策略模型：默认 `doubao-seed-2-0-mini-260428`，只负责长视频最高 `1fps` 的动态概览、分段 fps 决策和策略 JSON 修复。
 
 ## fps 和帧数
 
@@ -49,7 +49,8 @@
 
 策略：
 
-- 先上传全片，使用 `1fps` 做概览。
+- 先上传全片，使用最高 `1fps` 的动态 fps 做概览；概览 fps 会按 `1250 / 视频秒数` 下调，但不低于官方最低 `0.2fps`。
+- 如果视频长到 `0.2fps` 也会超过 `1250` 帧安全目标，则跳过全片概览，写入策略日志，并按 `5fps` 分片精拆兜底。
 - 全片概览上传的 `preprocess_configs.video.model` 使用策略模型，Responses 推理也使用策略模型。
 - 概览 prompt 要输出粗内容、粗时间线、重要概念、待确认点，以及每个固定切片的 `2-5fps` 精拆建议。
 - fps 决策不按死板类型判断，而按画面变化、字幕/OCR 密度、操作密度、动作细节、概念密度、低 fps 漏细节风险和置信度评分。
@@ -63,7 +64,7 @@
 
 处理流程：
 
-1. 全片用 `1fps` 走 Files API 上传、等待 active。
+1. 全片用最高 `1fps` 的动态 fps 走 Files API 上传、等待 active；超过概览安全帧数时跳过这一步并进入保守分片。
 2. 策略模型通过 Responses 生成长视频概览和分段精拆策略。
 3. 如果策略 JSON 不能解析、缺少分段或缺必填字段，策略模型用 `previous_response_id` 接上上轮上下文修复一次。
 4. 用 `ffmpeg -c copy` 生成临时 mp4 切片，尽量避免重新编码。
@@ -108,7 +109,7 @@
 - 如果本地存在未过期记忆，传 `previous_response_id`。
 - 记忆默认保存在 `~/.obsidian-librarian/responses-memory/`。
 - 本地记忆默认保存 `3` 天，匹配 Ark Responses 默认存储周期，避免过期后继续复用。
-- key 使用 `media_type + source_id/aweme_id + ingest_intent + model`。
+- key 使用 `media_type + source_id/aweme_id + ingest_intent + model + prompt_hash + flow_version + chunked`。
 - `knowledge_ingest` 和 `viral_breakdown` 分开记忆，避免上下文串味。
 
 边界：

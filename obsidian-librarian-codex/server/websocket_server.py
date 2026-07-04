@@ -144,6 +144,13 @@ TASK_STAGES = {
     "config_error": "配置错误",
     "task_invalid": "任务无效",
 }
+RESPONSE_PHASE_STAGES = {
+    "analyzing",
+    "analyzing_overview",
+    "repairing_overview_strategy",
+    "analyzing_chunk",
+    "synthesizing_chunks",
+}
 
 
 def _simple_config_value(config_path, section, key, default=""):
@@ -305,6 +312,8 @@ def _validate_ark_endpoint(value, provider=None):
         raise ValueError("Endpoint URL 必须是有效的 HTTPS 地址")
     if parsed.username or parsed.password:
         raise ValueError("Endpoint URL 不能包含账号密码")
+    if parsed.hostname.lower() not in TRUSTED_ARK_HOSTS:
+        raise ValueError("Endpoint URL 必须使用可信 Ark 官方域名")
     if _is_agent_plan_endpoint_text(endpoint):
         raise ValueError("Agent Plan endpoint 不能作为普通 Ark API 使用")
     return endpoint
@@ -826,11 +835,14 @@ class LibrarianServer:
                 latest_at = at
         return latest
 
-    def _task_is_in_response_phase(self, task_id):
+    def _task_response_phase_stage(self, task_id):
         status = _json_file(self._task_dirs()['status'] / f'{task_id}.json') or {}
         progress = status.get('progress') if isinstance(status.get('progress'), dict) else {}
         stage = self._latest_progress_stage(progress) or status.get('stage') or ''
-        return stage == 'analyzing'
+        return stage if stage in RESPONSE_PHASE_STAGES else ''
+
+    def _task_is_in_response_phase(self, task_id):
+        return bool(self._task_response_phase_stage(task_id))
 
     def _task_stage_age_sec(self, task_id, stage):
         status = _json_file(self._task_dirs()['status'] / f'{task_id}.json') or {}
@@ -848,11 +860,12 @@ class LibrarianServer:
         timeout_sec = _analysis_response_timeout(self.config_path())
         while proc.returncode is None:
             await asyncio.sleep(5)
-            if not self._task_is_in_response_phase(task_id):
+            stage = self._task_response_phase_stage(task_id)
+            if not stage:
                 continue
-            if self._task_stage_age_sec(task_id, 'analyzing') < timeout_sec:
+            if self._task_stage_age_sec(task_id, stage) < timeout_sec:
                 continue
-            log(f"[Server] 任务分析超时，终止: {task_id} timeout={timeout_sec}s")
+            log(f"[Server] 任务分析超时，终止: {task_id} stage={stage} timeout={timeout_sec}s")
             proc.terminate()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=10)

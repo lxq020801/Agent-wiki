@@ -2,6 +2,7 @@
 // 首页只负责提交拆解任务；设置页负责 API、Cookie、Vault 与拆解偏好。
 
 const WS_URL = 'ws://127.0.0.1:8765';
+const DEBUG_LOGS = false;
 const PROVIDERS = {
   doubao: {
     label: '豆包',
@@ -19,6 +20,7 @@ const DEFAULT_PROVIDER = 'doubao';
 const DEFAULT_MODEL_PRESET = 'lite';
 const DEFAULT_TASK_CONCURRENCY = 2;
 const DEFAULT_CHUNK_CONCURRENCY = 2;
+const TRUSTED_ARK_HOSTS = new Set(['ark.cn-beijing.volces.com']);
 const SETTINGS_DETAIL_TITLES = {
   'agent-settings': 'Agent 连接',
   'api-settings': 'API 设置',
@@ -57,7 +59,10 @@ let previewInputTimer = null;
 let previewRequestSeq = 0;
 let lastPreviewKey = '';
 let lastSettingsTrigger = null;
-let latestTasks = [];
+
+function debugLog(...args) {
+  if (DEBUG_LOGS) console.log(...args);
+}
 
 function normalizeProvider(value) {
   return PROVIDERS[value] ? value : DEFAULT_PROVIDER;
@@ -95,6 +100,9 @@ function normalizeEndpoint(value, provider) {
     const url = new URL(endpoint);
     if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) {
       return { ok: false, endpoint, message: 'Endpoint 必须是有效 HTTPS 地址，且不能包含账号密码' };
+    }
+    if (!TRUSTED_ARK_HOSTS.has(url.hostname.toLowerCase())) {
+      return { ok: false, endpoint, message: 'Endpoint 必须使用可信 Ark 官方域名' };
     }
     if (endpoint.endsWith('/api/plan/v3')) {
       return { ok: false, endpoint, message: 'Agent Plan endpoint 不能作为普通 Ark API 使用' };
@@ -340,18 +348,18 @@ function handleAgentMessage(msg) {
       applyModelStatus(msg.status || {});
       break;
     case 'task_rejected':
-      showHint('tasks-hint', msg.message || '任务提交失败', 'warning', { persist: true });
+      showHint('ingest-hint', msg.message || '任务提交失败', 'warning', { persist: true });
       requestTaskStatus();
       break;
     case 'task_accepted':
-      showHint('tasks-hint', msg.message || '任务已进入队列', 'success');
+      showHint('ingest-hint', msg.message || '任务已进入队列', 'success');
       requestTaskStatus();
       break;
     case 'error':
       showHint('config-hint', msg.message || msg.error || 'Agent 返回错误', 'error', { persist: true });
       break;
     default:
-      console.log('[Librarian] 未知消息类型:', msg.type);
+      debugLog('[Librarian] 未知消息类型:', msg.type);
   }
 }
 
@@ -430,7 +438,6 @@ function applyCookieStatus(status) {
 
 function applyTaskStatus(snapshot) {
   const items = Array.isArray(snapshot.items) ? snapshot.items : [];
-  latestTasks = items;
   const running = Number(snapshot.running || 0);
   const failed = Number(snapshot.failed || 0);
   const done = Number(snapshot.done || 0);
@@ -452,7 +459,6 @@ function applyTaskStatus(snapshot) {
   } else {
     setStatus('tasks', '暂无任务', isAgentConnected ? 'online' : 'offline');
   }
-  renderTaskList('task-list', items.slice(0, 3));
   renderTaskList('settings-task-list', items);
 }
 
@@ -521,9 +527,7 @@ function taskMetaText(task) {
   const intent = task.ingestIntents?.length > 1
     ? '完整入库'
     : (INGEST_INTENT_LABELS[task.ingestIntent] || '');
-  const source = task.source === 'extension_inline_button' ? '页面按钮' :
-    task.source === 'extension_context_menu' ? '右键菜单' :
-      task.source === 'extension_popup' ? '扩展' : 'Agent';
+  const source = task.source === 'extension_popup' ? '扩展' : 'Agent';
   return [stage, elapsed, intent, source].filter(Boolean).join(' · ');
 }
 
@@ -830,11 +834,11 @@ async function handleProviderChange() {
   await saveApiConfig();
 }
 
-async function submitDouyinIngestFromPopup(ingestIntent, { useCurrent = false } = {}) {
+async function submitDouyinIngestFromPopup(ingestIntent) {
   const shareInput = document.getElementById('douyin-share-text');
-  const shareText = useCurrent ? '' : (shareInput?.value.trim() || '');
+  const shareText = shareInput?.value.trim() || '';
   const label = INGEST_INTENT_LABELS[ingestIntent] || '入库';
-  const hintId = useCurrent ? 'current-ingest-hint' : 'ingest-hint';
+  const hintId = 'ingest-hint';
   const buttons = [
     'share-knowledge', 'share-viral'
   ].map(id => document.getElementById(id)).filter(Boolean);

@@ -358,11 +358,8 @@ class DouyinWebCrawler:
         """
         global config
         service = "douyin"
-        print('DouyinWebCrawler before update', config["TokenManager"][service]["headers"]["Cookie"])
-        print('DouyinWebCrawler to update', cookie)
         # 1. 更新内存中的配置（立即生效）
         config["TokenManager"][service]["headers"]["Cookie"] = cookie
-        print('DouyinWebCrawler cookie updated', config["TokenManager"][service]["headers"]["Cookie"])
         # 2. 写入配置文件（持久化）
         config_path = f"{path}/config.yaml"
         with open(config_path, 'w', encoding='utf-8') as file:
