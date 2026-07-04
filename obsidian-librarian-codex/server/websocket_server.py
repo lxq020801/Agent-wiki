@@ -94,6 +94,8 @@ TASK_STAGES = {
     "overview_uploading": "上传全片概览",
     "overview_uploaded": "全片概览上传完成",
     "analyzing_overview": "分析全片概览",
+    "repairing_overview_strategy": "修复精拆策略",
+    "overview_strategy_repaired": "精拆策略已修复",
     "overview_strategy_decided": "决定精拆策略",
     "chunk_uploading": "上传切片",
     "chunk_uploaded": "切片上传完成",
@@ -808,6 +810,8 @@ class LibrarianServer:
             'overview_uploading': 49,
             'overview_uploaded': 55,
             'analyzing_overview': 72,
+            'repairing_overview_strategy': 73,
+            'overview_strategy_repaired': 74,
             'overview_strategy_decided': 74,
             'chunk_uploading': 76,
             'chunk_uploaded': 78,
@@ -921,6 +925,12 @@ class LibrarianServer:
             'analyzer_fallback',
             _provider_default(provider, 'fallback'),
         )
+        existing_strategy = _simple_config_value(
+            config_path,
+            'models',
+            'strategy',
+            _provider_default(provider, 'fallback'),
+        )
         existing_vault_path = _simple_config_value(config_path, 'vault', 'path')
 
         incoming_vault = config_data.get('vaultPath') or config_data.get('vault_path') or ''
@@ -954,6 +964,9 @@ class LibrarianServer:
         fallback_model = None if legacy_agent_plan_payload else config_data.get('fallbackModel')
         if not fallback_model:
             fallback_model = existing_fallback if provider == previous_provider else _provider_default(provider, 'fallback')
+        strategy_model = None if legacy_agent_plan_payload else config_data.get('strategyModel')
+        if not strategy_model:
+            strategy_model = existing_strategy if provider == previous_provider else _provider_default(provider, 'fallback')
 
         previous_active_key = _provider_api_key(config_path, previous_provider)
         if legacy_agent_plan_payload:
@@ -984,6 +997,7 @@ active = "{_toml_escape(provider)}"
 
 [models]
 analyzer = "{_toml_escape(model)}"
+strategy = "{_toml_escape(strategy_model)}"
 analyzer_fallback = "{_toml_escape(fallback_model)}"
 
 [analysis]

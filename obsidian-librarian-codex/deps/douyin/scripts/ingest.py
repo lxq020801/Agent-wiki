@@ -936,6 +936,7 @@ async def run_task(
             api_key=config.ark_api_key,
             endpoint=config.ark_endpoint,
             model=config.analyzer_model,
+            strategy_model=config.strategy_model,
             file_api_key=config.files_api_key,
             file_endpoint=config.files_endpoint,
             quality=quality,

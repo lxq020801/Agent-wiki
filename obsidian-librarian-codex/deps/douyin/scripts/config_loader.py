@@ -10,7 +10,7 @@ config_loader.py — 读取并校验 ~/.obsidian-librarian/config.toml
     load_config(path=None) -> Config
     Config.provider
     Config.ark_api_key / .ark_endpoint  # 普通豆包 Ark 凭据/端点
-    Config.analyzer_model / .analyzer_fallback
+    Config.analyzer_model / .analyzer_fallback / .strategy_model
     Config.quality_params(quality) -> dict
     Config.vault_path / .vault_relative_root
     Config.cookie_path
@@ -80,6 +80,7 @@ class Config:
     # models
     analyzer_model: str
     analyzer_fallback: str
+    strategy_model: str
     # analysis
     default_quality: str
     balanced_target_frames: int
@@ -213,6 +214,12 @@ def load_config(path: Optional[Path] = None) -> Config:
         "analyzer_fallback",
         default="doubao-seed-2-0-mini-260428",
     )
+    strategy_model = _get(
+        data,
+        "models",
+        "strategy",
+        default=analyzer_fallback or "doubao-seed-2-0-mini-260428",
+    )
 
     # analysis
     configured_quality = _get(data, "analysis", "default_quality", default="quality")
@@ -281,6 +288,7 @@ def load_config(path: Optional[Path] = None) -> Config:
         ark_endpoint=ark_endpoint,
         analyzer_model=analyzer_model,
         analyzer_fallback=analyzer_fallback,
+        strategy_model=strategy_model,
         default_quality=default_quality,
         balanced_target_frames=balanced_target_frames,
         quality_target_frames=quality_target_frames,
@@ -322,7 +330,9 @@ endpoint = "https://ark.cn-beijing.volces.com/api/v3"
 [models]
 # 拆解模型（豆包 Seed 2.0 Lite，复刻信息量最强）
 analyzer = "doubao-seed-2-0-lite-260428"
-# 备用模型（Mini，成本最低）
+# 长视频概览与分段策略模型（Mini，成本低；只做粗看、决策和 JSON 修复）
+strategy = "doubao-seed-2-0-mini-260428"
+# 备用模型（Mini，保留兼容字段）
 analyzer_fallback = "doubao-seed-2-0-mini-260428"
 
 [analysis]

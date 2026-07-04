@@ -274,9 +274,32 @@ _CHUNK_OVERLAP_SEC = 10.0
 _LONG_OVERVIEW_FPS = 1.0
 _LONG_CHUNK_FPS_MIN = 2.0
 _LONG_CHUNK_FPS_MAX = 5.0
+_CHUNK_ANALYSIS_CONCURRENCY = 2
 _LONG_STRATEGY_CONFIDENCE_MIN = 0.65
 _LONG_STRATEGY_LOW_FPS_CONFIDENCE_MIN = 0.78
-_RESPONSE_MEMORY_TTL_SEC = 7 * 24 * 60 * 60
+_RESPONSE_MEMORY_TTL_SEC = 3 * 24 * 60 * 60
+_STRATEGY_LOG_NAME = "video-strategy-events.jsonl"
+_STRATEGY_SEGMENT_REQUIRED_FIELDS = (
+    "part_index",
+    "start_sec",
+    "end_sec",
+    "rough_summary",
+    "recommended_fps",
+    "confidence",
+    "scores",
+    "evidence",
+    "focus",
+    "risk_flags",
+    "why_not_lower_fps",
+)
+_STRATEGY_SCORE_REQUIRED_FIELDS = (
+    "visual_change",
+    "ocr_subtitle_density",
+    "operation_density",
+    "motion_detail",
+    "concept_density",
+    "risk_if_low_fps",
+)
 
 
 def _check_size(path: Path) -> int:
@@ -455,6 +478,28 @@ def _build_long_overview_prompt(
     )
 
 
+def _build_strategy_repair_prompt(
+    *,
+    validation_reason: str,
+    chunk_plan: list[dict[str, float | int]],
+    raw_text: str,
+) -> str:
+    return (
+        "你刚才输出的长视频概览与分段策略 JSON 没有通过程序校验。\n"
+        "请只修复格式和缺失字段，不要重新发挥，不要输出 Markdown，"
+        "不要输出 JSON 外的任何文字。\n\n"
+        f"校验失败原因：{validation_reason}\n\n"
+        "必须覆盖这些固定切片：\n"
+        f"{json.dumps(chunk_plan, ensure_ascii=False, indent=2)}\n\n"
+        "每个 segment 必须包含：part_index, start_sec, end_sec, rough_summary, "
+        "recommended_fps, confidence, scores, evidence, focus, risk_flags, "
+        "why_not_lower_fps。\n"
+        "recommended_fps 只能是 2、3、4、5；confidence 是 0-1；scores 内各项是 0-5 整数。\n\n"
+        "原始输出如下：\n"
+        f"{raw_text[:8000]}"
+    )
+
+
 def _extract_json_object(text: str) -> dict[str, Any]:
     """Extract the first JSON object from a model response."""
     raw = (text or "").strip()
@@ -506,6 +551,75 @@ def _string_list(value: Any, *, limit: int = 8) -> list[str]:
     return out
 
 
+def _redact_sensitive_text(text: str) -> str:
+    """Scrub secrets from local diagnostic logs."""
+    cleaned = str(text)
+    replacements = [
+        (r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]"),
+        (
+            r"(?i)[\"']?(api[_-]?key|ark[_-]?api[_-]?key|agent[_-]?plan[_-]?api[_-]?key|"
+            r"arkApiKey|agentPlanApiKey|response[_-]?id|previous[_-]?response[_-]?id|"
+            r"responseId|previousResponseId)[\"']?\s*[:=]\s*"
+            r"(\"[^\"]*\"|'[^']*'|[^,\s}\]\n\r]+)",
+            "sensitive=[REDACTED]",
+        ),
+        (
+            r"(?i)[\"']?(authorization|cookie|set-cookie)[\"']?\s*[:=]\s*[^\n\r]+",
+            "sensitive=[REDACTED]",
+        ),
+        (r"\bresp-[A-Za-z0-9._-]+\b", "resp-[REDACTED]"),
+    ]
+    for pattern, repl in replacements:
+        cleaned = re.sub(pattern, repl, cleaned)
+    return cleaned
+
+
+def _canonical_secret_key(key: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(key).lower())
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    canonical = _canonical_secret_key(key)
+    return canonical in {
+        "authorization",
+        "bearer",
+        "cookie",
+        "setcookie",
+        "responseid",
+        "previousresponseid",
+    } or canonical.endswith("apikey")
+
+
+def _redact_sensitive_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_sensitive_text(value)
+    if isinstance(value, dict):
+        clean: dict[str, Any] = {}
+        for key, child in value.items():
+            if _is_sensitive_key(key):
+                continue
+            else:
+                clean[key] = _redact_sensitive_payload(child)
+        return clean
+    if isinstance(value, list):
+        return [_redact_sensitive_payload(item) for item in value]
+    return value
+
+
+def _missing_strategy_segment_fields(segment: dict[str, Any]) -> list[str]:
+    missing: list[str] = [
+        field for field in _STRATEGY_SEGMENT_REQUIRED_FIELDS
+        if field not in segment
+    ]
+    scores = segment.get("scores")
+    if isinstance(scores, dict):
+        missing.extend(
+            f"scores.{field}" for field in _STRATEGY_SCORE_REQUIRED_FIELDS
+            if field not in scores
+        )
+    return missing
+
+
 def _strategy_fallback(
     chunk_plan: list[dict[str, float | int]],
     *,
@@ -543,6 +657,43 @@ def _strategy_fallback(
         "raw_text": raw_text[:4000],
         "chunks": chunks,
     }
+
+
+def _strategy_needs_json_repair(strategy: dict[str, Any]) -> bool:
+    if not strategy.get("ok"):
+        return True
+    chunks = strategy.get("chunks")
+    if not isinstance(chunks, list) or not chunks:
+        return True
+    for item in chunks:
+        if not isinstance(item, dict):
+            return True
+        reason = str(item.get("fallback_reason") or "")
+        if "概览策略缺少" in reason:
+            return True
+    return False
+
+
+def _write_strategy_log(event: str, payload: dict[str, Any]) -> None:
+    """Append non-sensitive strategy diagnostics for later tuning."""
+    try:
+        log_dir = _runtime_root() / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "event": event,
+            "at": time.time(),
+            **payload,
+        }
+        record = _redact_sensitive_payload(record)
+        # Avoid large raw model output in local logs.
+        if "raw_text" in record:
+            record["raw_text"] = str(record["raw_text"])[:2000]
+        path = log_dir / _STRATEGY_LOG_NAME
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception:
+        # Logging must never break ingest.
+        pass
 
 
 def _normalize_long_video_strategy(
@@ -591,6 +742,7 @@ def _normalize_long_video_strategy(
             )["chunks"][0])
             continue
 
+        missing_fields = _missing_strategy_segment_fields(segment)
         confidence = max(0.0, min(1.0, _to_float(segment.get("confidence"), 0.0)))
         raw_fps = _to_float(segment.get("recommended_fps"), _LONG_CHUNK_FPS_MAX)
         fps = max(_LONG_CHUNK_FPS_MIN, min(_LONG_CHUNK_FPS_MAX, raw_fps))
@@ -610,6 +762,13 @@ def _normalize_long_video_strategy(
         focus = _string_list(segment.get("focus"))
         risk_flags = _string_list(segment.get("risk_flags"))
         fallback_reasons: list[str] = []
+
+        if missing_fields:
+            fallback_reasons.append(
+                "概览策略缺少必填字段: "
+                + ", ".join(missing_fields[:12])
+            )
+            fps = _LONG_CHUNK_FPS_MAX
 
         if confidence < _LONG_STRATEGY_CONFIDENCE_MIN:
             fallback_reasons.append(
@@ -937,6 +1096,8 @@ async def _stream_responses(
             {"type": "input_text", "text": prompt},
         ],
     }]
+    if previous_response_id:
+        await asyncio.sleep(0.12)
 
     def _do_stream() -> tuple[str, dict]:
         chunks: list[str] = []
@@ -997,7 +1158,7 @@ async def _stream_responses(
     await _call_progress(on_progress, "analyzing_done", {
         "text_length": len(text),
         "usage": usage,
-        "response_id": response_id,
+        "response_stored": bool(response_id),
     })
     return ResponseCallResult(text=text, usage=usage, response_id=response_id)
 
@@ -1065,6 +1226,8 @@ async def _call_text_responses(
         "role": "user",
         "content": [{"type": "input_text", "text": prompt}],
     }]
+    if previous_response_id:
+        await asyncio.sleep(0.12)
 
     def _do_call() -> tuple[str, dict, Optional[str]]:
         create_kwargs = {
@@ -1094,7 +1257,7 @@ async def _call_text_responses(
     await _call_progress(on_progress, "synthesizing_done", {
         "text_length": len(text),
         "usage": usage,
-        "response_id": response_id,
+        "response_stored": bool(response_id),
     })
     return ResponseCallResult(text=text, usage=usage, response_id=response_id)
 
@@ -1194,6 +1357,7 @@ async def analyze_video(
     api_key: str,
     endpoint: str,
     model: str,
+    strategy_model: Optional[str] = None,
     file_api_key: Optional[str] = None,
     file_endpoint: Optional[str] = None,
     quality: str = "quality",
@@ -1226,6 +1390,7 @@ async def analyze_video(
         api_key=api_key,
         endpoint=endpoint,
         model=model,
+        strategy_model=strategy_model,
         file_api_key=file_api_key,
         file_endpoint=file_endpoint,
         quality=quality,
@@ -1245,6 +1410,7 @@ async def analyze_video_many(
     api_key: str,
     endpoint: str,
     model: str,
+    strategy_model: Optional[str] = None,
     file_api_key: Optional[str] = None,
     file_endpoint: Optional[str] = None,
     quality: str = "quality",
@@ -1268,6 +1434,7 @@ async def analyze_video_many(
     if not video_path.exists():
         raise AnalyzerError(f"视频文件不存在: {video_path}")
     memory_source_id = str(source_id or video_path.stem)
+    strategy_model = strategy_model or model
 
     # 1. 测时长
     duration = get_duration_sec(video_path)
@@ -1321,8 +1488,10 @@ async def analyze_video_many(
             files_client=files_client,
             responses_client=responses_client,
             model=model,
+            strategy_model=strategy_model,
             file_active_timeout_sec=file_active_timeout_sec,
             response_timeout_sec=response_timeout_sec,
+            source_id=memory_source_id,
             on_progress=on_progress,
         )
         with tempfile.TemporaryDirectory(prefix="obsidian-librarian-chunks-") as tmpdir:
@@ -1428,6 +1597,8 @@ async def _prepare_long_video_strategy(
     files_client: Any,
     responses_client: Any,
     model: str,
+    strategy_model: str,
+    source_id: str,
     file_active_timeout_sec: int,
     response_timeout_sec: int,
     on_progress: ProgressCb,
@@ -1436,10 +1607,11 @@ async def _prepare_long_video_strategy(
     await _call_progress(on_progress, "overview_uploading", {
         "fps": _LONG_OVERVIEW_FPS,
         "chunk_count": len(chunk_plan),
+        "model": strategy_model,
     })
     try:
         file_obj = await _upload_with_preprocess(
-            files_client, video_path, fps=_LONG_OVERVIEW_FPS, model=model
+            files_client, video_path, fps=_LONG_OVERVIEW_FPS, model=strategy_model
         )
         file_id = getattr(file_obj, "id", None) or getattr(file_obj, "file_id", None)
         if not file_id:
@@ -1461,12 +1633,12 @@ async def _prepare_long_video_strategy(
         )
         await _call_progress(on_progress, "analyzing_overview", {
             "file_id": file_id,
-            "model": model,
+            "model": strategy_model,
             "fps": _LONG_OVERVIEW_FPS,
         })
         call = _as_response_call_result(await _stream_responses(
             responses_client,
-            model=model,
+            model=strategy_model,
             file_id=file_id,
             prompt=overview_prompt,
             on_progress=on_progress,
@@ -1475,10 +1647,62 @@ async def _prepare_long_video_strategy(
         if not call.text.strip():
             raise APIError("Responses API 未返回长视频概览策略文本")
         strategy = _normalize_long_video_strategy(call.text, chunk_plan)
+        if _strategy_needs_json_repair(strategy):
+            repair_reason = str(strategy.get("fallback_reason") or "策略字段缺失")
+            _write_strategy_log("overview_strategy_repair_needed", {
+                "source_id": source_id,
+                "strategy_model": strategy_model,
+                "analysis_model": model,
+                "reason": repair_reason,
+                "raw_text": strategy.get("raw_text", call.text),
+            })
+            await _call_progress(on_progress, "repairing_overview_strategy", {
+                "reason": repair_reason,
+                "model": strategy_model,
+            })
+            repair_prompt = _build_strategy_repair_prompt(
+                validation_reason=repair_reason,
+                chunk_plan=chunk_plan,
+                raw_text=call.text,
+            )
+            repair = await _call_text_responses(
+                responses_client,
+                model=strategy_model,
+                prompt=repair_prompt,
+                on_progress=on_progress,
+                previous_response_id=call.response_id,
+                timeout_sec=response_timeout_sec,
+            )
+            repaired_strategy = _normalize_long_video_strategy(repair.text, chunk_plan)
+            if not _strategy_needs_json_repair(repaired_strategy):
+                strategy = repaired_strategy
+                _write_strategy_log("overview_strategy_repaired", {
+                    "source_id": source_id,
+                    "strategy_model": strategy_model,
+                    "analysis_model": model,
+                    "reason": repair_reason,
+                    "usage": repair.usage,
+                })
+                await _call_progress(on_progress, "overview_strategy_repaired", {
+                    "ok": True,
+                    "model": strategy_model,
+                })
+            else:
+                strategy = repaired_strategy
+                _write_strategy_log("overview_strategy_repair_failed", {
+                    "source_id": source_id,
+                    "strategy_model": strategy_model,
+                    "analysis_model": model,
+                    "reason": repaired_strategy.get("fallback_reason", repair_reason),
+                    "raw_text": repaired_strategy.get("raw_text", repair.text),
+                    "usage": repair.usage,
+                    "fallback": "fallback_to_5fps",
+                })
         await _call_progress(on_progress, "overview_strategy_decided", {
             "ok": bool(strategy.get("ok")),
             "fallback_reason": strategy.get("fallback_reason", ""),
             "chunk_count": len(strategy.get("chunks", [])),
+            "model": strategy_model,
             "fps_plan": [
                 {
                     "part_index": item.get("part_index"),
@@ -1489,13 +1713,49 @@ async def _prepare_long_video_strategy(
                 for item in strategy.get("chunks", [])
             ],
         })
+        fallback_chunks = [
+            {
+                "part_index": item.get("part_index"),
+                "fps": item.get("recommended_fps"),
+                "confidence": item.get("confidence"),
+                "reason": item.get("fallback_reason"),
+            }
+            for item in strategy.get("chunks", [])
+            if isinstance(item, dict) and item.get("fallback_applied")
+        ]
+        if fallback_chunks or not strategy.get("ok"):
+            _write_strategy_log("overview_strategy_fallback_applied", {
+                "source_id": source_id,
+                "strategy_model": strategy_model,
+                "analysis_model": model,
+                "ok": bool(strategy.get("ok")),
+                "fallback_reason": strategy.get("fallback_reason", ""),
+                "fallback_chunks": fallback_chunks,
+                "fps_plan": [
+                    {
+                        "part_index": item.get("part_index"),
+                        "fps": item.get("recommended_fps"),
+                        "confidence": item.get("confidence"),
+                    }
+                    for item in strategy.get("chunks", [])
+                    if isinstance(item, dict)
+                ],
+            })
         return strategy
     except Exception as e:
         reason = f"长视频概览策略失败，按 5fps 分片兜底: {e}"
         strategy = _strategy_fallback(chunk_plan, reason=reason)
+        _write_strategy_log("overview_strategy_failed", {
+            "source_id": source_id,
+            "strategy_model": strategy_model,
+            "analysis_model": model,
+            "reason": reason,
+            "fallback": "fallback_to_5fps",
+        })
         await _call_progress(on_progress, "overview_strategy_decided", {
             "ok": False,
             "fallback_reason": reason,
+            "model": strategy_model,
             "chunk_count": len(chunk_plan),
             "fps_plan": [
                 {"part_index": item["part_index"], "fps": _LONG_CHUNK_FPS_MAX}
@@ -1522,9 +1782,9 @@ async def _analyze_video_chunks(
     on_progress: ProgressCb,
 ) -> dict[str, AnalyzeResult]:
     """Analyze fixed video chunks and return one aggregated result per intent."""
-    per_intent_texts: dict[str, list[str]] = {intent: [] for intent in prompts}
+    per_intent_texts: dict[str, list[tuple[int, str]]] = {intent: [] for intent in prompts}
     per_intent_usages: dict[str, list[dict[str, Any]]] = {intent: [] for intent in prompts}
-    per_intent_response: dict[str, Optional[str]] = {
+    previous_memory_response: dict[str, Optional[str]] = {
         intent: (
             (load_response_memory(
                 media_type="douyin_video",
@@ -1536,7 +1796,6 @@ async def _analyze_video_chunks(
         for intent in prompts
     }
     per_intent_chunks: dict[str, list[dict[str, Any]]] = {intent: [] for intent in prompts}
-    first_file_id = ""
     total = len(chunk_paths)
     raw_strategy_chunks = (strategy or {}).get("chunks", [])
     if not isinstance(raw_strategy_chunks, list):
@@ -1547,8 +1806,10 @@ async def _analyze_video_chunks(
         if isinstance(item, dict) and item.get("part_index") is not None
     }
     overview_context = _overview_text_for_prompt(strategy)
+    lock = asyncio.Lock()
+    semaphore = asyncio.Semaphore(_CHUNK_ANALYSIS_CONCURRENCY)
 
-    for chunk_path, plan_item in zip(chunk_paths, chunk_plan):
+    async def process_chunk(chunk_path: Path, plan_item: dict[str, float | int]) -> None:
         part_index = int(plan_item["part_index"])
         chunk_duration = float(plan_item["end_sec"]) - float(plan_item["start_sec"])
         strategy_item = strategy_chunks.get(part_index, {})
@@ -1562,6 +1823,7 @@ async def _analyze_video_chunks(
         await _call_progress(on_progress, "chunk_uploading", {
             "part_index": part_index,
             "chunk_count": total,
+            "concurrency": _CHUNK_ANALYSIS_CONCURRENCY,
             "start_sec": plan_item["start_sec"],
             "end_sec": plan_item["end_sec"],
             "fps": fps,
@@ -1575,8 +1837,6 @@ async def _analyze_video_chunks(
         file_id = getattr(file_obj, "id", None) or getattr(file_obj, "file_id", None)
         if not file_id:
             raise APIError(f"Files API 切片返回缺 id part={part_index}: {file_obj!r}")
-        if not first_file_id:
-            first_file_id = file_id
         await _call_progress(on_progress, "chunk_uploaded", {
             "part_index": part_index,
             "chunk_count": total,
@@ -1590,7 +1850,7 @@ async def _analyze_video_chunks(
         )
 
         for intent, prompt in prompts.items():
-            previous_response_id = per_intent_response.get(intent)
+            previous_response_id = previous_memory_response.get(intent)
             strategy_context = _chunk_strategy_context(strategy, part_index)
             chunk_prompt = f"{prompt}\n\n"
             if overview_context:
@@ -1611,6 +1871,7 @@ async def _analyze_video_chunks(
                 "file_id": file_id,
                 "model": model,
                 "intent": intent,
+                "concurrency": _CHUNK_ANALYSIS_CONCURRENCY,
                 "has_previous_response": bool(previous_response_id),
             })
             call = _as_response_call_result(await _stream_responses(
@@ -1624,14 +1885,12 @@ async def _analyze_video_chunks(
             ))
             if not call.text.strip():
                 raise APIError(f"Responses API 未返回可写入的分片分析文本: {intent} part={part_index}")
-            per_intent_response[intent] = call.response_id or previous_response_id
-            per_intent_usages[intent].append(call.usage)
-            per_intent_texts[intent].append(
+            text_piece = (
                 f"## 分片 {part_index}/{total} "
                 f"({float(plan_item['start_sec']):.1f}s - {float(plan_item['end_sec']):.1f}s)\n\n"
                 f"{call.text.strip()}"
             )
-            per_intent_chunks[intent].append({
+            chunk_meta = {
                 "part_index": part_index,
                 "start_sec": plan_item["start_sec"],
                 "end_sec": plan_item["end_sec"],
@@ -1647,8 +1906,11 @@ async def _analyze_video_chunks(
                 "strategy_fallback_reason": strategy_item.get("fallback_reason"),
                 "strategy_focus": strategy_item.get("focus"),
                 "usage": call.usage,
-                "response_id": call.response_id,
-            })
+            }
+            async with lock:
+                per_intent_usages[intent].append(call.usage)
+                per_intent_texts[intent].append((part_index, text_piece))
+                per_intent_chunks[intent].append(chunk_meta)
             await _call_progress(on_progress, "chunk_done", {
                 "part_index": part_index,
                 "chunk_count": total,
@@ -1656,9 +1918,29 @@ async def _analyze_video_chunks(
                 "text_length": len(call.text),
             })
 
+    async def process_chunk_guarded(chunk_path: Path, plan_item: dict[str, float | int]) -> None:
+        async with semaphore:
+            await process_chunk(chunk_path, plan_item)
+
+    await asyncio.gather(*(
+        process_chunk_guarded(chunk_path, plan_item)
+        for chunk_path, plan_item in zip(chunk_paths, chunk_plan)
+    ))
+
     results: dict[str, AnalyzeResult] = {}
     for intent in prompts:
-        body = "\n\n".join(per_intent_texts[intent]).strip()
+        ordered_texts = [
+            text
+            for _, text in sorted(per_intent_texts[intent], key=lambda item: item[0])
+        ]
+        ordered_chunks = sorted(
+            per_intent_chunks[intent],
+            key=lambda item: int(item.get("part_index", 0)),
+        )
+        representative_file_id = str(
+            (ordered_chunks[0].get("file_id") if ordered_chunks else "") or "chunked"
+        )
+        body = "\n\n".join(ordered_texts).strip()
         synth_prompt = (
             "下面是同一个长视频按时间切片得到的多段拆解结果。"
             "请合并成一份可直接写入 Obsidian 的最终资产正文：去重重叠片段，"
@@ -1676,27 +1958,27 @@ async def _analyze_video_chunks(
             model=model,
             prompt=synth_prompt,
             on_progress=on_progress,
-            previous_response_id=per_intent_response.get(intent),
+            previous_response_id=previous_memory_response.get(intent),
             timeout_sec=response_timeout_sec,
         )
-        final_response_id = synth.response_id or per_intent_response.get(intent)
+        final_response_id = synth.response_id or previous_memory_response.get(intent)
         final_usage = _combine_usage(per_intent_usages[intent] + [synth.usage])
         save_response_memory(
             media_type="douyin_video",
             source_id=source_id,
             ingest_intent=intent,
             model=model,
-            response_id=final_response_id,
-            file_id=first_file_id,
+            response_id=synth.response_id,
+            file_id=representative_file_id,
             chunked=True,
         )
         text = synth.text.strip() or body
         results[intent] = AnalyzeResult(
             text=text,
-            file_id=first_file_id or "chunked",
+            file_id=representative_file_id,
             fps_used=max(
                 float(item.get("fps", _LONG_CHUNK_FPS_MAX))
-                for item in per_intent_chunks[intent]
+                for item in ordered_chunks
             ),
             quality=quality,
             model=model,
@@ -1704,14 +1986,14 @@ async def _analyze_video_chunks(
             target_frames=_FRAMES_SAFE_TARGET,
             actual_frames_estimate=sum(
                 int(item.get("actual_frames_estimate", 0))
-                for item in per_intent_chunks[intent]
+                for item in ordered_chunks
             ),
             usage=final_usage,
             truncated=False,
             response_id=final_response_id,
             chunked=True,
             chunk_count=total,
-            chunks=per_intent_chunks[intent],
+            chunks=ordered_chunks,
         )
     return results
 
@@ -1840,6 +2122,9 @@ def _cli_main() -> int:
         "--model", default="doubao-seed-2-0-lite-260428",
     )
     parser.add_argument(
+        "--strategy-model", default="doubao-seed-2-0-mini-260428",
+    )
+    parser.add_argument(
         "--endpoint", default="https://ark.cn-beijing.volces.com/api/v3",
     )
     args = parser.parse_args()
@@ -1874,6 +2159,7 @@ def _cli_main() -> int:
             api_key=api_key,
             endpoint=args.endpoint,
             model=args.model,
+            strategy_model=args.strategy_model,
             quality=args.quality,
             on_progress=_progress,
         )

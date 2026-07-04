@@ -18,6 +18,12 @@
    - 视频分析请求显式 `store = true`
 5. 保存返回的 `response_id` 到本地短期记忆索引。
 
+## 模型分工
+
+- Agent 模型：不在本工具内部配置。它读取 Harness/Skill，决定何时调用工具、如何维护知识库、是否做旧笔记去重或相似判断。
+- 主分析模型：默认 `doubao-seed-2-0-lite-260428`，负责正式视频精拆、最终汇总、标题/摘要/标签候选和派生任务线索。
+- 策略模型：默认 `doubao-seed-2-0-mini-260428`，只负责长视频 `1fps` 概览、分段 fps 决策和策略 JSON 修复。
+
 ## fps 和帧数
 
 - 官方 fps 范围：`0.2 - 5`。
@@ -44,24 +50,34 @@
 策略：
 
 - 先上传全片，使用 `1fps` 做概览。
+- 全片概览上传的 `preprocess_configs.video.model` 使用策略模型，Responses 推理也使用策略模型。
 - 概览 prompt 要输出粗内容、粗时间线、重要概念、待确认点，以及每个固定切片的 `2-5fps` 精拆建议。
 - fps 决策不按死板类型判断，而按画面变化、字幕/OCR 密度、操作密度、动作细节、概念密度、低 fps 漏细节风险和置信度评分。
-- 程序校验概览 JSON。JSON 无效、缺段、缺证据、置信度低或风险高时，向更高 fps 保守回退，最保守为 `5fps`。
+- 程序校验概览 JSON。JSON 无效、缺段或缺必填字段时，策略模型最多做一次文本修复，不重新上传视频；修复仍失败时，坏掉的片段按 `5fps` 兜底，整份 JSON 不可用时全段 `5fps` 兜底。
+- 缺证据、置信度低或风险高时，程序向更高 fps 保守回退，最保守为 `5fps`。
 - 每片 `240s`。
 - 重叠 `10s`。
 - 步长 `230s`。
 - 单片在 `5fps` 下约 `1200` 帧，低于项目安全目标 `1250`，距离 Ark 硬上限约留 `80` 帧。
+- 分片上传和精拆默认 `2` 路并发。
 
 处理流程：
 
 1. 全片用 `1fps` 走 Files API 上传、等待 active。
-2. Responses 生成长视频概览和分段精拆策略。
-3. 用 `ffmpeg -c copy` 生成临时 mp4 切片，尽量避免重新编码。
-4. 每片按策略 fps 独立走 Files API 上传、等待 active。
-5. 每片独立用 Responses 分析，prompt 中带上全片概览和本段精拆重点。
-6. 每个入库意图独立维护 `previous_response_id` 链。
-7. 所有片段拆完后，再用全片概览和分片结果做 text-only Responses 汇总。
-8. 临时切片目录结束后清理。
+2. 策略模型通过 Responses 生成长视频概览和分段精拆策略。
+3. 如果策略 JSON 不能解析、缺少分段或缺必填字段，策略模型用 `previous_response_id` 接上上轮上下文修复一次。
+4. 用 `ffmpeg -c copy` 生成临时 mp4 切片，尽量避免重新编码。
+5. 每片按策略 fps 独立走 Files API 上传、等待 active。
+6. 每片由主分析模型用 Responses 分析，prompt 中带上全片概览和本段精拆重点。
+7. 每个入库意图可以接入上次同视频同意图的 `previous_response_id`，但当前任务内的分片彼此并发，不串行依赖上一片输出。
+8. 所有片段拆完后，再由主分析模型用全片概览和分片结果做 text-only Responses 汇总。
+9. 临时切片目录结束后清理。
+
+策略日志：
+
+- 路径：`~/.obsidian-librarian/logs/video-strategy-events.jsonl`
+- 记录：JSON 修复、修复失败、低置信/缺证据/高风险导致的 fps 上调、最终 fps 计划。
+- 不记录：API Key、Cookie、Bearer token、`response_id`。
 
 片段元数据会保留在运行结果里：
 
@@ -91,12 +107,14 @@
 - 请求时传 `store = true`。
 - 如果本地存在未过期记忆，传 `previous_response_id`。
 - 记忆默认保存在 `~/.obsidian-librarian/responses-memory/`。
+- 本地记忆默认保存 `3` 天，匹配 Ark Responses 默认存储周期，避免过期后继续复用。
 - key 使用 `media_type + source_id/aweme_id + ingest_intent + model`。
 - `knowledge_ingest` 和 `viral_breakdown` 分开记忆，避免上下文串味。
 
 边界：
 
 - `response_id` 不写入 Obsidian frontmatter。
+- `response_id` 不写入任务状态文件或策略日志。
 - `response_id` 不等于长期知识记忆。
 - `previous_response_id` 只续模型上下文，不负责 `file_id` 保活。
 - Files API 文件可用期和 Responses 记忆是两件事。

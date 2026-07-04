@@ -75,13 +75,20 @@ The WebSocket control server writes:
   not expose quality, fps, or target-frame settings.
 - Re-upload when fps/model preprocessing changes; do not cache `file_id`.
 - Responses memory is short-term only. Store returned `response_id` under
-  `~/.obsidian-librarian/responses-memory/`; never write it into vault Markdown.
-- Videos longer than 10 minutes first run a full-video `1fps` overview. The
-  overview extracts rough content and a per-chunk strategy, then 240s chunks
-  with 10s overlap are uploaded/analyzed independently at `2-5fps`. Invalid
-  JSON, missing evidence, low confidence, or high low-fps risk must fall back
+  `~/.obsidian-librarian/responses-memory/` for 3 days; never write it into
+  vault Markdown, task status, or strategy logs.
+- Videos longer than 10 minutes first run a full-video `1fps` overview with
+  the strategy model (`models.strategy`, default mini). The overview extracts
+  rough content and a per-chunk strategy, then 240s chunks with 10s overlap are
+  uploaded/analyzed independently at `2-5fps` by the main analyzer model with
+  2-way concurrency. Invalid JSON, missing segments, or missing required fields
+  may be repaired once by the same strategy model via `previous_response_id`;
+  missing evidence, low confidence, or high low-fps risk must fall back
   conservatively toward `5fps`. Text-only Responses then synthesizes the final
   asset body from the overview and chunk results.
+- Strategy fallbacks and JSON repair results are logged to
+  `~/.obsidian-librarian/logs/video-strategy-events.jsonl` without API keys,
+  Cookies, Bearer tokens, or `response_id`.
 
 ## Output Contract
 

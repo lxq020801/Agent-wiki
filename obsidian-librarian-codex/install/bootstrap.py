@@ -52,6 +52,7 @@ endpoint = "https://ark.cn-beijing.volces.com/api/v3"
 
 [models]
 analyzer = "doubao-seed-2-0-lite-260428"
+strategy = "doubao-seed-2-0-mini-260428"
 analyzer_fallback = "doubao-seed-2-0-mini-260428"
 
 [analysis]

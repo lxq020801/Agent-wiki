@@ -62,6 +62,7 @@ port = 8765
     assert cfg.vault_path == vault.resolve()
     assert cfg.vault_relative_root == "知识资产/知识入库"
     assert cfg.default_quality == "quality"
+    assert cfg.strategy_model == "doubao-seed-2-0-mini-260428"
 
 
 def test_netscape_cookie_conversion(tmp: Path) -> None:
@@ -205,6 +206,7 @@ def test_vault_write_schema(tmp: Path) -> None:
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
         analyzer_fallback="doubao-seed-2-0-mini-260428",
+        strategy_model="doubao-seed-2-0-mini-260428",
         default_quality="quality",
         balanced_target_frames=240,
         quality_target_frames=1250,
@@ -386,6 +388,7 @@ def test_image_post_vault_write_schema(tmp: Path) -> None:
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
         analyzer_fallback="doubao-seed-2-0-mini-260428",
+        strategy_model="doubao-seed-2-0-mini-260428",
         default_quality="quality",
         balanced_target_frames=240,
         quality_target_frames=1250,
@@ -489,6 +492,7 @@ def test_vault_write_uses_intent_relative_root(tmp: Path) -> None:
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
         analyzer_fallback="doubao-seed-2-0-mini-260428",
+        strategy_model="doubao-seed-2-0-mini-260428",
         default_quality="quality",
         balanced_target_frames=240,
         quality_target_frames=1250,
@@ -541,6 +545,7 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
         analyzer_fallback="doubao-seed-2-0-mini-260428",
+        strategy_model="doubao-seed-2-0-mini-260428",
         default_quality="quality",
         balanced_target_frames=240,
         quality_target_frames=1250,
@@ -572,7 +577,7 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
         return video
 
     async def fake_analyze_video_many(video_path, prompts, **kwargs):
-        calls.append(("analyze_video_many", tuple(prompts)))
+        calls.append(("analyze_video_many", tuple(prompts), kwargs.get("strategy_model")))
         return {
             intent: SimpleNamespace(
                 text=f"{intent} 输出",
@@ -635,7 +640,11 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
             setattr(ingest, name, value)
 
     assert sum(1 for call in calls if call[0] == "download_video") == 1
-    assert ("analyze_video_many", ("knowledge_ingest", "viral_breakdown")) in calls
+    assert (
+        "analyze_video_many",
+        ("knowledge_ingest", "viral_breakdown"),
+        "doubao-seed-2-0-mini-260428",
+    ) in calls
     assert ("write_to_vault", "knowledge_ingest") in calls
     assert ("write_to_vault", "viral_breakdown") in calls
     assert len(summary["assets"]) == 2
@@ -725,6 +734,7 @@ def test_websocket_config_writer(tmp: Path) -> None:
     assert cfg.fps_min == 0.2
     assert cfg.fps_max == 5.0
     assert cfg.response_timeout_sec == 900
+    assert cfg.strategy_model == "doubao-seed-2-0-mini-260428"
 
     assert oct((tmp / "ws-runtime" / "config.toml").stat().st_mode & 0o777) == "0o600"
 
@@ -838,6 +848,57 @@ def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
     ) is None
 
 
+def test_status_writer_redacts_sensitive_fields(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from status_writer import StatusWriter
+
+    writer = StatusWriter("task-redact", tmp / "status")
+    writer.progress("analyzing_done", {
+        "response_id": "resp-secret",
+        "previous_response_id": "resp-old",
+        "arkApiKey": "sk-camel",
+        "agentPlanApiKey": "sk-plan-camel",
+        "doubaoApiKey": "sk-doubao-camel",
+        "filesApiKey": "sk-files-camel",
+        "fileApiKey": "sk-file-camel",
+        "doubao_api_key": "sk-doubao-snake",
+        "files_api_key": "sk-files-snake",
+        "message": (
+            "Authorization: Bearer sk-secret\n"
+            "cookie: sid=abc\n"
+            "{\"api_key\":\"sk-json\",\"response_id\":\"abc-json\"}"
+        ),
+        "nested": {
+            "api_key": "sk-nested",
+            "previousResponseId": "abc-camel-response",
+            "ok": True,
+        },
+    })
+    writer.update(error="failed with api_key=sk-error and resp-error")
+
+    text = writer.path.read_text(encoding="utf-8")
+    assert "resp-secret" not in text
+    assert "resp-old" not in text
+    assert "sk-secret" not in text
+    assert "sk-nested" not in text
+    assert "sk-error" not in text
+    assert "sk-camel" not in text
+    assert "sk-plan-camel" not in text
+    assert "sk-doubao-camel" not in text
+    assert "sk-files-camel" not in text
+    assert "sk-file-camel" not in text
+    assert "sk-doubao-snake" not in text
+    assert "sk-files-snake" not in text
+    assert "sk-json" not in text
+    assert "abc-json" not in text
+    assert "abc-camel-response" not in text
+    assert "sid=abc" not in text
+    assert "response_id" not in text
+    assert "previous_response_id" not in text
+
+
 def test_long_video_strategy_validation_falls_back_to_5fps() -> None:
     import sys
 
@@ -937,6 +998,208 @@ def test_long_video_strategy_validation_falls_back_to_5fps() -> None:
     assert valid["chunks"][2]["recommended_fps"] == 4.0
 
 
+def test_long_video_strategy_missing_required_fields_requests_repair() -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    plan = analyzer._chunk_plan(601)
+    missing_fields = analyzer._normalize_long_video_strategy(
+        json.dumps({
+            "overview": {"summary": "概览", "timeline": []},
+            "strategy": {
+                "segments": [
+                    {
+                        "part_index": item["part_index"],
+                        "start_sec": item["start_sec"],
+                        "end_sec": item["end_sec"],
+                        "recommended_fps": 2,
+                        "confidence": 0.95,
+                        "evidence": ["稳定画面"],
+                    }
+                    for item in plan
+                ],
+            },
+        }, ensure_ascii=False),
+        plan,
+    )
+
+    assert missing_fields["ok"] is True
+    assert analyzer._strategy_needs_json_repair(missing_fields) is True
+    assert all(item["recommended_fps"] == 5.0 for item in missing_fields["chunks"])
+    assert all("必填字段" in item["fallback_reason"] for item in missing_fields["chunks"])
+
+
+def test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp: Path) -> None:
+    import asyncio
+    import sys
+
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "strategy-repair-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    video = tmp / "long.mp4"
+    video.write_bytes(b"fake-video")
+    plan = analyzer._chunk_plan(601)
+    calls = []
+    progress = []
+
+    async def fake_upload(client, path, *, fps, model):
+        calls.append(("upload", fps, model))
+        return SimpleNamespace(id="file-overview")
+
+    async def fake_wait(*args, **kwargs):
+        calls.append(("wait", args[1] if len(args) > 1 else ""))
+        return SimpleNamespace(status="active")
+
+    async def fake_stream(client, *, model, file_id, prompt, on_progress, previous_response_id=None, timeout_sec=None):
+        calls.append(("stream", model, file_id, previous_response_id))
+        return analyzer.ResponseCallResult(
+            text="坏 JSON",
+            usage={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+            response_id="resp-overview",
+        )
+
+    async def fake_text(client, *, model, prompt, on_progress, previous_response_id=None, timeout_sec=None):
+        calls.append(("repair", model, previous_response_id, "坏 JSON" in prompt))
+        repaired = {
+            "overview": {
+                "summary": "全片先讲背景，再演示流程。",
+                "timeline": [],
+                "important_points": ["流程"],
+                "uncertain_points": [],
+            },
+            "strategy": {
+                "global_notes": "修复后的策略。",
+                "segments": [
+                    {
+                        "part_index": item["part_index"],
+                        "start_sec": item["start_sec"],
+                        "end_sec": item["end_sec"],
+                        "rough_summary": "稳定讲解",
+                        "recommended_fps": 2,
+                        "confidence": 0.9,
+                        "scores": {
+                            "visual_change": 1,
+                            "ocr_subtitle_density": 1,
+                            "operation_density": 0,
+                            "motion_detail": 0,
+                            "concept_density": 2,
+                            "risk_if_low_fps": 1,
+                        },
+                        "evidence": ["画面稳定"],
+                        "focus": ["结论"],
+                        "risk_flags": [],
+                        "why_not_lower_fps": "低风险",
+                    }
+                    for item in plan
+                ],
+            },
+        }
+        return analyzer.ResponseCallResult(
+            text=json.dumps(repaired, ensure_ascii=False),
+            usage={"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+            response_id="resp-repair",
+        )
+
+    async def on_progress(stage, info):
+        progress.append((stage, info))
+
+    old_upload = analyzer._upload_with_preprocess
+    old_wait = analyzer._wait_for_active
+    old_stream = analyzer._stream_responses
+    old_text = analyzer._call_text_responses
+    try:
+        analyzer._upload_with_preprocess = fake_upload
+        analyzer._wait_for_active = fake_wait
+        analyzer._stream_responses = fake_stream
+        analyzer._call_text_responses = fake_text
+        strategy = asyncio.run(analyzer._prepare_long_video_strategy(
+            video,
+            plan,
+            ["knowledge_ingest"],
+            files_client=SimpleNamespace(),
+            responses_client=SimpleNamespace(),
+            model="doubao-seed-2-0-lite-260428",
+            strategy_model="doubao-seed-2-0-mini-260428",
+            source_id="aweme-repair",
+            file_active_timeout_sec=120,
+            response_timeout_sec=900,
+            on_progress=on_progress,
+        ))
+    finally:
+        analyzer._upload_with_preprocess = old_upload
+        analyzer._wait_for_active = old_wait
+        analyzer._stream_responses = old_stream
+        analyzer._call_text_responses = old_text
+
+    assert strategy["ok"] is True
+    assert all(item["recommended_fps"] == 2.0 for item in strategy["chunks"])
+    assert ("upload", 1.0, "doubao-seed-2-0-mini-260428") in calls
+    assert ("stream", "doubao-seed-2-0-mini-260428", "file-overview", None) in calls
+    assert ("repair", "doubao-seed-2-0-mini-260428", "resp-overview", True) in calls
+    assert any(stage == "repairing_overview_strategy" for stage, _ in progress)
+    assert any(stage == "overview_strategy_repaired" for stage, _ in progress)
+    log_path = tmp / "strategy-repair-runtime" / "logs" / "video-strategy-events.jsonl"
+    assert log_path.exists()
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "overview_strategy_repair_needed" in log_text
+    assert "overview_strategy_repaired" in log_text
+    assert "resp-overview" not in log_text
+
+
+def test_strategy_log_redacts_sensitive_values(tmp: Path) -> None:
+    import sys
+
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "strategy-log-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    analyzer._write_strategy_log("redaction_test", {
+        "raw_text": (
+            "Authorization: Bearer sk-secret\n"
+            "cookie: sid=abc\n"
+            "api_key=sk-another\n"
+            "arkApiKey=sk-camel\n"
+            "{\"api_key\":\"sk-json\",\"cookie\":\"sid=json\",\"response_id\":\"abc-json\"}\n"
+            "response_id=resp-secret"
+        ),
+        "nested": {
+            "response_id": "resp-nested",
+            "previousResponseId": "abc-camel-response",
+            "agentPlanApiKey": "sk-plan-camel",
+            "doubaoApiKey": "sk-doubao-camel",
+            "filesApiKey": "sk-files-camel",
+            "fileApiKey": "sk-file-camel",
+            "doubao_api_key": "sk-doubao-snake",
+            "files_api_key": "sk-files-snake",
+            "note": "Bearer sk-note",
+        },
+    })
+
+    log_path = tmp / "strategy-log-runtime" / "logs" / "video-strategy-events.jsonl"
+    text = log_path.read_text(encoding="utf-8")
+    assert "sk-secret" not in text
+    assert "sid=abc" not in text
+    assert "sk-another" not in text
+    assert "sk-camel" not in text
+    assert "sk-json" not in text
+    assert "sid=json" not in text
+    assert "abc-json" not in text
+    assert "resp-secret" not in text
+    assert "resp-nested" not in text
+    assert "abc-camel-response" not in text
+    assert "sk-plan-camel" not in text
+    assert "sk-doubao-camel" not in text
+    assert "sk-files-camel" not in text
+    assert "sk-file-camel" not in text
+    assert "sk-doubao-snake" not in text
+    assert "sk-files-snake" not in text
+    assert "sk-note" not in text
+    assert "response_id" not in text
+
+
 def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
     import asyncio
     import sys
@@ -994,8 +1257,10 @@ def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
     prompts = []
 
     async def fake_upload(client, path, *, fps, model):
+        if Path(path).name == "part-001.mp4":
+            await asyncio.sleep(0.02)
         uploads.append((Path(path).name, fps))
-        return SimpleNamespace(id=f"file-{len(uploads)}")
+        return SimpleNamespace(id=f"file-{Path(path).name}")
 
     async def fake_wait(*args, **kwargs):
         return SimpleNamespace(status="active")
@@ -1046,16 +1311,98 @@ def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
         analyzer._stream_responses = old_stream
         analyzer._call_text_responses = old_text
 
-    assert uploads == [("part-001.mp4", 2.0), ("part-002.mp4", 5.0)]
+    assert sorted(uploads) == [("part-001.mp4", 2.0), ("part-002.mp4", 5.0)]
     assert "全片概览" in prompts[0]
     assert "本段精拆策略" in prompts[0]
     assert "第二段需要更高 fps" in prompts[-1]
     result = results["knowledge_ingest"]
     assert result.chunked is True
+    assert result.file_id == "file-part-001.mp4"
     assert result.fps_used == 5.0
     assert result.actual_frames_estimate == 1680
     assert [item["fps"] for item in result.chunks] == [2.0, 5.0]
     assert result.chunks[1]["strategy_focus"] == ["按钮和菜单"]
+    assert all("response_id" not in item for item in result.chunks)
+
+
+def test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp: Path) -> None:
+    import asyncio
+    import sys
+
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "chunk-memory-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    chunk_path = tmp / "part-001.mp4"
+    chunk_path.write_bytes(b"fake")
+    plan = [{"part_index": 1, "start_sec": 0.0, "end_sec": 120.0, "overlap_sec": 0.0}]
+    saves = []
+
+    async def fake_upload(client, path, *, fps, model):
+        return SimpleNamespace(id="file-part-001")
+
+    async def fake_wait(*args, **kwargs):
+        return SimpleNamespace(status="active")
+
+    async def fake_stream(client, *, model, file_id, prompt, on_progress, previous_response_id=None, timeout_sec=None):
+        return analyzer.ResponseCallResult(
+            text="分片分析",
+            usage={"total_tokens": 1},
+            response_id="resp-chunk",
+        )
+
+    async def fake_text(client, *, model, prompt, on_progress, previous_response_id=None, timeout_sec=None):
+        return analyzer.ResponseCallResult(
+            text="最终汇总",
+            usage={"total_tokens": 1},
+            response_id=None,
+        )
+
+    def fake_load_response_memory(**kwargs):
+        return {"response_id": "resp-old"}
+
+    def fake_save_response_memory(**kwargs):
+        saves.append(kwargs)
+
+    old_upload = analyzer._upload_with_preprocess
+    old_wait = analyzer._wait_for_active
+    old_stream = analyzer._stream_responses
+    old_text = analyzer._call_text_responses
+    old_load = analyzer.load_response_memory
+    old_save = analyzer.save_response_memory
+    try:
+        analyzer._upload_with_preprocess = fake_upload
+        analyzer._wait_for_active = fake_wait
+        analyzer._stream_responses = fake_stream
+        analyzer._call_text_responses = fake_text
+        analyzer.load_response_memory = fake_load_response_memory
+        analyzer.save_response_memory = fake_save_response_memory
+        results = asyncio.run(analyzer._analyze_video_chunks(
+            [chunk_path],
+            plan,
+            {"knowledge_ingest": "基础拆解 prompt"},
+            files_client=SimpleNamespace(),
+            responses_client=SimpleNamespace(),
+            model="doubao-seed-2-0-lite-260428",
+            quality="quality",
+            full_duration=120.0,
+            source_id="aweme-memory",
+            strategy={"ok": True, "chunks": []},
+            file_active_timeout_sec=120,
+            response_timeout_sec=900,
+            on_progress=None,
+        ))
+    finally:
+        analyzer._upload_with_preprocess = old_upload
+        analyzer._wait_for_active = old_wait
+        analyzer._stream_responses = old_stream
+        analyzer._call_text_responses = old_text
+        analyzer.load_response_memory = old_load
+        analyzer.save_response_memory = old_save
+
+    assert results["knowledge_ingest"].response_id == "resp-old"
+    assert saves and saves[0]["response_id"] is None
+    assert saves[0]["file_id"] == "file-part-001"
 
 
 def test_websocket_config_writer_rejects_agent_plan_payload_key(tmp: Path) -> None:
@@ -1702,8 +2049,13 @@ def main() -> int:
         test_websocket_config_writer(tmp)
         test_quality_fps_stays_5_until_safe_frame_target()
         test_video_chunk_threshold_and_memory_store(tmp)
+        test_status_writer_redacts_sensitive_fields(tmp)
         test_long_video_strategy_validation_falls_back_to_5fps()
+        test_long_video_strategy_missing_required_fields_requests_repair()
+        test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp)
+        test_strategy_log_redacts_sensitive_values(tmp)
         test_chunk_analysis_uses_strategy_fps_and_context(tmp)
+        test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp)
         test_websocket_config_writer_rejects_agent_plan_payload_key(tmp)
         test_websocket_config_writer_uses_explicit_ark_key_when_old_provider_present(tmp)
         test_config_loader_does_not_use_agent_plan_section(tmp)

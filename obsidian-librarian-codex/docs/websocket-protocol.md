@@ -34,6 +34,7 @@
 
 同步模型配置。`vaultPath` 只是线索，服务端必须校验后才写入配置。
 扩展不发送质量档；服务端固定 `[analysis].default_quality = "quality"`。
+`strategyModel` 是可选字段，缺省使用 `doubao-seed-2-0-mini-260428`。
 
 ```json
 {
@@ -42,6 +43,7 @@
     "provider": "doubao",
     "apiKey": "sk-...",
     "model": "doubao-seed-2-0-lite-260428",
+    "strategyModel": "doubao-seed-2-0-mini-260428",
     "vaultPath": "/Users/xxx/Obsidian"
   }
 }
@@ -117,6 +119,8 @@
 - `overview_uploading`
 - `overview_uploaded`
 - `analyzing_overview`
+- `repairing_overview_strategy`
+- `overview_strategy_repaired`
 - `overview_strategy_decided`
 - `chunk_uploading`
 - `chunk_uploaded`

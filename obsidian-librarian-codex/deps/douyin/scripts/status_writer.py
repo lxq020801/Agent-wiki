@@ -7,10 +7,69 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+
+_REDACTED_KEYS = {
+    "authorization",
+    "bearer",
+    "cookie",
+    "setcookie",
+    "responseid",
+    "previousresponseid",
+}
+
+
+def _canonical_secret_key(key: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(key).lower())
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    canonical = _canonical_secret_key(key)
+    return canonical in _REDACTED_KEYS or canonical.endswith("apikey")
+
+
+def _redact_status_text(text: str) -> str:
+    cleaned = str(text)
+    patterns = [
+        (r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]"),
+        (
+            r"(?i)[\"']?(api[_-]?key|ark[_-]?api[_-]?key|agent[_-]?plan[_-]?api[_-]?key|"
+            r"arkApiKey|agentPlanApiKey|response[_-]?id|previous[_-]?response[_-]?id|"
+            r"responseId|previousResponseId)[\"']?\s*[:=]\s*"
+            r"(\"[^\"]*\"|'[^']*'|[^,\s}\]\n\r]+)",
+            "sensitive=[REDACTED]",
+        ),
+        (
+            r"(?i)[\"']?(authorization|cookie|set-cookie)[\"']?\s*[:=]\s*[^\n\r]+",
+            "sensitive=[REDACTED]",
+        ),
+        (r"\bresp-[A-Za-z0-9._-]+\b", "resp-[REDACTED]"),
+    ]
+    for pattern, repl in patterns:
+        cleaned = re.sub(pattern, repl, cleaned)
+    return cleaned
+
+
+def _redact_status_value(value: Any) -> Any:
+    """Remove transient secrets from local task status files."""
+    if isinstance(value, dict):
+        clean: dict[str, Any] = {}
+        for key, child in value.items():
+            if _is_sensitive_key(key):
+                continue
+            else:
+                clean[key] = _redact_status_value(child)
+        return clean
+    if isinstance(value, list):
+        return [_redact_status_value(item) for item in value]
+    if isinstance(value, str):
+        return _redact_status_text(value)
+    return value
 
 
 class StatusWriter:
@@ -43,9 +102,12 @@ class StatusWriter:
         if ok is not None:
             self._state["ok"] = ok
         if error is not None:
-            self._state["error"] = error
+            self._state["error"] = _redact_status_text(error)
         for k, v in fields.items():
-            self._state[k] = v
+            if _is_sensitive_key(k):
+                continue
+            else:
+                self._state[k] = _redact_status_value(v)
         self._state["updated_at"] = time.time()
         self._write()
 
@@ -53,7 +115,7 @@ class StatusWriter:
         """记录细粒度进度（嵌进 progress dict 里）。"""
         self._state["stage"] = sub_stage
         self._state.setdefault("progress", {})[sub_stage] = {
-            **info,
+            **_redact_status_value(info),
             "at": time.time(),
         }
         self._state["updated_at"] = time.time()

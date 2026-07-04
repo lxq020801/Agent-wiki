@@ -78,6 +78,7 @@ class DouyinImagePostStaticTests(unittest.TestCase):
             ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
             analyzer_model="doubao-seed-2-0-lite-260428",
             analyzer_fallback="doubao-seed-2-0-mini-260428",
+            strategy_model="doubao-seed-2-0-mini-260428",
             default_quality="quality",
             balanced_target_frames=240,
             quality_target_frames=1250,
