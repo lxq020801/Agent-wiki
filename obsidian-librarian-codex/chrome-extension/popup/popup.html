@@ -120,10 +120,9 @@
         <p>这里只配置厂商、Key 和 Endpoint，不放视频拆解偏好。</p>
       </div>
       <div class="field">
-        <label for="provider">厂商</label>
-        <select id="provider">
-          <option value="doubao">豆包</option>
-        </select>
+        <label>厂商</label>
+        <div class="static-select" id="provider-display">豆包</div>
+        <input type="hidden" id="provider" value="doubao">
       </div>
       <div class="field">
         <label for="api-key">API Key</label>
