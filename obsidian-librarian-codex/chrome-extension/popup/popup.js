@@ -77,11 +77,20 @@ function providerInfo(value) {
 }
 
 function normalizeModelPreset(value) {
+  if (value === 'custom') return 'custom';
   return MODEL_PRESETS[value] ? value : DEFAULT_MODEL_PRESET;
 }
 
 function presetFromModel(model) {
-  return model === MODEL_PRESETS.mini ? 'mini' : 'lite';
+  const value = String(model || '').trim();
+  if (value === MODEL_PRESETS.mini) return 'mini';
+  if (value === MODEL_PRESETS.lite) return 'lite';
+  return value ? 'custom' : DEFAULT_MODEL_PRESET;
+}
+
+function normalizeModelId(value) {
+  const model = String(value || '').trim();
+  return model || MODEL_PRESETS[DEFAULT_MODEL_PRESET];
 }
 
 function normalizeBoundedInt(value, fallback) {
@@ -139,11 +148,23 @@ function readStoredApiKey(source) {
 }
 
 function readStoredModelPreset(source) {
+  const explicit = source.videoAnalysisModel || source.arkModel || source.model || '';
+  if (String(explicit || '').trim()) {
+    return presetFromModel(explicit);
+  }
   if (source.videoAnalysisModelPreset) {
     return normalizeModelPreset(source.videoAnalysisModelPreset);
   }
+  return DEFAULT_MODEL_PRESET;
+}
+
+function readStoredModelId(source) {
   const explicit = source.videoAnalysisModel || source.arkModel || source.model || '';
-  return presetFromModel(String(explicit).trim());
+  if (String(explicit || '').trim()) {
+    return normalizeModelId(explicit);
+  }
+  const preset = readStoredModelPreset(source);
+  return MODEL_PRESETS[preset] || MODEL_PRESETS[DEFAULT_MODEL_PRESET];
 }
 
 function readStoredStrategyModel(source) {
@@ -170,10 +191,11 @@ function setControlValue(id, value, { notify = false } = {}) {
 }
 
 function selectedVideoConfig() {
-  const preset = normalizeModelPreset(document.getElementById('analysis-model-preset').value);
+  const analyzerModel = normalizeModelId(document.getElementById('analysis-model-id').value);
+  const preset = presetFromModel(analyzerModel);
   return {
     modelPreset: preset,
-    analyzerModel: MODEL_PRESETS[preset],
+    analyzerModel,
     strategyModel: providerInfo(DEFAULT_PROVIDER).strategyModel,
     chunkConcurrency: normalizeChunkConcurrency(document.getElementById('chunk-concurrency').value)
   };
@@ -207,8 +229,8 @@ async function buildAgentConfig({ requireApiKey = false } = {}) {
   if (!endpointResult.ok) {
     throw new Error(endpointResult.message);
   }
-  const preset = readStoredModelPreset(stored);
-  const analyzerModel = MODEL_PRESETS[preset];
+  const analyzerModel = readStoredModelId(stored);
+  const preset = presetFromModel(analyzerModel);
   const strategyModel = readStoredStrategyModel(stored);
   const taskConcurrency = normalizeTaskConcurrency(stored.serverTaskConcurrency || stored.taskConcurrency);
   const chunkConcurrency = normalizeChunkConcurrency(stored.videoChunkConcurrency);
@@ -426,10 +448,13 @@ function applyModelStatus(status) {
 }
 
 function applyVideoStatus(status) {
-  if (status.modelPreset) {
-    setControlValue('analysis-model-preset', normalizeModelPreset(status.modelPreset));
-  } else if (status.analyzerModel) {
+  if (status.analyzerModel) {
+    setControlValue('analysis-model-id', status.analyzerModel);
     setControlValue('analysis-model-preset', presetFromModel(status.analyzerModel));
+  } else if (status.modelPreset) {
+    const preset = normalizeModelPreset(status.modelPreset);
+    setControlValue('analysis-model-preset', preset);
+    setControlValue('analysis-model-id', MODEL_PRESETS[preset] || MODEL_PRESETS[DEFAULT_MODEL_PRESET]);
   }
   if (status.taskConcurrency) {
     setControlValue('task-concurrency', normalizeTaskConcurrency(status.taskConcurrency));
@@ -622,6 +647,7 @@ async function loadConfig() {
   document.getElementById('endpoint-url').value = result.arkEndpoint || result.endpoint || info.endpoint;
   document.getElementById('vault-path').value = result.vaultPath || '';
   setControlValue('analysis-model-preset', readStoredModelPreset(result));
+  setControlValue('analysis-model-id', readStoredModelId(result));
   setControlValue('task-concurrency', normalizeTaskConcurrency(result.serverTaskConcurrency || result.taskConcurrency));
   setControlValue('chunk-concurrency', normalizeChunkConcurrency(result.videoChunkConcurrency));
   updateVideoSettingsSummary();
@@ -1095,13 +1121,15 @@ function closeToHome() {
 }
 
 function updateVideoSettingsSummary() {
-  const modelPreset = normalizeModelPreset(document.getElementById('analysis-model-preset')?.value);
+  const modelId = normalizeModelId(document.getElementById('analysis-model-id')?.value);
+  const modelPreset = presetFromModel(modelId);
   const taskConcurrency = normalizeTaskConcurrency(document.getElementById('task-concurrency')?.value);
   const chunkConcurrency = normalizeChunkConcurrency(document.getElementById('chunk-concurrency')?.value);
   const summary = document.getElementById('settings-video-summary');
   const dot = document.getElementById('settings-video-dot');
   if (summary) {
-    summary.textContent = `${modelPreset === 'mini' ? 'Mini' : 'Lite'} · 并发 ${taskConcurrency}/${chunkConcurrency}`;
+    const modelLabel = modelPreset === 'custom' ? '自定义模型' : (modelPreset === 'mini' ? 'Mini' : 'Lite');
+    summary.textContent = `${modelLabel} · 并发 ${taskConcurrency}/${chunkConcurrency}`;
     summary.className = 'online';
   }
   if (dot) dot.className = 'status-dot inline-dot online';
@@ -1163,8 +1191,17 @@ function bindOptionControls() {
   document.querySelectorAll('[data-control][data-value]').forEach(button => {
     button.addEventListener('click', () => {
       setControlValue(button.dataset.control, button.dataset.value, { notify: true });
+      if (button.dataset.modelId) {
+        setControlValue('analysis-model-id', button.dataset.modelId);
+        updateVideoSettingsSummary();
+      }
     });
   });
+}
+
+function syncModelPresetFromInput() {
+  setControlValue('analysis-model-preset', presetFromModel(document.getElementById('analysis-model-id').value));
+  updateVideoSettingsSummary();
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -1181,6 +1218,8 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('save-video-config').addEventListener('click', saveVideoConfig);
   document.getElementById('provider').addEventListener('change', handleProviderChange);
   document.getElementById('analysis-model-preset').addEventListener('change', updateVideoSettingsSummary);
+  document.getElementById('analysis-model-id').addEventListener('input', syncModelPresetFromInput);
+  document.getElementById('analysis-model-id').addEventListener('change', syncModelPresetFromInput);
   document.getElementById('task-concurrency').addEventListener('change', updateVideoSettingsSummary);
   document.getElementById('chunk-concurrency').addEventListener('change', updateVideoSettingsSummary);
   document.getElementById('check-model').addEventListener('click', checkModelHealth);

@@ -146,19 +146,21 @@
     <section class="settings-group detail-section" id="video-settings" data-title="模型与并发" tabindex="-1" hidden>
       <div class="section-heading">
         <h3>模型与并发</h3>
-        <p>选择 Lite / Mini 拆解模型，并控制任务队列和长视频分片并发。</p>
+        <p>配置主拆解模型 ID，并控制任务队列和长视频分片并发。</p>
       </div>
-      <div class="field">
-        <label id="analysis-model-label">拆解模型</label>
+      <div class="field model-id-field">
+        <label for="analysis-model-id">主拆解模型 ID</label>
+        <input class="model-id-input" type="text" id="analysis-model-id" spellcheck="false" placeholder="doubao-seed-2-0-lite-260428">
         <input type="hidden" id="analysis-model-preset" value="lite">
-        <div class="segmented-control" role="radiogroup" aria-labelledby="analysis-model-label">
-          <button class="option-button selected" type="button" role="radio" aria-checked="true" data-control="analysis-model-preset" data-value="lite">
+        <p class="microcopy">保存后用于正式视频拆解；长视频策略模型仍固定使用 Mini。</p>
+        <div class="model-preset-grid" role="group" aria-label="快速填入模型 ID">
+          <button class="option-button selected" type="button" data-control="analysis-model-preset" data-value="lite" data-model-id="doubao-seed-2-0-lite-260428">
             <span>Lite</span>
-            <em>默认质量档</em>
+            <code>doubao-seed-2-0-lite-260428</code>
           </button>
-          <button class="option-button" type="button" role="radio" aria-checked="false" data-control="analysis-model-preset" data-value="mini">
+          <button class="option-button" type="button" data-control="analysis-model-preset" data-value="mini" data-model-id="doubao-seed-2-0-mini-260428">
             <span>Mini</span>
-            <em>轻量测试</em>
+            <code>doubao-seed-2-0-mini-260428</code>
           </button>
         </div>
       </div>

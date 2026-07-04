@@ -347,26 +347,31 @@ textarea {
   font-weight: 650;
 }
 
-.segmented-control {
+.model-id-field .microcopy {
+  margin: 6px 0 8px;
+}
+
+.model-id-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.model-preset-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px;
-  padding: 4px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--field);
 }
 
 .option-button {
   display: flex;
-  min-height: 50px;
+  min-height: 58px;
   flex-direction: column;
   justify-content: center;
   gap: 3px;
-  padding: 8px 10px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  background: transparent;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #1a1f27;
   color: var(--text-secondary);
   text-align: left;
 }
@@ -386,6 +391,18 @@ textarea {
   white-space: nowrap;
 }
 
+.option-button code {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 9px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .option-button.selected,
 .option-button:hover,
 .option-button:focus-visible {
@@ -398,6 +415,10 @@ textarea {
 
 .option-button.selected span {
   color: var(--success);
+}
+
+.option-button.selected code {
+  color: var(--primary-hover);
 }
 
 .control-stack {

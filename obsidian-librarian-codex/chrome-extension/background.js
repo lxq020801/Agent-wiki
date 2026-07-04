@@ -116,7 +116,15 @@ function normalizeEndpoint(value, provider) {
 }
 
 function normalizeModelPreset(value) {
+  if (value === 'custom') return 'custom';
   return MODEL_PRESETS[value] ? value : DEFAULT_MODEL_PRESET;
+}
+
+function presetFromModel(model) {
+  const value = String(model || '').trim();
+  if (value === MODEL_PRESETS.mini) return 'mini';
+  if (value === MODEL_PRESETS.lite) return 'lite';
+  return value ? 'custom' : DEFAULT_MODEL_PRESET;
 }
 
 function ownValue(source, key) {
@@ -137,18 +145,15 @@ function readStoredModel(source, provider) {
   const preset = normalizeModelPreset(source.videoAnalysisModelPreset);
   const explicit = ownValue(source, 'videoAnalysisModel');
   if (explicit !== undefined && explicit !== null && String(explicit).trim()) {
-    const explicitValue = String(explicit).trim();
-    if (Object.values(MODEL_PRESETS).includes(explicitValue)) {
-      return explicitValue;
-    }
+    return String(explicit).trim();
   }
   const providerValue = ownValue(source, keys.model);
   if (providerValue !== undefined && providerValue !== null) {
     const value = String(providerValue).trim();
-    return Object.values(MODEL_PRESETS).includes(value) ? value : MODEL_PRESETS[preset];
+    return value || MODEL_PRESETS[preset] || MODEL_PRESETS[DEFAULT_MODEL_PRESET];
   }
   const legacy = String(source.model || '').trim();
-  return Object.values(MODEL_PRESETS).includes(legacy) ? legacy : MODEL_PRESETS[preset];
+  return legacy || MODEL_PRESETS[preset] || MODEL_PRESETS[DEFAULT_MODEL_PRESET];
 }
 
 function readStoredStrategyModel(source, provider) {
@@ -170,10 +175,7 @@ function buildAgentConfig(config) {
   const apiKey = readStoredApiKey(config, provider);
   const model = readStoredModel(config, provider) || defaults.model;
   const strategyModel = readStoredStrategyModel(config, provider) || defaults.strategyModel;
-  const modelPreset = normalizeModelPreset(
-    config.videoAnalysisModelPreset ||
-      (model === MODEL_PRESETS.mini ? 'mini' : 'lite')
-  );
+  const modelPreset = presetFromModel(model);
   const endpoint = normalizeEndpoint(config.arkEndpoint || config.endpoint, provider);
   const taskConcurrency = normalizeTaskConcurrency(config.serverTaskConcurrency || config.taskConcurrency || config.task_concurrency);
   const chunkConcurrency = normalizeChunkConcurrency(config.videoChunkConcurrency || config.chunkConcurrency);
@@ -185,7 +187,7 @@ function buildAgentConfig(config) {
     },
     videoAnalysis: {
       modelPreset,
-      analyzerModel: MODEL_PRESETS[modelPreset],
+      analyzerModel: model,
       strategyModel,
       chunkConcurrency
     },
@@ -196,8 +198,8 @@ function buildAgentConfig(config) {
     provider,
     apiKey,
     [keys.apiKey]: apiKey,
-    model: MODEL_PRESETS[modelPreset],
-    [keys.model]: MODEL_PRESETS[modelPreset],
+    model,
+    [keys.model]: model,
     strategyModel,
     [keys.strategyModel]: strategyModel,
     taskConcurrency,
