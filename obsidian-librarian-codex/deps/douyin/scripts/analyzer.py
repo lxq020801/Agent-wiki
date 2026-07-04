@@ -275,6 +275,8 @@ _CHUNK_THRESHOLD_SEC = 600.0
 _CHUNK_LEN_SEC = 240.0
 _CHUNK_OVERLAP_SEC = 10.0
 _LONG_OVERVIEW_FPS = 1.0
+# 1fps 粗拆在 1250 帧安全目标前留 20 秒余量，避免全片概览擦边。
+_ULTRA_LONG_THRESHOLD_SEC = 20 * 60 + 30
 _LONG_CHUNK_FPS_MIN = 2.0
 _LONG_CHUNK_FPS_MAX = 5.0
 _CHUNK_ANALYSIS_CONCURRENCY = 2
@@ -488,11 +490,11 @@ def _long_overview_fps(duration_sec: float) -> float:
 
 
 def _ultra_long_threshold_sec() -> float:
-    return _FRAMES_SAFE_TARGET / _LONG_OVERVIEW_FPS
+    return float(_ULTRA_LONG_THRESHOLD_SEC)
 
 
 def _is_ultra_long_video(duration_sec: float) -> bool:
-    return duration_sec > 0 and duration_sec * _LONG_OVERVIEW_FPS > _FRAMES_SAFE_TARGET
+    return duration_sec > _ultra_long_threshold_sec()
 
 
 def _long_overview_exceeds_safe_target(duration_sec: float) -> bool:

@@ -869,9 +869,9 @@ def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
     assert analyzer.should_chunk_video(601) is True
     assert analyzer._long_overview_fps(1200) == 1.0
     assert analyzer._long_overview_fps(1800) == 1.0
-    assert analyzer._ultra_long_threshold_sec() == 1250.0
-    assert analyzer._is_ultra_long_video(1250) is False
-    assert analyzer._is_ultra_long_video(1251) is True
+    assert analyzer._ultra_long_threshold_sec() == 1230.0
+    assert analyzer._is_ultra_long_video(1230) is False
+    assert analyzer._is_ultra_long_video(1231) is True
     assert analyzer._is_ultra_long_video(1800) is True
     plan = analyzer._chunk_plan(601)
     assert len(plan) == 3
