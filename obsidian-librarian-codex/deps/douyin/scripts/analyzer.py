@@ -18,7 +18,7 @@ analyzer.py — 火山方舟视频拆解
   ⑤ Files API 默认托管空间支持 ≤512MB；超过 512MB P0 直接失败
   ⑥ file_id 模式必须等 file.status == "active" 才能分析
   ⑦ file_id 模式同一视频换 quality 必须重新上传
-  ⑧ 超 10 分钟固定切片，每片 240s，重叠 10s，再汇总
+  ⑧ 超 10 分钟先 1fps 全片概览规划，再按 240s 分片用 2-5fps 精拆
 
 公共契约：
     analyze_video(video_path, prompt, *, config, quality="quality",
@@ -271,6 +271,11 @@ _IMAGE_COUNT_LIMIT = 18
 _CHUNK_THRESHOLD_SEC = 600.0
 _CHUNK_LEN_SEC = 240.0
 _CHUNK_OVERLAP_SEC = 10.0
+_LONG_OVERVIEW_FPS = 1.0
+_LONG_CHUNK_FPS_MIN = 2.0
+_LONG_CHUNK_FPS_MAX = 5.0
+_LONG_STRATEGY_CONFIDENCE_MIN = 0.65
+_LONG_STRATEGY_LOW_FPS_CONFIDENCE_MIN = 0.78
 _RESPONSE_MEMORY_TTL_SEC = 7 * 24 * 60 * 60
 
 
@@ -421,6 +426,316 @@ def _chunk_plan(duration_sec: float) -> list[dict[str, float | int]]:
 
 def should_chunk_video(duration_sec: float) -> bool:
     return duration_sec > _CHUNK_THRESHOLD_SEC
+
+
+def _prompt_dir() -> Path:
+    return Path(__file__).resolve().parent / "prompts"
+
+
+def _load_prompt_file(name: str) -> str:
+    path = _prompt_dir() / name
+    return path.read_text(encoding="utf-8")
+
+
+def _build_long_overview_prompt(
+    *,
+    duration_sec: float,
+    chunk_plan: list[dict[str, float | int]],
+    intents: list[str],
+) -> str:
+    template = _load_prompt_file("video_long_overview_strategy.md")
+    return (
+        template
+        .replace("{duration_sec}", f"{duration_sec:.1f}")
+        .replace(
+            "{chunk_plan_json}",
+            json.dumps(chunk_plan, ensure_ascii=False, indent=2),
+        )
+        .replace("{ingest_intents}", ", ".join(intents))
+    )
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """Extract the first JSON object from a model response."""
+    raw = (text or "").strip()
+    if not raw:
+        raise AnalyzerError("长视频概览策略为空")
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw, re.IGNORECASE)
+    if fence:
+        raw = fence.group(1).strip()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        payload = json.loads(raw[start:end + 1])
+    if not isinstance(payload, dict):
+        raise AnalyzerError("长视频概览策略不是 JSON object")
+    return payload
+
+
+def _to_float(value: Any, default: float) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _score(value: Any) -> int:
+    return int(max(0, min(5, round(_to_float(value, 0)))))
+
+
+def _string_list(value: Any, *, limit: int = 8) -> list[str]:
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, str) and value.strip():
+        items = [value]
+    else:
+        return []
+    out: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if text:
+            out.append(text[:300])
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _strategy_fallback(
+    chunk_plan: list[dict[str, float | int]],
+    *,
+    reason: str,
+    overview: Optional[dict[str, Any]] = None,
+    raw_text: str = "",
+) -> dict[str, Any]:
+    chunks = []
+    for item in chunk_plan:
+        chunks.append({
+            **item,
+            "recommended_fps": _LONG_CHUNK_FPS_MAX,
+            "confidence": 0.0,
+            "scores": {
+                "visual_change": 0,
+                "ocr_subtitle_density": 0,
+                "operation_density": 0,
+                "motion_detail": 0,
+                "concept_density": 0,
+                "risk_if_low_fps": 5,
+            },
+            "rough_summary": "",
+            "evidence": [],
+            "focus": ["概览策略不可用，按最高精拆 fps 保守处理"],
+            "risk_flags": [reason],
+            "why_not_lower_fps": reason,
+            "fallback_applied": True,
+            "fallback_reason": reason,
+        })
+    return {
+        "ok": False,
+        "fallback_reason": reason,
+        "overview": overview or {},
+        "global_notes": "",
+        "raw_text": raw_text[:4000],
+        "chunks": chunks,
+    }
+
+
+def _normalize_long_video_strategy(
+    strategy_text: str,
+    chunk_plan: list[dict[str, float | int]],
+) -> dict[str, Any]:
+    """Validate model strategy and return per-chunk fps with conservative fallbacks."""
+    try:
+        payload = _extract_json_object(strategy_text)
+    except Exception as e:
+        return _strategy_fallback(
+            chunk_plan,
+            reason=f"概览策略 JSON 无效: {e}",
+            raw_text=strategy_text,
+        )
+
+    overview = payload.get("overview") if isinstance(payload.get("overview"), dict) else {}
+    strategy = payload.get("strategy") if isinstance(payload.get("strategy"), dict) else {}
+    raw_segments = strategy.get("segments") if isinstance(strategy.get("segments"), list) else []
+    by_part: dict[int, dict[str, Any]] = {}
+    for segment in raw_segments:
+        if not isinstance(segment, dict):
+            continue
+        part_index = int(_to_float(segment.get("part_index"), -1))
+        if part_index > 0:
+            by_part[part_index] = segment
+
+    if not by_part:
+        return _strategy_fallback(
+            chunk_plan,
+            reason="概览策略缺少 segments",
+            overview=overview,
+            raw_text=strategy_text,
+        )
+
+    normalized: list[dict[str, Any]] = []
+    for item in chunk_plan:
+        part_index = int(item["part_index"])
+        segment = by_part.get(part_index)
+        if not segment:
+            normalized.append(_strategy_fallback(
+                [item],
+                reason=f"概览策略缺少第 {part_index} 段",
+                overview=overview,
+                raw_text=strategy_text,
+            )["chunks"][0])
+            continue
+
+        confidence = max(0.0, min(1.0, _to_float(segment.get("confidence"), 0.0)))
+        raw_fps = _to_float(segment.get("recommended_fps"), _LONG_CHUNK_FPS_MAX)
+        fps = max(_LONG_CHUNK_FPS_MIN, min(_LONG_CHUNK_FPS_MAX, raw_fps))
+        # Keep upload values simple and stable; Ark accepts floats, but these are
+        # strategy levels rather than exact mathematical results.
+        fps = float(math.ceil(fps))
+        scores_raw = segment.get("scores") if isinstance(segment.get("scores"), dict) else {}
+        scores = {
+            "visual_change": _score(scores_raw.get("visual_change")),
+            "ocr_subtitle_density": _score(scores_raw.get("ocr_subtitle_density")),
+            "operation_density": _score(scores_raw.get("operation_density")),
+            "motion_detail": _score(scores_raw.get("motion_detail")),
+            "concept_density": _score(scores_raw.get("concept_density")),
+            "risk_if_low_fps": _score(scores_raw.get("risk_if_low_fps")),
+        }
+        evidence = _string_list(segment.get("evidence"))
+        focus = _string_list(segment.get("focus"))
+        risk_flags = _string_list(segment.get("risk_flags"))
+        fallback_reasons: list[str] = []
+
+        if confidence < _LONG_STRATEGY_CONFIDENCE_MIN:
+            fallback_reasons.append(
+                f"策略置信度 {confidence:.2f} 低于 {_LONG_STRATEGY_CONFIDENCE_MIN:.2f}"
+            )
+            fps = _LONG_CHUNK_FPS_MAX
+        elif confidence < _LONG_STRATEGY_LOW_FPS_CONFIDENCE_MIN and fps <= 3:
+            fallback_reasons.append(
+                f"低 fps 建议置信度 {confidence:.2f} 不足，向上保守"
+            )
+            fps = 4.0
+
+        if not evidence and fps < _LONG_CHUNK_FPS_MAX:
+            fallback_reasons.append("缺少支持 fps 判断的证据")
+            fps = _LONG_CHUNK_FPS_MAX
+
+        if scores["risk_if_low_fps"] >= 5 and fps < _LONG_CHUNK_FPS_MAX:
+            fallback_reasons.append("低 fps 漏细节风险评分为 5")
+            fps = _LONG_CHUNK_FPS_MAX
+        elif scores["risk_if_low_fps"] >= 4 and fps < 4:
+            fallback_reasons.append("低 fps 漏细节风险较高")
+            fps = 4.0
+
+        chunk_duration = float(item["end_sec"]) - float(item["start_sec"])
+        if int(chunk_duration * fps) > _FRAMES_SAFE_TARGET:
+            safe_fps = math.floor((_FRAMES_SAFE_TARGET / chunk_duration) * 100) / 100.0
+            safe_fps = max(_LONG_CHUNK_FPS_MIN, min(_LONG_CHUNK_FPS_MAX, safe_fps))
+            if safe_fps < fps:
+                fallback_reasons.append(
+                    f"按 {fps:g}fps 会超过安全帧数，降到 {safe_fps:g}fps"
+                )
+                fps = safe_fps
+
+        normalized.append({
+            **item,
+            "recommended_fps": fps,
+            "confidence": confidence,
+            "scores": scores,
+            "rough_summary": str(segment.get("rough_summary") or "").strip()[:800],
+            "evidence": evidence,
+            "focus": focus,
+            "risk_flags": risk_flags,
+            "why_not_lower_fps": str(segment.get("why_not_lower_fps") or "").strip()[:800],
+            "fallback_applied": bool(fallback_reasons),
+            "fallback_reason": "; ".join(fallback_reasons),
+        })
+
+    return {
+        "ok": True,
+        "fallback_reason": "",
+        "overview": overview,
+        "global_notes": str(strategy.get("global_notes") or "").strip()[:1200],
+        "raw_text": strategy_text[:4000],
+        "chunks": normalized,
+    }
+
+
+def _overview_text_for_prompt(strategy: Optional[dict[str, Any]]) -> str:
+    if not strategy:
+        return ""
+    overview = strategy.get("overview") if isinstance(strategy.get("overview"), dict) else {}
+    pieces: list[str] = []
+    summary = str(overview.get("summary") or "").strip()
+    if summary:
+        pieces.append(f"全片概览：{summary}")
+    timeline = overview.get("timeline")
+    if isinstance(timeline, list) and timeline:
+        lines = []
+        for item in timeline[:12]:
+            if not isinstance(item, dict):
+                continue
+            start = _to_float(item.get("start_sec"), 0.0)
+            end = _to_float(item.get("end_sec"), 0.0)
+            chapter = str(item.get("chapter") or "").strip()
+            content = str(item.get("rough_content") or "").strip()
+            if chapter or content:
+                lines.append(f"- {start:.0f}s-{end:.0f}s：{chapter} {content}".strip())
+        if lines:
+            pieces.append("粗时间线：\n" + "\n".join(lines))
+    important = _string_list(overview.get("important_points"), limit=10)
+    if important:
+        pieces.append("重要线索：\n" + "\n".join(f"- {item}" for item in important))
+    uncertain = _string_list(overview.get("uncertain_points"), limit=8)
+    if uncertain:
+        pieces.append("不确定点：\n" + "\n".join(f"- {item}" for item in uncertain))
+    global_notes = str(strategy.get("global_notes") or "").strip()
+    if global_notes:
+        pieces.append(f"策略总评：{global_notes}")
+    return "\n\n".join(pieces).strip()
+
+
+def _chunk_strategy_context(strategy: Optional[dict[str, Any]], part_index: int) -> str:
+    if not strategy:
+        return ""
+    chunks = strategy.get("chunks") if isinstance(strategy.get("chunks"), list) else []
+    item = next((chunk for chunk in chunks if int(chunk.get("part_index", -1)) == part_index), None)
+    if not isinstance(item, dict):
+        return ""
+    lines = [
+        "本段精拆策略：",
+        f"- 推荐 fps：{item.get('recommended_fps')}",
+        f"- 策略置信度：{item.get('confidence')}",
+    ]
+    rough = str(item.get("rough_summary") or "").strip()
+    if rough:
+        lines.append(f"- 粗摘要：{rough}")
+    scores = item.get("scores")
+    if isinstance(scores, dict):
+        lines.append(
+            "- 评分："
+            + json.dumps(scores, ensure_ascii=False, sort_keys=True)
+        )
+    for key, label in (
+        ("evidence", "证据"),
+        ("focus", "精拆重点"),
+        ("risk_flags", "风险"),
+    ):
+        values = _string_list(item.get(key), limit=6)
+        if values:
+            lines.append(f"- {label}：" + "；".join(values))
+    why = str(item.get("why_not_lower_fps") or "").strip()
+    if why:
+        lines.append(f"- 不用更低 fps 的理由：{why}")
+    if item.get("fallback_applied"):
+        lines.append(f"- 程序保守回退：{item.get('fallback_reason')}")
+    return "\n".join(lines)
 
 
 def _split_video_for_chunks(video_path: Path, plan: list[dict[str, float | int]], out_dir: Path) -> list[Path]:
@@ -999,6 +1314,17 @@ async def analyze_video_many(
             "overlap_sec": _CHUNK_OVERLAP_SEC,
             "duration_sec": duration,
         })
+        strategy = await _prepare_long_video_strategy(
+            video_path,
+            chunk_plan,
+            list(prompts),
+            files_client=files_client,
+            responses_client=responses_client,
+            model=model,
+            file_active_timeout_sec=file_active_timeout_sec,
+            response_timeout_sec=response_timeout_sec,
+            on_progress=on_progress,
+        )
         with tempfile.TemporaryDirectory(prefix="obsidian-librarian-chunks-") as tmpdir:
             chunk_paths = await asyncio.to_thread(
                 _split_video_for_chunks,
@@ -1016,6 +1342,7 @@ async def analyze_video_many(
                 quality=quality,
                 full_duration=duration,
                 source_id=memory_source_id,
+                strategy=strategy,
                 file_active_timeout_sec=file_active_timeout_sec,
                 response_timeout_sec=response_timeout_sec,
                 on_progress=on_progress,
@@ -1093,6 +1420,91 @@ async def analyze_video_many(
     return results
 
 
+async def _prepare_long_video_strategy(
+    video_path: Path,
+    chunk_plan: list[dict[str, float | int]],
+    intents: list[str],
+    *,
+    files_client: Any,
+    responses_client: Any,
+    model: str,
+    file_active_timeout_sec: int,
+    response_timeout_sec: int,
+    on_progress: ProgressCb,
+) -> dict[str, Any]:
+    """Run a 1fps full-video overview and return a validated per-chunk strategy."""
+    await _call_progress(on_progress, "overview_uploading", {
+        "fps": _LONG_OVERVIEW_FPS,
+        "chunk_count": len(chunk_plan),
+    })
+    try:
+        file_obj = await _upload_with_preprocess(
+            files_client, video_path, fps=_LONG_OVERVIEW_FPS, model=model
+        )
+        file_id = getattr(file_obj, "id", None) or getattr(file_obj, "file_id", None)
+        if not file_id:
+            raise APIError(f"Files API 概览上传返回缺 id: {file_obj!r}")
+        await _call_progress(on_progress, "overview_uploaded", {
+            "file_id": file_id,
+            "fps": _LONG_OVERVIEW_FPS,
+        })
+        await _wait_for_active(
+            files_client,
+            file_id,
+            timeout_sec=file_active_timeout_sec,
+            on_progress=on_progress,
+        )
+        overview_prompt = _build_long_overview_prompt(
+            duration_sec=float(chunk_plan[-1]["end_sec"]),
+            chunk_plan=chunk_plan,
+            intents=intents,
+        )
+        await _call_progress(on_progress, "analyzing_overview", {
+            "file_id": file_id,
+            "model": model,
+            "fps": _LONG_OVERVIEW_FPS,
+        })
+        call = _as_response_call_result(await _stream_responses(
+            responses_client,
+            model=model,
+            file_id=file_id,
+            prompt=overview_prompt,
+            on_progress=on_progress,
+            timeout_sec=response_timeout_sec,
+        ))
+        if not call.text.strip():
+            raise APIError("Responses API 未返回长视频概览策略文本")
+        strategy = _normalize_long_video_strategy(call.text, chunk_plan)
+        await _call_progress(on_progress, "overview_strategy_decided", {
+            "ok": bool(strategy.get("ok")),
+            "fallback_reason": strategy.get("fallback_reason", ""),
+            "chunk_count": len(strategy.get("chunks", [])),
+            "fps_plan": [
+                {
+                    "part_index": item.get("part_index"),
+                    "fps": item.get("recommended_fps"),
+                    "confidence": item.get("confidence"),
+                    "fallback_applied": item.get("fallback_applied"),
+                }
+                for item in strategy.get("chunks", [])
+            ],
+        })
+        return strategy
+    except Exception as e:
+        reason = f"长视频概览策略失败，按 5fps 分片兜底: {e}"
+        strategy = _strategy_fallback(chunk_plan, reason=reason)
+        await _call_progress(on_progress, "overview_strategy_decided", {
+            "ok": False,
+            "fallback_reason": reason,
+            "chunk_count": len(chunk_plan),
+            "fps_plan": [
+                {"part_index": item["part_index"], "fps": _LONG_CHUNK_FPS_MAX}
+                for item in chunk_plan
+            ],
+        })
+        return strategy
+
+
 async def _analyze_video_chunks(
     chunk_paths: list[Path],
     chunk_plan: list[dict[str, float | int]],
@@ -1104,6 +1516,7 @@ async def _analyze_video_chunks(
     quality: str,
     full_duration: float,
     source_id: str,
+    strategy: Optional[dict[str, Any]],
     file_active_timeout_sec: int,
     response_timeout_sec: int,
     on_progress: ProgressCb,
@@ -1125,11 +1538,26 @@ async def _analyze_video_chunks(
     per_intent_chunks: dict[str, list[dict[str, Any]]] = {intent: [] for intent in prompts}
     first_file_id = ""
     total = len(chunk_paths)
+    raw_strategy_chunks = (strategy or {}).get("chunks", [])
+    if not isinstance(raw_strategy_chunks, list):
+        raw_strategy_chunks = []
+    strategy_chunks = {
+        int(item.get("part_index")): item
+        for item in raw_strategy_chunks
+        if isinstance(item, dict) and item.get("part_index") is not None
+    }
+    overview_context = _overview_text_for_prompt(strategy)
 
     for chunk_path, plan_item in zip(chunk_paths, chunk_plan):
         part_index = int(plan_item["part_index"])
         chunk_duration = float(plan_item["end_sec"]) - float(plan_item["start_sec"])
-        fps, target_frames, will_truncate = calc_fps(chunk_duration, quality)
+        strategy_item = strategy_chunks.get(part_index, {})
+        if strategy_item:
+            fps = float(strategy_item.get("recommended_fps") or _LONG_CHUNK_FPS_MAX)
+            target_frames = _FRAMES_SAFE_TARGET
+            will_truncate = int(fps * chunk_duration) > _FRAMES_HARD_CAP
+        else:
+            fps, target_frames, will_truncate = calc_fps(chunk_duration, quality)
         actual_frames_est = int(fps * chunk_duration)
         await _call_progress(on_progress, "chunk_uploading", {
             "part_index": part_index,
@@ -1137,6 +1565,8 @@ async def _analyze_video_chunks(
             "start_sec": plan_item["start_sec"],
             "end_sec": plan_item["end_sec"],
             "fps": fps,
+            "strategy_confidence": strategy_item.get("confidence"),
+            "strategy_fallback": strategy_item.get("fallback_applied"),
         })
         try:
             file_obj = await _upload_with_preprocess(files_client, chunk_path, fps=fps, model=model)
@@ -1161,8 +1591,14 @@ async def _analyze_video_chunks(
 
         for intent, prompt in prompts.items():
             previous_response_id = per_intent_response.get(intent)
-            chunk_prompt = (
-                f"{prompt}\n\n"
+            strategy_context = _chunk_strategy_context(strategy, part_index)
+            chunk_prompt = f"{prompt}\n\n"
+            if overview_context:
+                chunk_prompt += f"{overview_context}\n\n"
+            chunk_prompt += (
+                f"{strategy_context}\n\n" if strategy_context else ""
+            )
+            chunk_prompt += (
                 f"当前是长视频第 {part_index}/{total} 段，"
                 f"时间范围 {float(plan_item['start_sec']):.1f}s - "
                 f"{float(plan_item['end_sec']):.1f}s，"
@@ -1205,6 +1641,11 @@ async def _analyze_video_chunks(
                 "target_frames": target_frames,
                 "actual_frames_estimate": actual_frames_est,
                 "truncated": will_truncate,
+                "strategy_confidence": strategy_item.get("confidence"),
+                "strategy_scores": strategy_item.get("scores"),
+                "strategy_fallback_applied": strategy_item.get("fallback_applied"),
+                "strategy_fallback_reason": strategy_item.get("fallback_reason"),
+                "strategy_focus": strategy_item.get("focus"),
                 "usage": call.usage,
                 "response_id": call.response_id,
             })
@@ -1222,6 +1663,7 @@ async def _analyze_video_chunks(
             "下面是同一个长视频按时间切片得到的多段拆解结果。"
             "请合并成一份可直接写入 Obsidian 的最终资产正文：去重重叠片段，"
             "保留时间顺序、关键细节、结论和不确定点，不要提到内部 file_id 或 response_id。\n\n"
+            f"全片 1fps 概览与策略：\n{overview_context or '无'}\n\n"
             f"原始分析指令：\n{prompts[intent]}\n\n"
             f"分片结果：\n{body}"
         )
@@ -1252,7 +1694,10 @@ async def _analyze_video_chunks(
         results[intent] = AnalyzeResult(
             text=text,
             file_id=first_file_id or "chunked",
-            fps_used=_FPS_MAX,
+            fps_used=max(
+                float(item.get("fps", _LONG_CHUNK_FPS_MAX))
+                for item in per_intent_chunks[intent]
+            ),
             quality=quality,
             model=model,
             duration_sec=full_duration,

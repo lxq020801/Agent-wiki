@@ -838,6 +838,226 @@ def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
     ) is None
 
 
+def test_long_video_strategy_validation_falls_back_to_5fps() -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    plan = analyzer._chunk_plan(601)
+    strategy = analyzer._normalize_long_video_strategy("not json", plan)
+
+    assert strategy["ok"] is False
+    assert "JSON" in strategy["fallback_reason"]
+    assert len(strategy["chunks"]) == len(plan)
+    assert all(item["recommended_fps"] == 5.0 for item in strategy["chunks"])
+    assert all(item["fallback_applied"] is True for item in strategy["chunks"])
+
+    valid = analyzer._normalize_long_video_strategy(
+        json.dumps({
+            "overview": {
+                "summary": "一条长视频，前半段讲背景，后半段演示操作。",
+                "timeline": [],
+                "important_points": ["操作演示"],
+                "uncertain_points": [],
+            },
+            "strategy": {
+                "global_notes": "多数片段较稳定，但第二段操作密集。",
+                "segments": [
+                    {
+                        "part_index": 1,
+                        "start_sec": 0,
+                        "end_sec": 240,
+                        "rough_summary": "背景说明",
+                        "recommended_fps": 2,
+                        "confidence": 0.9,
+                        "scores": {
+                            "visual_change": 1,
+                            "ocr_subtitle_density": 1,
+                            "operation_density": 0,
+                            "motion_detail": 0,
+                            "concept_density": 2,
+                            "risk_if_low_fps": 1,
+                        },
+                        "evidence": ["固定机位，画面变化低"],
+                        "focus": ["核心结论"],
+                        "risk_flags": [],
+                        "why_not_lower_fps": "2fps 已能覆盖慢变化画面",
+                    },
+                    {
+                        "part_index": 2,
+                        "start_sec": 230,
+                        "end_sec": 470,
+                        "rough_summary": "软件操作演示",
+                        "recommended_fps": 2,
+                        "confidence": 0.6,
+                        "scores": {
+                            "visual_change": 3,
+                            "ocr_subtitle_density": 3,
+                            "operation_density": 5,
+                            "motion_detail": 3,
+                            "concept_density": 3,
+                            "risk_if_low_fps": 5,
+                        },
+                        "evidence": ["多处界面操作"],
+                        "focus": ["菜单和按钮"],
+                        "risk_flags": ["低 fps 可能漏步骤"],
+                        "why_not_lower_fps": "操作密集",
+                    },
+                    {
+                        "part_index": 3,
+                        "start_sec": 460,
+                        "end_sec": 601,
+                        "rough_summary": "总结",
+                        "recommended_fps": 3,
+                        "confidence": 0.7,
+                        "scores": {
+                            "visual_change": 1,
+                            "ocr_subtitle_density": 2,
+                            "operation_density": 0,
+                            "motion_detail": 0,
+                            "concept_density": 2,
+                            "risk_if_low_fps": 1,
+                        },
+                        "evidence": ["字幕较清楚"],
+                        "focus": ["结论"],
+                        "risk_flags": [],
+                        "why_not_lower_fps": "需要确认字幕",
+                    },
+                ],
+            },
+        }, ensure_ascii=False),
+        plan,
+    )
+
+    assert valid["ok"] is True
+    assert valid["chunks"][0]["recommended_fps"] == 2.0
+    assert valid["chunks"][1]["recommended_fps"] == 5.0
+    assert valid["chunks"][1]["fallback_applied"] is True
+    assert valid["chunks"][2]["recommended_fps"] == 4.0
+
+
+def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
+    import asyncio
+    import sys
+
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "chunk-strategy-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    chunk_paths = [tmp / "part-001.mp4", tmp / "part-002.mp4"]
+    for path in chunk_paths:
+        path.write_bytes(b"fake")
+    plan = [
+        {"part_index": 1, "start_sec": 0.0, "end_sec": 240.0, "overlap_sec": 0.0},
+        {"part_index": 2, "start_sec": 230.0, "end_sec": 470.0, "overlap_sec": 10.0},
+    ]
+    strategy = {
+        "ok": True,
+        "overview": {
+            "summary": "全片先讲背景，再演示操作。",
+            "timeline": [],
+            "important_points": ["操作步骤"],
+            "uncertain_points": [],
+        },
+        "global_notes": "第二段需要更高 fps。",
+        "chunks": [
+            {
+                **plan[0],
+                "recommended_fps": 2.0,
+                "confidence": 0.9,
+                "scores": {"risk_if_low_fps": 1},
+                "rough_summary": "背景说明",
+                "evidence": ["固定画面"],
+                "focus": ["结论"],
+                "risk_flags": [],
+                "why_not_lower_fps": "2fps 足够",
+                "fallback_applied": False,
+                "fallback_reason": "",
+            },
+            {
+                **plan[1],
+                "recommended_fps": 5.0,
+                "confidence": 0.8,
+                "scores": {"risk_if_low_fps": 5},
+                "rough_summary": "密集操作",
+                "evidence": ["多处点击"],
+                "focus": ["按钮和菜单"],
+                "risk_flags": ["可能漏步骤"],
+                "why_not_lower_fps": "操作密集",
+                "fallback_applied": False,
+                "fallback_reason": "",
+            },
+        ],
+    }
+    uploads = []
+    prompts = []
+
+    async def fake_upload(client, path, *, fps, model):
+        uploads.append((Path(path).name, fps))
+        return SimpleNamespace(id=f"file-{len(uploads)}")
+
+    async def fake_wait(*args, **kwargs):
+        return SimpleNamespace(status="active")
+
+    async def fake_stream(client, *, model, file_id, prompt, on_progress, previous_response_id=None, timeout_sec=None):
+        prompts.append(prompt)
+        return analyzer.ResponseCallResult(
+            text=f"{file_id} 分析结果",
+            usage={"total_tokens": 1},
+            response_id=f"resp-{file_id}",
+        )
+
+    async def fake_text(client, *, model, prompt, on_progress, previous_response_id=None, timeout_sec=None):
+        prompts.append(prompt)
+        return analyzer.ResponseCallResult(
+            text="最终汇总",
+            usage={"total_tokens": 1},
+            response_id="resp-final",
+        )
+
+    old_upload = analyzer._upload_with_preprocess
+    old_wait = analyzer._wait_for_active
+    old_stream = analyzer._stream_responses
+    old_text = analyzer._call_text_responses
+    try:
+        analyzer._upload_with_preprocess = fake_upload
+        analyzer._wait_for_active = fake_wait
+        analyzer._stream_responses = fake_stream
+        analyzer._call_text_responses = fake_text
+        results = asyncio.run(analyzer._analyze_video_chunks(
+            chunk_paths,
+            plan,
+            {"knowledge_ingest": "基础拆解 prompt"},
+            files_client=SimpleNamespace(),
+            responses_client=SimpleNamespace(),
+            model="doubao-seed-2-0-lite-260428",
+            quality="quality",
+            full_duration=470.0,
+            source_id="aweme-strategy",
+            strategy=strategy,
+            file_active_timeout_sec=120,
+            response_timeout_sec=900,
+            on_progress=None,
+        ))
+    finally:
+        analyzer._upload_with_preprocess = old_upload
+        analyzer._wait_for_active = old_wait
+        analyzer._stream_responses = old_stream
+        analyzer._call_text_responses = old_text
+
+    assert uploads == [("part-001.mp4", 2.0), ("part-002.mp4", 5.0)]
+    assert "全片概览" in prompts[0]
+    assert "本段精拆策略" in prompts[0]
+    assert "第二段需要更高 fps" in prompts[-1]
+    result = results["knowledge_ingest"]
+    assert result.chunked is True
+    assert result.fps_used == 5.0
+    assert result.actual_frames_estimate == 1680
+    assert [item["fps"] for item in result.chunks] == [2.0, 5.0]
+    assert result.chunks[1]["strategy_focus"] == ["按钮和菜单"]
+
+
 def test_websocket_config_writer_rejects_agent_plan_payload_key(tmp: Path) -> None:
     import asyncio
     import sys
@@ -1482,6 +1702,8 @@ def main() -> int:
         test_websocket_config_writer(tmp)
         test_quality_fps_stays_5_until_safe_frame_target()
         test_video_chunk_threshold_and_memory_store(tmp)
+        test_long_video_strategy_validation_falls_back_to_5fps()
+        test_chunk_analysis_uses_strategy_fps_and_context(tmp)
         test_websocket_config_writer_rejects_agent_plan_payload_key(tmp)
         test_websocket_config_writer_uses_explicit_ark_key_when_old_provider_present(tmp)
         test_config_loader_does_not_use_agent_plan_section(tmp)

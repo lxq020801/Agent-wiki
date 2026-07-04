@@ -76,9 +76,12 @@ The WebSocket control server writes:
 - Re-upload when fps/model preprocessing changes; do not cache `file_id`.
 - Responses memory is short-term only. Store returned `response_id` under
   `~/.obsidian-librarian/responses-memory/`; never write it into vault Markdown.
-- Videos longer than 10 minutes are split into 240s chunks with 10s overlap.
-  Each chunk is uploaded/analyzed independently, then text-only Responses
-  synthesizes the final asset body.
+- Videos longer than 10 minutes first run a full-video `1fps` overview. The
+  overview extracts rough content and a per-chunk strategy, then 240s chunks
+  with 10s overlap are uploaded/analyzed independently at `2-5fps`. Invalid
+  JSON, missing evidence, low confidence, or high low-fps risk must fall back
+  conservatively toward `5fps`. Text-only Responses then synthesizes the final
+  asset body from the overview and chunk results.
 
 ## Output Contract
 

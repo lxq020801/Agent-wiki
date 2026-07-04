@@ -26,7 +26,7 @@
 - Ark 硬上限：约 `1280` 帧。
 - `<= 250s`：保持 `5fps`。
 - `> 250s`：按 `1250 / 视频秒数` 向下调整 fps。
-- `> 600s`：不继续依赖单文件低 fps，自动切片。
+- `> 600s`：不继续依赖单文件低 fps，进入长视频“概览 + 切片精拆”策略。
 
 关键阈值：
 
@@ -35,14 +35,18 @@
 - `6250s / 104m10s`：0.2fps 到达 1250 安全目标。
 - `6400s / 106m40s`：0.2fps 到达 1280 硬上限。
 
-## 长视频切片
+## 长视频概览与切片
 
 触发条件：
 
 - 视频时长 `> 10 分钟`。
 
-切片策略：
+策略：
 
+- 先上传全片，使用 `1fps` 做概览。
+- 概览 prompt 要输出粗内容、粗时间线、重要概念、待确认点，以及每个固定切片的 `2-5fps` 精拆建议。
+- fps 决策不按死板类型判断，而按画面变化、字幕/OCR 密度、操作密度、动作细节、概念密度、低 fps 漏细节风险和置信度评分。
+- 程序校验概览 JSON。JSON 无效、缺段、缺证据、置信度低或风险高时，向更高 fps 保守回退，最保守为 `5fps`。
 - 每片 `240s`。
 - 重叠 `10s`。
 - 步长 `230s`。
@@ -50,12 +54,14 @@
 
 处理流程：
 
-1. 用 `ffmpeg -c copy` 生成临时 mp4 切片，尽量避免重新编码。
-2. 每片独立走 Files API 上传、等待 active。
-3. 每片独立用 Responses 分析。
-4. 每个入库意图独立维护 `previous_response_id` 链。
-5. 所有片段拆完后，再用 text-only Responses 汇总成最终资产正文。
-6. 临时切片目录结束后清理。
+1. 全片用 `1fps` 走 Files API 上传、等待 active。
+2. Responses 生成长视频概览和分段精拆策略。
+3. 用 `ffmpeg -c copy` 生成临时 mp4 切片，尽量避免重新编码。
+4. 每片按策略 fps 独立走 Files API 上传、等待 active。
+5. 每片独立用 Responses 分析，prompt 中带上全片概览和本段精拆重点。
+6. 每个入库意图独立维护 `previous_response_id` 链。
+7. 所有片段拆完后，再用全片概览和分片结果做 text-only Responses 汇总。
+8. 临时切片目录结束后清理。
 
 片段元数据会保留在运行结果里：
 
@@ -68,6 +74,11 @@
 - `target_frames`
 - `actual_frames_estimate`
 - `usage`
+- `strategy_confidence`
+- `strategy_scores`
+- `strategy_fallback_applied`
+- `strategy_fallback_reason`
+- `strategy_focus`
 
 ## Responses 记忆
 

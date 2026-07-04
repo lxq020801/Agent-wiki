@@ -111,9 +111,13 @@
 
 如果一次任务需要同时产出两份资产，扩展发送 `ingest_intents` 数组。服务端仍只创建一个队列任务；执行层下载一次、普通 Ark 上传/预处理一次，然后用不同 prompt 生成两份笔记。
 
-视频超过 10 分钟时，执行层会自动切片并在任务进度中出现：
+视频超过 10 分钟时，执行层会先做全片概览，再自动切片精拆，并在任务进度中出现：
 
 - `chunking_plan`
+- `overview_uploading`
+- `overview_uploaded`
+- `analyzing_overview`
+- `overview_strategy_decided`
 - `chunk_uploading`
 - `chunk_uploaded`
 - `analyzing_chunk`
