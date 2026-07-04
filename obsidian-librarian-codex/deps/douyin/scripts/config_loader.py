@@ -9,7 +9,7 @@ config_loader.py — 读取并校验 ~/.obsidian-librarian/config.toml
 公共契约：
     load_config(path=None) -> Config
     Config.provider
-    Config.ark_api_key / .ark_endpoint  # 普通豆包 Ark 凭据/端点
+    Config.ark_api_key / .ark_endpoint  # 字节跳动火山方舟 Ark 凭据/端点
     Config.analyzer_model / .analyzer_fallback / .strategy_model
     Config.quality_params(quality) -> dict
     Config.vault_path / .vault_relative_root
@@ -343,16 +343,16 @@ CONFIG_TEMPLATE = """\
 # 后期 Chrome 扩展会提供 GUI 编辑，目前手动填。
 
 [provider]
-# 固定使用普通豆包 / 火山方舟 API。旧 Agent Plan 配置会回落为 doubao。
+# 固定使用字节跳动火山方舟 API。旧 Agent Plan 配置会回落为 doubao。
 active = "doubao"
 
 [ark]
-# ⚠️ 普通火山方舟 API Key（provider.active = "doubao" 时必填）
+# ⚠️ 火山方舟 API Key（provider.active = "doubao" 时必填）
 api_key = ""
 endpoint = "https://ark.cn-beijing.volces.com/api/v3"
 
 [models]
-# 拆解模型（豆包 Seed 2.0 Lite，复刻信息量最强）
+# 拆解模型（Seed 2.0 Lite，复刻信息量最强）
 analyzer = "doubao-seed-2-0-lite-260428"
 # 长视频概览与分段策略模型（Mini，成本低；只做粗看、决策和 JSON 修复）
 strategy = "doubao-seed-2-0-mini-260428"

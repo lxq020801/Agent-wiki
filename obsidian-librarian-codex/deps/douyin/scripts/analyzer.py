@@ -1102,7 +1102,7 @@ def _validate_ark_endpoint(endpoint: str) -> str:
     if parsed.hostname.lower() not in _TRUSTED_ARK_HOSTS:
         raise AnalyzerError("Ark endpoint 必须使用可信 Ark 官方域名")
     if _is_agent_plan_endpoint(normalized):
-        raise AnalyzerError("Agent Plan 不再作为运行通道；请使用普通豆包 Ark API endpoint")
+        raise AnalyzerError("Agent Plan 不再作为运行通道；请使用字节跳动火山方舟 Ark API endpoint")
     return normalized
 
 

@@ -5,8 +5,8 @@ const WS_URL = 'ws://127.0.0.1:8765';
 const DEBUG_LOGS = false;
 const PROVIDERS = {
   doubao: {
-    label: '豆包',
-    shortLabel: '方舟 API',
+    label: '字节跳动',
+    shortLabel: '字节跳动方舟 API',
     endpoint: 'https://ark.cn-beijing.volces.com/api/v3',
     strategyModel: 'doubao-seed-2-0-mini-260428',
     keyPlaceholder: 'Ark API Key'

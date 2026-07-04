@@ -86,7 +86,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 
 ### `model_check`
 
-轻量模型健康检查。当前只支持普通豆包 / 火山方舟 Ark API，固定请求
+轻量模型健康检查。当前只支持字节跳动火山方舟 Ark API，固定请求
 `/api/v3/tokenization`。该检查只验证 API Key、endpoint、模型 ID 是否基本可用；
 这不等价于视频拆解端到端验证。
 

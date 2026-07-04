@@ -89,7 +89,7 @@ def default_task_concurrency(runtime_root=None):
 
 PROVIDERS = {
     "doubao": {
-        "label": "豆包 / 火山方舟 API",
+        "label": "字节跳动火山方舟 API",
         "section": "ark",
         "api_key_fields": ("arkApiKey", "doubaoApiKey", "apiKey"),
         "endpoint_fields": ("arkEndpoint", "doubaoEndpoint", "endpoint"),
