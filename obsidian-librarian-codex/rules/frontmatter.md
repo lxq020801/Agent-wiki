@@ -2,14 +2,17 @@
 
 > 本文档服从 SCHEMA.md 第三章「通用 Frontmatter 规范」的全部约束。任何冲突以 SCHEMA.md 为准。
 
-## 必填字段（12 个）
+## 必填字段（15 个）
 
-所有资产文件必须包含以下 12 个字段，缺一不可：
+所有资产文件必须包含以下 15 个字段，缺一不可：
 
 | 字段 | 类型 | 约束 | 说明 |
 |------|------|------|------|
 | `id` | string | `{YYYYMMDD}-{type}-{序号}`，全局唯一 | 资产主键，与文件名日期部分一致。type 缩写：`video` / `github` / `web` / `code` |
-| `type` | enum | `video_analysis` / `github_project` / `web_clip` / `code_module` | 资产类型，决定使用哪个模板 |
+| `type` | enum | `video_analysis` / `image_post_analysis` / `github_project` / `web_clip` / `code_module` | 来源模板类型，决定由哪个工具/模板生成 |
+| `asset_family` | enum | `knowledge_asset` / `creative_pattern` / `github_project` / `code_module` / `idea_asset` | 资产用途，决定主目录和召回用途 |
+| `source_media` | enum | `douyin_video` / `douyin_image_post` / `webpage` / `github` / `manual` / `other` | 来源形态 |
+| `ingest_intent` | enum | `knowledge_ingest` / `viral_breakdown` / `manual` | 本次入库意图 |
 | `title` | string | ≤60字，中文优先 | 资产标题，禁止纯英文（无中文来源需翻译） |
 | `source_url` | string | 有效 URL 或 `"manual"` | 原始来源链接；无来源（如纯原创）填 `"manual"` |
 | `ingested` | string | `YYYY-MM-DD` | 首次入库日期（非时间戳） |
@@ -27,6 +30,9 @@
 ---
 id: 20260617-video-001
 type: video_analysis
+asset_family: knowledge_asset
+source_media: douyin_video
+ingest_intent: knowledge_ingest
 title: "抖音视频下载：Cookie 鉴权链路分析"
 source_url: "https://www.douyin.com/video/xxxxx"
 ingested: 2026-06-17
@@ -47,6 +53,7 @@ related: []
 | type | 可选字段 | 说明 |
 |------|----------|------|
 | `video_analysis` | `platform`, `author`, `duration` | 平台、作者、时长（秒） |
+| `image_post_analysis` | `platform`, `author`, `image_count` | 平台、作者、图片数量 |
 | `github_project` | `repo`, `language`, `stars`, `license` | 仓库全名、主语言、star 数、许可证 |
 | `web_clip` | `domain`, `author`, `publish_date` | 域名、作者、发布日期 |
 | `code_module` | `language`, `dependencies`, `source_path` | 语言、依赖列表、源码路径 |
@@ -54,6 +61,9 @@ related: []
 ## 字段约束速查
 
 - **`id`**：永不修改，入库后即为资产永久主键。
+- **`asset_family`**：长期资产用途，优先用于目录、召回和维护。
+- **`source_media`**：来源形态，不得拿来替代资产用途。
+- **`ingest_intent`**：记录入口意图；扩展只能提交意图，最终写库仍由 Agent/工具执行。
 - **`title`**：禁止纯英文，无中文来源须翻译后填入。≤60字。
 - **`tags`**：禁止自创标签，所有标签必须在 SCHEMA.md 第四章登记。裸标签无 `#` 前缀。
 - **`summary`**：≤80字，必填，不得为空。

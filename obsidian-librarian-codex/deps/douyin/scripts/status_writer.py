@@ -51,6 +51,7 @@ class StatusWriter:
 
     def progress(self, sub_stage: str, info: dict[str, Any]) -> None:
         """记录细粒度进度（嵌进 progress dict 里）。"""
+        self._state["stage"] = sub_stage
         self._state.setdefault("progress", {})[sub_stage] = {
             **info,
             "at": time.time(),

@@ -43,11 +43,11 @@
 vault/
 ├── SCHEMA.md                 ← 本文件，Layer 1 宪法，每次会话必读
 ├── index.md                  ← 知识库总索引，每次写入后必须更新
-├── templates/                ← 4 种资产类型的 Markdown 骨架模板
+├── templates/                ← 来源模板与资产模板的 Markdown 骨架
 ├── raw/                      ← 原始抓取物（视频字幕、网页HTML、GitHub README）
-│   ├── videos/  web/  github/
+│   ├── videos/  images/  web/  github/
 ├── 知识资产/                  ← agent 产出的结构化笔记（正式产出区）
-│   ├── 视频分析/  GitHub项目/  网页剪藏/  代码模块/
+│   ├── 知识入库/  创作模式/  GitHub项目/  网页剪藏/  代码模块/
 ├── 系统记录/                  ← agent 自动生成：维护报告/、回收站/、变更日志/
 ├── .obsidian/                ← 【红线】agent 严禁读取或修改此目录
 └── .git/
@@ -57,18 +57,44 @@ vault/
 
 ---
 
-## 二、资产类型与模板
+## 二、双轴资产模型
 
-知识库支持 4 种资产类型，入库时必须使用 `templates/` 中的对应模板：
+知识库不再只按“来源形态”建模，而是采用双轴模型：
 
-| type 值 | 模板文件 | 用途 |
+### A. 来源维度：`source_media`
+
+| source_media 值 | 含义 |
+|---|---|
+| `douyin_video` | 抖音视频 |
+| `douyin_image_post` | 抖音图文/多图 |
+| `webpage` | 网页/文章 |
+| `github` | GitHub 仓库 |
+| `manual` | 用户或 Agent 手动创建 |
+| `other` | 其他来源，必须在正文说明 |
+
+### B. 资产用途维度：`asset_family`
+
+| asset_family 值 | 写入目录 | 用途 |
+|---|---|---|
+| `knowledge_asset` | `知识资产/知识入库/` | 知识、工具、项目、方法、步骤、风险、派生线索 |
+| `creative_pattern` | `知识资产/创作模式/` | 爆款基因、文案结构、叙事节奏、画面/剪辑特征、可迁移方法 |
+| `github_project` | `知识资产/GitHub项目/` | GitHub 仓库的中文化评估：功能、用法、风险 |
+| `code_module` | `知识资产/代码模块/` | 代码模块的能力说明书、接口契约、复刻步骤 |
+| `idea_asset` | `知识资产/知识入库/` | 用户灵感、问题、假设、方案草稿 |
+
+### C. 来源模板：`type`
+
+`type` 保留为兼容字段，用来表示本次资产由哪个工具/模板生成，不再承担长期资产用途分类。
+
+| type 值 | 模板文件 | 来源/工具含义 |
 |----------|----------|------|
-| `video_analysis` | `templates/video_analysis.md` | 视频内容拆解：观点、工具、方法、派生线索 |
-| `github_project` | `templates/github_project.md` | GitHub 仓库的中文化评估：功能、用法、风险 |
-| `web_clip` | `templates/web_clip.md` | 网页/文章的关键信息提取与结构化 |
-| `code_module` | `templates/code_module.md` | 代码模块的能力说明书、接口契约、复刻步骤 |
+| `video_analysis` | `templates/video_analysis.md` | 视频输入生成的资产 |
+| `image_post_analysis` | `templates/image_post_analysis.md` | 图文/多图输入生成的资产 |
+| `github_project` | `templates/github_project.md` | GitHub 仓库输入生成的资产 |
+| `web_clip` | `templates/web_clip.md` | 网页/文章输入生成的资产 |
+| `code_module` | `templates/code_module.md` | 代码模块输入生成的资产 |
 
-> 模板定义了必备章节，缺失章节视为不完整资产。SCHEMA.md 只定义跨类型的通用规范。
+> 目录按 `asset_family` 分区；来源信息写入 frontmatter。缺失必备章节视为不完整资产。
 
 ---
 
@@ -78,8 +104,11 @@ vault/
 
 ```yaml
 ---
-id: 20260617-video-001     # {日期}-{type}-{序号}，全局唯一
-type: video_analysis       # 资产类型（4种之一）
+id: 20260617-knowledge-001 # {日期}-{用途缩写}-{序号}，全局唯一
+type: video_analysis       # 来源模板类型
+asset_family: knowledge_asset
+source_media: douyin_video
+ingest_intent: knowledge_ingest
 title: "标题（≤60字）"     # 中文优先
 source_url: "https://..."  # 原始来源URL，无则填 "manual"
 ingested: 2026-06-17       # 入库日期
@@ -96,7 +125,10 @@ related: []                 # 关联的 [[笔记名]] 列表
 | 字段 | 必填 | 约束 |
 |------|------|------|
 | `id` | 是 | `{YYYYMMDD}-{type}-{序号}`，全局唯一 |
-| `type` | 是 | `video_analysis` / `github_project` / `web_clip` / `code_module` |
+| `type` | 是 | 来源模板类型：`video_analysis` / `image_post_analysis` / `github_project` / `web_clip` / `code_module` |
+| `asset_family` | 是 | `knowledge_asset` / `creative_pattern` / `github_project` / `code_module` / `idea_asset` |
+| `source_media` | 是 | `douyin_video` / `douyin_image_post` / `webpage` / `github` / `manual` / `other` |
+| `ingest_intent` | 是 | `knowledge_ingest` / `viral_breakdown` / `manual` |
 | `title` | 是 | ≤60字，中文优先 |
 | `source_url` | 是 | 原始链接，无来源填 `"manual"` |
 | `ingested` | 是 | `YYYY-MM-DD` |
@@ -116,9 +148,9 @@ related: []                 # 关联的 [[笔记名]] 列表
 
 **平台类：** `douyin` `bilibili` `youtube` `github` `zhihu` `weixin` `xiaohongshu` `hackernews` `arxiv` `medium` `substack` `twitter`
 
-**领域类：** `ai-agent` `video-analysis` `code-generation` `knowledge-management` `web-scraping` `api-design` `prompt-engineering` `llm` `rag` `mcp` `tool-use` `browser-automation`
+**领域类：** `ai-agent` `video-analysis` `image-analysis` `code-generation` `knowledge-management` `creative-pattern` `web-scraping` `api-design` `prompt-engineering` `llm` `rag` `mcp` `tool-use` `browser-automation`
 
-**类型类：** `tutorial` `reference` `case-study` `tool` `library` `framework` `opinion` `news` `paper` `sop`
+**类型类：** `knowledge-asset` `tutorial` `reference` `case-study` `tool` `library` `framework` `opinion` `news` `paper` `sop`
 
 **质量类：** `verified` `unverified` `outdated` `incomplete` `needs-review`
 
@@ -148,14 +180,17 @@ related: []                 # 关联的 [[笔记名]] 列表
 # 知识库索引
 > 最后更新：2026-06-17 | 资产总数：42
 
-## 视频分析
-- [[20260617-douyin-video-download|抖音视频下载]] — Cookie鉴权链路分析 `#douyin` `#video-analysis`
+## 知识入库
+- [[20260617-douyin-video-download|抖音视频下载]] — Cookie鉴权链路分析 `#douyin` `#knowledge-asset`
+
+## 创作模式
+- [[20260617-douyin-image-post-template|抖音图文结构拆解]] — 图文表达结构样本 `#douyin` `#creative-pattern`
 
 ## GitHub项目 / 网页剪藏 / 代码模块
 - [[20260616-openai-agents-sdk|OpenAI Agents SDK]] — 官方Agent SDK评估 `#ai-agent` `#library`
 ```
 
-**更新规则：** 按资产类型分组，组内倒序。每条 `[[文件名|标题]] — 摘要 \`#tag\``。资产标记 `deprecated`/`archived` 时移入「已归档」分组。每次更新顶部日期和总数。
+**更新规则：** 按资产用途分组，组内倒序。每条 `[[文件名|标题]] — 摘要 \`#tag\``。资产标记 `deprecated`/`archived` 时移入「已归档」分组。每次更新顶部日期和总数。
 
 ---
 
@@ -217,7 +252,7 @@ related: []                 # 关联的 [[笔记名]] 列表
 **提交频率：** 每次写入操作后立即 commit。一次写入 = 一次 commit。
 
 **提交信息格式：**
-- `ingest({type}): {title}` — 入库资产
+- `ingest({asset_family}): {title}` — 入库资产
 - `maintenance: {报告描述}` — 维护操作
 - `index: 更新 index.md（新增 N 条）` — 索引更新
 

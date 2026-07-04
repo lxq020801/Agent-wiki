@@ -50,13 +50,15 @@
 vault/
 ├── SCHEMA.md                 ← 宪法文件
 ├── index.md                  ← 知识库总索引
-├── templates/                ← 4 种资产类型的 Markdown 骨架模板
+├── templates/                ← 来源模板与资产模板的 Markdown 骨架
 ├── raw/                      ← 原始抓取物
 │   ├── videos/
+│   ├── images/
 │   ├── web/
 │   └── github/
 ├── 知识资产/                  ← agent 产出的结构化笔记（正式产出区）
-│   ├── 视频分析/
+│   ├── 知识入库/
+│   ├── 创作模式/
 │   ├── GitHub项目/
 │   ├── 网页剪藏/
 │   └── 代码模块/

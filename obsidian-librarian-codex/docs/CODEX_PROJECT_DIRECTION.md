@@ -12,31 +12,45 @@ obsidian-librarian 的主结构是：
 
 Chrome 扩展是辅助，不是主产品。
 
-## 当前 P0
+## 实现阶段口径
 
-P0 只做这几件事：
+P0 只表示实现顺序，不决定知识库宪法和资产模型。当前优先跑通这几件事：
 
 1. 扩展同步 `config.toml`
 2. 扩展同步 Douyin Cookie
-3. Agent 会话里直接发抖音链接时，完成入库
-4. 写入 `知识资产/视频分析/`
+3. Agent 会话或扩展页面入口提交抖音/图文入库任务
+4. 根据 `ingest_intent` 写入 `知识资产/知识入库/` 或 `知识资产/创作模式/`
 5. 更新 `index.md`
 6. 提交 git
 
 不做：
 
-- 扩展直接触发入库
-- 任务队列看板
 - 网页剪藏
 - 多平台支持
 - 系统级常驻服务
 
+## 资产模型
+
+当前使用双轴模型：
+
+- 来源维度：`source_media = douyin_video | douyin_image_post | webpage | github | manual | other`
+- 资产用途维度：`asset_family = knowledge_asset | creative_pattern | github_project | code_module | idea_asset`
+
+抖音入口当前只开放两类意图：
+
+- `knowledge_ingest`：知识入库
+- `viral_breakdown`：爆款拆解
+
+扩展可提供“完整入库”按钮，但它不是新的资产类型，只是一次任务同时提交
+`ingest_intents = [knowledge_ingest, viral_breakdown]`。执行层应复用同一来源素材，
+视频链路复用同一个 Ark `file_id`，最后写出两篇互相可关联的资产。
+
 ## 当前运行方式
 
 1. 先跑 `python3 install/bootstrap.py`
-2. 扩展只负责把配置和 Cookie 写进 `~/.obsidian-librarian/`
-3. 真正入库从 `python3 scripts/ingest_url.py "<douyin-url>"` 开始
-4. `server/websocket_server.py` 只负责控制面同步和状态确认
+2. 扩展负责把配置、Cookie、任务意图和页面线索写进 `~/.obsidian-librarian/`
+3. Agent 会话入口从 `python3 scripts/ingest_url.py "<douyin-url>" --intent knowledge_ingest` 开始
+4. 扩展入口由 `server/websocket_server.py` 写入 inbox，再由本地执行层运行 `ingest.py --task`
 
 ## 配置字段
 
@@ -58,7 +72,7 @@ P0 只做这几件事：
 
 ## 历史说明
 
-旧的文件桥、Downloads 轮询、扩展直触发任务，属于早期演进资料。它们保留在 `references/` 里，只能当历史看，不再当当前实现口径。
+旧的文件桥、Downloads 轮询、扩展直接执行业务编排，属于早期演进资料。它们保留在 `references/` 里，只能当历史看，不再当当前实现口径。
 
 ## 看哪里
 

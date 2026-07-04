@@ -1,6 +1,6 @@
 // popup.js - Obsidian Librarian control console
-// 扩展只做辅助控制台：Agent 状态、知识库识别、模型配置、Cookie 回传。
-// 视频拆解由 Agent 会话触发，不在扩展里启动。
+// 扩展只做辅助控制台：状态、配置、Cookie 回传、任务入口与进度观察。
+// 视频拆解仍由 Agent 本地执行层完成，扩展只提交任务。
 
 const WS_URL = 'ws://127.0.0.1:8765';
 const PROVIDERS = {
@@ -11,36 +11,42 @@ const PROVIDERS = {
     model: 'doubao-seed-2-0-lite-260428',
     keyPlaceholder: '普通方舟 API Key',
     modelPlaceholder: 'doubao-seed-2-0-lite-260428',
-    note: '普通 API Key · 按量计费接口'
-  },
-  volcengine_agent_plan: {
-    label: '火山 Agent Plan',
-    shortLabel: 'Agent Plan',
-    endpoint: 'https://ark.cn-beijing.volces.com/api/plan/v3',
-    model: 'doubao-seed-2.0-lite',
-    keyPlaceholder: 'Agent Plan 专属 API Key',
-    modelPlaceholder: 'doubao-seed-2.0-lite / ark-code-latest',
-    note: '专属 Plan Key · /api/plan/v3'
+    note: '普通 Ark API Key · Files API 上传后走 Responses 拆解'
   }
 };
 const DEFAULT_PROVIDER = 'doubao';
 const DEFAULT_ENDPOINT = PROVIDERS[DEFAULT_PROVIDER].endpoint;
 const DEFAULT_MODEL = PROVIDERS[DEFAULT_PROVIDER].model;
-const MODEL_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+const INGEST_INTENT_LABELS = {
+  knowledge_ingest: '知识入库',
+  viral_breakdown: '爆款拆解',
+  knowledge_and_viral: '完整入库'
+};
 const PENDING_COOKIE_KEYS = [
   'pendingCookieText',
   'pendingCookieCount',
   'pendingCookieNames',
   'pendingCookieGrabbedAt'
 ];
+const DOUYIN_COOKIE_QUERIES = [
+  { domain: 'douyin.com' },
+  { domain: '.douyin.com' },
+  { domain: 'www.douyin.com' },
+  { url: 'https://www.douyin.com/' },
+  { url: 'https://v.douyin.com/' },
+  { domain: 'iesdouyin.com' },
+  { domain: '.iesdouyin.com' }
+];
 
 let ws = null;
 let isAgentConnected = false;
 let reconnectTimer = null;
-let modelCheckTimer = null;
+let statusPollTimer = null;
 
 const PANELS = [
   ['agent', 'agent-section', 'agent-toggle', 'agent-panel'],
+  ['ingest', 'ingest-section', 'ingest-toggle', 'ingest-panel'],
+  ['tasks', 'tasks-section', 'tasks-toggle', 'tasks-panel'],
   ['vault', 'vault-section', 'vault-toggle', 'vault-panel'],
   ['model', 'model-section', 'model-toggle', 'model-panel'],
   ['cookie', 'cookie-section', 'cookie-toggle', 'cookie-panel']
@@ -55,17 +61,54 @@ function providerInfo(value) {
 }
 
 function providerStorageKeys(value) {
-  const provider = normalizeProvider(value);
-  if (provider === 'volcengine_agent_plan') {
-    return {
-      apiKey: 'agentPlanApiKey',
-      model: 'agentPlanModel'
-    };
-  }
   return {
     apiKey: 'arkApiKey',
     model: 'arkModel'
   };
+}
+
+function ownValue(source, key) {
+  return Object.prototype.hasOwnProperty.call(source, key) ? source[key] : undefined;
+}
+
+function readStoredApiKey(source, provider) {
+  const keys = providerStorageKeys(provider);
+  const providerValue = ownValue(source, keys.apiKey);
+  if (providerValue !== undefined && providerValue !== null) {
+    return String(providerValue).trim();
+  }
+  return String(source.apiKey || '').trim();
+}
+
+function readStoredModel(source, provider) {
+  const keys = providerStorageKeys(provider);
+  const providerValue = ownValue(source, keys.model);
+  if (providerValue !== undefined && providerValue !== null) {
+    return String(providerValue).trim();
+  }
+  return String(source.model || '').trim();
+}
+
+function buildAgentConfig(config) {
+  const provider = normalizeProvider(config.provider);
+  const info = providerInfo(provider);
+  const keys = providerStorageKeys(provider);
+  const apiKey = readStoredApiKey(config, provider);
+  if (!apiKey) return null;
+
+  const model = readStoredModel(config, provider) || info.model;
+  const data = {
+    provider,
+    apiKey,
+    [keys.apiKey]: apiKey,
+    model,
+    [keys.model]: model,
+    endpoint: info.endpoint
+  };
+  if (config.vaultPath) {
+    data.vaultPath = config.vaultPath;
+  }
+  return data;
 }
 
 // ─────────────────────────────────────────
@@ -87,7 +130,7 @@ function connectWebSocket() {
       }));
       requestStatus();
       flushPendingSync();
-      scheduleModelHealthCheck();
+      startStatusPolling();
     };
 
     ws.onmessage = (event) => {
@@ -101,6 +144,7 @@ function connectWebSocket() {
     ws.onclose = () => {
       updateConnectionStatus(false);
       ws = null;
+      stopStatusPolling();
       reconnectTimer = setTimeout(connectWebSocket, 3000);
     };
 
@@ -113,6 +157,21 @@ function connectWebSocket() {
   }
 }
 
+function startStatusPolling() {
+  if (statusPollTimer) return;
+  statusPollTimer = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      requestStatus();
+    }
+  }, 3000);
+}
+
+function stopStatusPolling() {
+  if (!statusPollTimer) return;
+  clearInterval(statusPollTimer);
+  statusPollTimer = null;
+}
+
 function sendToAgent(data) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(data));
@@ -123,6 +182,10 @@ function sendToAgent(data) {
 
 function requestStatus() {
   sendToAgent({ type: 'status_request' });
+}
+
+function requestTaskStatus() {
+  sendToAgent({ type: 'task_status_request' });
 }
 
 function transientStorage() {
@@ -162,6 +225,10 @@ function handleAgentMessage(msg) {
       applyStatusSnapshot(msg.status || {});
       break;
 
+    case 'task_status_snapshot':
+      applyTaskStatus(msg.tasks || {});
+      break;
+
     case 'config_synced':
       chrome.storage.local.set({ configSyncedAt: new Date().toISOString() });
       showHint('config-hint', '配置已同步到 Agent', 'success');
@@ -171,7 +238,11 @@ function handleAgentMessage(msg) {
     case 'cookie_synced':
       chrome.storage.local.set({ cookieSyncedAt: new Date().toISOString() });
       transientStorage().remove(PENDING_COOKIE_KEYS);
-      setStatus('cookie', 'Cookie 已同步', 'online', formatTime(msg.timestamp || new Date().toISOString()));
+      if (msg.status) {
+        applyCookieStatus(msg.status);
+      } else {
+        setStatus('cookie', 'Cookie 已同步', 'online', formatTime(msg.timestamp || new Date().toISOString()));
+      }
       break;
 
     case 'vault_status':
@@ -179,11 +250,18 @@ function handleAgentMessage(msg) {
       break;
 
     case 'model_status':
+      chrome.storage.local.set({ modelStatus: msg.status || {} });
       applyModelStatus(msg.status || {});
       break;
 
     case 'task_rejected':
-      showHint('notification-area', '请在 Agent 会话中发送链接入库', 'warning');
+      showHint('tasks-hint', msg.message || '任务提交失败', 'warning');
+      requestTaskStatus();
+      break;
+
+    case 'task_accepted':
+      showHint('tasks-hint', msg.message || '任务已进入队列', 'success');
+      requestTaskStatus();
       break;
 
     default:
@@ -195,6 +273,7 @@ function applyStatusSnapshot(status) {
   applyVaultStatus(status.vault || {});
   applyModelStatus(status.model || {});
   applyCookieStatus(status.cookie || {});
+  applyTaskStatus(status.tasks || {});
 }
 
 function applyVaultStatus(status) {
@@ -214,11 +293,10 @@ function applyVaultStatus(status) {
 }
 
 function applyModelStatus(status) {
-  const provider = normalizeProvider(status.provider || document.getElementById('provider').value);
+  const currentProvider = normalizeProvider(document.getElementById('provider').value);
+  const provider = normalizeProvider(status.provider || currentProvider);
   const info = providerInfo(provider);
   const model = status.model || document.getElementById('model').value || info.model;
-  document.getElementById('provider').value = provider;
-  updateProviderCopy(provider, { preserveModel: true });
   if (status.state === 'missing') {
     setStatus('model', '缺少 API Key', 'warning', formatTime(status.checkedAt));
   } else if (status.ok || status.state === 'ready') {
@@ -228,7 +306,7 @@ function applyModelStatus(status) {
   } else {
     setStatus('model', status.message || '模型连接异常', 'offline', formatTime(status.checkedAt));
   }
-  if (model) {
+  if (provider === currentProvider && model) {
     document.getElementById('model').value = model;
   }
   if (status.message) {
@@ -239,9 +317,150 @@ function applyModelStatus(status) {
 function applyCookieStatus(status) {
   if (status.ok || status.state === 'ready') {
     setStatus('cookie', 'Cookie 已同步', 'online', formatTime(status.updatedAt));
+  } else if (status.state === 'incomplete') {
+    const count = status.cookieCount || 0;
+    setStatus('cookie', `Cookie 不完整 ${count} 条`, 'warning', formatTime(status.updatedAt));
+    showHint('cookie-hint', status.message || '请打开抖音网页版登录后重新抓取', 'warning');
+  } else if (status.state === 'missing') {
+    setStatus('cookie', 'Cookie 未同步', isAgentConnected ? 'warning' : 'offline', formatTime(status.updatedAt));
+    showHint('cookie-hint', status.message || '请打开抖音网页版登录后抓取 Cookie', 'warning');
   } else {
-    refreshCookieStatusFromStorage();
+    setStatus('cookie', status.message || 'Cookie 状态未知', 'warning', formatTime(status.updatedAt));
   }
+}
+
+function applyTaskStatus(snapshot) {
+  const items = Array.isArray(snapshot.items) ? snapshot.items : [];
+  const running = Number(snapshot.running || 0);
+  const failed = Number(snapshot.failed || 0);
+  const done = Number(snapshot.done || 0);
+  const latest = items[0] || null;
+
+  if (running > 0) {
+    setStatus('tasks', `${running} 个进行中`, 'warning', formatTaskTime(latest?.updatedAt));
+  } else if (failed > 0 && latest?.ok === false) {
+    setStatus('tasks', '最近任务失败', 'offline', formatTaskTime(latest.updatedAt));
+  } else if (done > 0) {
+    setStatus('tasks', '最近任务成功', 'online', formatTaskTime(latest?.updatedAt));
+  } else {
+    setStatus('tasks', '暂无任务', isAgentConnected ? 'warning' : 'offline');
+  }
+
+  renderTaskList(items);
+}
+
+function renderTaskList(items) {
+  const list = document.getElementById('task-list');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = '还没有入库任务';
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const task of items.slice(0, 8)) {
+    const card = document.createElement('div');
+    card.className = `task-card ${taskTone(task)}`;
+
+    const head = document.createElement('div');
+    head.className = 'task-head';
+
+    const title = document.createElement('strong');
+    title.textContent = compactTaskTitle(task.title || task.url || task.id);
+    title.title = task.title || task.url || task.id;
+
+    const badge = document.createElement('span');
+    badge.className = 'task-badge';
+    badge.textContent = task.stageLabel || stageLabel(task.displayStage || task.stage);
+
+    head.append(title, badge);
+
+    const meta = document.createElement('div');
+    meta.className = 'task-meta';
+    meta.textContent = taskMetaText(task);
+
+    const bar = document.createElement('div');
+    bar.className = 'task-progress';
+    const fill = document.createElement('div');
+    fill.style.width = `${Math.max(0, Math.min(100, Number(task.progressPercent || 0)))}%`;
+    bar.appendChild(fill);
+
+    const detail = document.createElement('div');
+    detail.className = 'task-detail';
+    if (task.ok === false) {
+      detail.textContent = task.error || task.hint || '任务失败';
+    } else if (task.ok === true) {
+      detail.textContent = Array.isArray(task.assets) && task.assets.length > 1
+        ? `已写入 ${task.assets.length} 篇资产`
+        : (task.vaultPath ? compactPath(task.vaultPath) : '已写入知识库');
+    } else {
+      detail.textContent = task.url || '';
+    }
+
+    card.append(head, meta, bar, detail);
+    list.appendChild(card);
+  }
+}
+
+function taskTone(task) {
+  if (task.ok === true) return 'done';
+  if (task.ok === false) return 'failed';
+  return 'running';
+}
+
+function compactTaskTitle(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '入库任务';
+  if (text.length <= 42) return text;
+  return `${text.slice(0, 40)}…`;
+}
+
+function taskMetaText(task) {
+  const stage = task.stageLabel || stageLabel(task.displayStage || task.stage);
+  const elapsed = formatElapsed(task.elapsedSec);
+  const intent = task.ingestIntents?.length > 1
+    ? '完整入库'
+    : (INGEST_INTENT_LABELS[task.ingestIntent] || '');
+  const source = task.source === 'extension_inline_button' ? '页面按钮' :
+    task.source === 'extension_context_menu' ? '右键菜单' :
+      task.source === 'extension_popup' ? '扩展' : 'Agent';
+  return [stage, elapsed, intent, source].filter(Boolean).join(' · ');
+}
+
+function stageLabel(stage) {
+  return {
+    queued: '排队中',
+    started: '已开始',
+    downloading: '下载中',
+    download: '下载中',
+    downloaded: '下载完成',
+    downloading_images: '下载图片',
+    downloaded_images: '图片下载完成',
+    probed_duration: '读取视频信息',
+    fps_decided: '计算抽帧',
+    chunking_plan: '规划切片',
+    chunk_uploading: '上传切片',
+    chunk_uploaded: '切片上传完成',
+    uploading: '上传中',
+    uploaded: '上传完成',
+    waiting_active: '等待预处理',
+    encoding_images: '编码图片',
+    analyzing: '分析中',
+    analyzing_chunk: '分析切片',
+    chunk_done: '切片分析完成',
+    synthesizing_chunks: '汇总切片',
+    synthesizing_done: '汇总完成',
+    analyzing_done: '分析完成',
+    analyzed: '分析完成',
+    writing_vault: '写入知识库',
+    done: '成功',
+    failed: '失败',
+    config_error: '配置错误',
+    task_invalid: '任务无效'
+  }[stage] || stage || '处理中';
 }
 
 // ─────────────────────────────────────────
@@ -252,27 +471,24 @@ async function loadConfig() {
   const result = await chrome.storage.local.get([
     'apiKey',
     'arkApiKey',
-    'agentPlanApiKey',
     'provider',
     'vaultPath',
     'model',
     'arkModel',
-    'agentPlanModel',
     'cookieSyncedAt',
     'modelStatus'
   ]);
   const provider = normalizeProvider(result.provider);
   const info = providerInfo(provider);
-  const keys = providerStorageKeys(provider);
-  document.getElementById('api-key').value = result[keys.apiKey] || result.apiKey || '';
+  document.getElementById('api-key').value = readStoredApiKey(result, provider);
   document.getElementById('provider').value = provider;
   document.getElementById('vault-path').value = result.vaultPath || '';
-  document.getElementById('model').value = result[keys.model] || result.model || info.model;
+  document.getElementById('model').value = readStoredModel(result, provider) || info.model;
   updateProviderCopy(provider, { preserveModel: true });
 
   if (result.modelStatus) {
     applyModelStatus(result.modelStatus);
-  } else if (result.apiKey || result[keys.apiKey]) {
+  } else if (readStoredApiKey(result, provider)) {
     setStatus('model', `${info.shortLabel} 待测试`, 'warning');
   }
 }
@@ -302,12 +518,23 @@ async function collectConfig() {
 async function saveConfig() {
   const config = await collectConfig();
   await chrome.storage.local.set(config);
-  const sent = sendToAgent({ type: 'config_update', data: config });
+  const agentConfig = buildAgentConfig(config);
+  if (!agentConfig) {
+    setStatus('model', '缺少 API Key', 'warning');
+    showHint('config-hint', '配置已本地保存，未发送空 API Key', 'warning');
+    showHint('model-hint', '填写 API Key 后再测试连接', 'warning');
+    return;
+  }
 
-  if (sent) {
-    showHint('config-hint', '配置已发送', 'success');
-    checkModelHealth();
+  const configSent = sendToAgent({ type: 'config_update', data: agentConfig });
+  const checkSent = sendToAgent({ type: 'model_check', data: agentConfig });
+
+  if (configSent && checkSent) {
+    setStatus('model', '正在测试连接', 'warning');
+    showHint('config-hint', '配置已发送，正在测试连接', 'success');
+    showHint('model-hint', '正在测试模型连接', 'warning');
   } else {
+    await chrome.runtime.sendMessage({ action: 'syncModelConfigAndCheck' }).catch(() => null);
     showHint('config-hint', 'Agent 未连接，配置已本地保存', 'warning');
   }
 }
@@ -316,19 +543,17 @@ async function sendConfigToAgent({ silent = false } = {}) {
   const stored = await chrome.storage.local.get([
     'apiKey',
     'arkApiKey',
-    'agentPlanApiKey',
     'provider',
     'model',
     'arkModel',
-    'agentPlanModel',
     'vaultPath'
   ]);
   const provider = normalizeProvider(stored.provider);
   const info = providerInfo(provider);
   const keys = providerStorageKeys(provider);
-  const apiKey = stored[keys.apiKey] || stored.apiKey || '';
-  const model = stored[keys.model] || stored.model || info.model;
-  if (!apiKey && !model && !stored.vaultPath) return false;
+  const apiKey = readStoredApiKey(stored, provider);
+  if (!apiKey) return false;
+  const model = readStoredModel(stored, provider) || info.model;
 
   const data = {
     provider,
@@ -350,13 +575,24 @@ async function sendConfigToAgent({ silent = false } = {}) {
 async function checkModelHealth() {
   const config = await collectConfig();
   await chrome.storage.local.set(config);
+  const agentConfig = buildAgentConfig(config);
+  if (!agentConfig) {
+    setStatus('model', '缺少 API Key', 'warning');
+    showHint('model-hint', '填写 API Key 后再测试连接', 'warning');
+    return false;
+  }
+
   setStatus('model', '正在测试连接', 'warning');
   showHint('model-hint', '正在测试模型连接', 'warning');
-  const sent = sendToAgent({ type: 'model_check', data: config });
+  const sent = sendToAgent({ type: 'model_check', data: agentConfig });
   if (!sent) {
-    setStatus('model', 'Agent 未连接', 'offline');
-    showHint('model-hint', '请先启动 Agent 服务', 'warning');
+    const response = await chrome.runtime.sendMessage({ action: 'modelHealthCheck' }).catch(() => null);
+    if (!response?.accepted) {
+      setStatus('model', 'Agent 未连接', 'offline');
+      showHint('model-hint', '请先启动 Agent 服务', 'warning');
+    }
   }
+  return sent;
 }
 
 async function handleProviderChange() {
@@ -364,13 +600,18 @@ async function handleProviderChange() {
   const info = providerInfo(provider);
   const keys = providerStorageKeys(provider);
   const stored = await chrome.storage.local.get([keys.apiKey, keys.model]);
-  document.getElementById('api-key').value = stored[keys.apiKey] || '';
-  document.getElementById('model').value = stored[keys.model] || info.model;
+  const apiKey = stored[keys.apiKey] || '';
+  const model = stored[keys.model] || info.model;
+  document.getElementById('api-key').value = apiKey;
+  document.getElementById('model').value = model;
   updateProviderCopy(provider, { preserveModel: true });
   await chrome.storage.local.set({
     provider,
     endpoint: info.endpoint,
-    model: document.getElementById('model').value.trim() || info.model
+    apiKey,
+    [keys.apiKey]: apiKey,
+    model,
+    [keys.model]: model
   });
   setStatus('model', `${info.shortLabel} 待测试`, 'warning');
   showHint('model-hint', info.note, 'warning');
@@ -392,13 +633,50 @@ function updateProviderCopy(providerValue, { preserveModel = true } = {}) {
   if (note) note.textContent = info.note;
 }
 
-function scheduleModelHealthCheck() {
-  clearInterval(modelCheckTimer);
-  modelCheckTimer = setInterval(() => {
-    if (isAgentConnected) {
-      checkModelHealth();
+// ─────────────────────────────────────────
+// Ingest task entry
+// ─────────────────────────────────────────
+
+async function submitDouyinIngestFromPopup(ingestIntent) {
+  const shareInput = document.getElementById('douyin-share-text');
+  const knowledgeBtn = document.getElementById('ingest-knowledge');
+  const viralBtn = document.getElementById('ingest-viral');
+  const shareText = shareInput?.value.trim() || '';
+  const label = INGEST_INTENT_LABELS[ingestIntent] || '入库';
+
+  if (!isAgentConnected) {
+    setStatus('ingest', 'Agent 未连接', 'offline');
+    showHint('ingest-hint', '请先启动 Agent 服务', 'warning');
+    return;
+  }
+
+  knowledgeBtn.disabled = true;
+  viralBtn.disabled = true;
+  setStatus('ingest', `正在提交${label}`, 'warning');
+  showHint('ingest-hint', shareText ? '正在从分享文案提取链接并提交' : '正在识别当前抖音页面', 'warning');
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      action: 'submitDouyinIngestFromPopup',
+      ingestIntent,
+      shareText
+    });
+
+    if (response?.ok) {
+      setStatus('ingest', `${label}已提交`, 'online', formatTime(new Date().toISOString()));
+      showHint('ingest-hint', response.message || '任务已进入队列', 'success');
+      requestTaskStatus();
+    } else {
+      setStatus('ingest', '提交失败', 'offline');
+      showHint('ingest-hint', response?.message || '没有识别到可入库的抖音链接', 'warning');
     }
-  }, MODEL_CHECK_INTERVAL_MS);
+  } catch (err) {
+    setStatus('ingest', '提交失败', 'offline');
+    showHint('ingest-hint', err.message || '扩展后台未响应', 'warning');
+  } finally {
+    knowledgeBtn.disabled = false;
+    viralBtn.disabled = false;
+  }
 }
 
 // ─────────────────────────────────────────
@@ -431,6 +709,41 @@ function pickVault() {
 // Cookie
 // ─────────────────────────────────────────
 
+function isDouyinCookie(cookie) {
+  const domain = String(cookie.domain || '').toLowerCase().replace(/^\./, '');
+  return domain === 'douyin.com' || domain.endsWith('.douyin.com') ||
+    domain === 'iesdouyin.com' || domain.endsWith('.iesdouyin.com');
+}
+
+function cookieIdentity(cookie) {
+  return `${cookie.domain}\t${cookie.path}\t${cookie.name}`;
+}
+
+async function collectDouyinCookies() {
+  const byKey = new Map();
+  const addCookies = (items) => {
+    for (const cookie of items || []) {
+      if (isDouyinCookie(cookie)) {
+        byKey.set(cookieIdentity(cookie), cookie);
+      }
+    }
+  };
+
+  for (const query of DOUYIN_COOKIE_QUERIES) {
+    addCookies(await chrome.cookies.getAll(query));
+  }
+
+  if (byKey.size < 8) {
+    addCookies(await chrome.cookies.getAll({}));
+  }
+
+  return Array.from(byKey.values()).sort((a, b) => {
+    const domain = a.domain.localeCompare(b.domain);
+    if (domain !== 0) return domain;
+    return a.name.localeCompare(b.name);
+  });
+}
+
 async function grabCookie() {
   const btn = document.getElementById('grab-cookie');
   btn.disabled = true;
@@ -441,16 +754,7 @@ async function grabCookie() {
       throw new Error('缺少 chrome.cookies 权限');
     }
 
-    let cookies = await chrome.cookies.getAll({ domain: 'www.douyin.com' });
-    if (cookies.length === 0) cookies = await chrome.cookies.getAll({ domain: '.douyin.com' });
-    if (cookies.length === 0) cookies = await chrome.cookies.getAll({ domain: 'douyin.com' });
-    if (cookies.length === 0) cookies = await chrome.cookies.getAll({ url: 'https://www.douyin.com' });
-    if (cookies.length === 0) {
-      const allCookies = await chrome.cookies.getAll({});
-      cookies = allCookies.filter(c => (
-        c.domain.includes('douyin.com') || c.domain.includes('iesdouyin.com')
-      ));
-    }
+    const cookies = await collectDouyinCookies();
 
     if (cookies.length === 0) {
       setStatus('cookie', '未找到抖音 Cookie', 'offline');
@@ -477,7 +781,7 @@ async function grabCookie() {
     });
 
     if (sent) {
-      setStatus('cookie', `已抓取 ${cookies.length} 条，已发送`, 'online', formatTime(grabbedAt));
+      setStatus('cookie', `已抓取 ${cookies.length} 条，等待确认`, 'warning', formatTime(grabbedAt));
     } else {
       setStatus('cookie', `已抓取 ${cookies.length} 条，待同步`, 'warning', formatTime(grabbedAt));
     }
@@ -520,6 +824,7 @@ async function refreshCookieStatusFromStorage() {
 function updateConnectionStatus(connected) {
   isAgentConnected = connected;
   setStatus('agent', connected ? '已连接' : '未连接', connected ? 'online' : 'offline');
+  setStatus('ingest', connected ? '当前视频或分享链接' : 'Agent 未连接', connected ? 'warning' : 'offline');
   const topDot = document.getElementById('connection-status');
   if (topDot) {
     topDot.className = connected ? 'status-dot online' : 'status-dot offline';
@@ -622,6 +927,28 @@ function formatTime(value) {
   return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 }
 
+function formatTaskTime(value) {
+  if (!value) return '';
+  if (typeof value === 'number') {
+    return new Date(value * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  }
+  return formatTime(value);
+}
+
+function formatElapsed(seconds) {
+  if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) {
+    return '';
+  }
+  const total = Math.max(0, Math.round(Number(seconds)));
+  if (total < 60) return `${total} 秒`;
+  const min = Math.floor(total / 60);
+  const sec = total % 60;
+  if (min < 60) return sec ? `${min} 分 ${sec} 秒` : `${min} 分`;
+  const hour = Math.floor(min / 60);
+  const rest = min % 60;
+  return rest ? `${hour} 小时 ${rest} 分` : `${hour} 小时`;
+}
+
 function compactPath(path) {
   if (!path) return '';
   const parts = path.split('/').filter(Boolean);
@@ -641,7 +968,10 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('detect-vault').addEventListener('click', discoverVault);
   document.getElementById('pick-vault').addEventListener('click', pickVault);
   document.getElementById('grab-cookie').addEventListener('click', grabCookie);
+  document.getElementById('ingest-knowledge').addEventListener('click', () => submitDouyinIngestFromPopup('knowledge_ingest'));
+  document.getElementById('ingest-viral').addEventListener('click', () => submitDouyinIngestFromPopup('viral_breakdown'));
   document.getElementById('refresh-status').addEventListener('click', requestStatus);
+  document.getElementById('refresh-tasks').addEventListener('click', requestTaskStatus);
 
   document.getElementById('toggle-key').addEventListener('click', () => {
     const input = document.getElementById('api-key');
@@ -659,3 +989,5 @@ document.addEventListener('DOMContentLoaded', () => {
     connectWebSocket();
   });
 });
+
+window.addEventListener('unload', stopStatusPolling);

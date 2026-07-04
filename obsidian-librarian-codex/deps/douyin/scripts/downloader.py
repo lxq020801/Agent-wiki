@@ -23,7 +23,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -64,6 +64,8 @@ class VideoMeta:
     play_url: str          # 无水印 URL
     source_url: str        # 用户输入的原始 URL
     raw: dict              # vendor 返回的完整 metadata，留给上层挖掘
+    media_type: str = "video"  # video | image_post
+    image_urls: list[str] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -123,8 +125,9 @@ def _patch_cookie(cookie: str) -> None:
 
 
 _DY_URL_PATTERN = re.compile(
-    r"https?://(?:v\.douyin\.com/[A-Za-z0-9_-]+|"
-    r"(?:www\.)?(?:douyin|iesdouyin)\.com/(?:video|share/video|note)/\d+)",
+    r"https?://(?:v\.douyin\.com/[A-Za-z0-9_-]+/?|"
+    r"(?:www\.)?(?:douyin|iesdouyin)\.com/(?:video|share/video|note|share/note)/\d+"
+    r"(?:[/?#][^\s\"'<>，。！？、；：）)]*)?)",
     re.IGNORECASE,
 )
 
@@ -147,6 +150,82 @@ def extract_url(text: str) -> str:
 # ─────────────────────────────────────────────────────────────────
 # Metadata 拿取
 # ─────────────────────────────────────────────────────────────────
+
+
+def _url_list_from(value) -> list[str]:
+    if isinstance(value, dict):
+        urls = value.get("url_list") or value.get("download_url_list") or []
+        return [str(url) for url in urls if isinstance(url, str) and url]
+    if isinstance(value, list):
+        return [str(url) for url in value if isinstance(url, str) and url]
+    return []
+
+
+def _collect_urls_recursive(value) -> list[str]:
+    urls: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in {"url_list", "download_url_list"}:
+                urls.extend(_url_list_from(child))
+            else:
+                urls.extend(_collect_urls_recursive(child))
+    elif isinstance(value, list):
+        for child in value:
+            urls.extend(_collect_urls_recursive(child))
+    return urls
+
+
+def _image_items_from(value) -> list[dict]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        values = list(value.values())
+        if values and all(isinstance(item, dict) for item in values):
+            return [item for item in values if isinstance(item, dict)]
+        return [value]
+    return []
+
+
+def _extract_image_urls(detail: dict) -> list[str]:
+    """Extract ordered image URLs from Douyin image-post metadata."""
+    images = []
+    for key in ("images", "image_list", "original_images", "image_infos"):
+        value = detail.get(key)
+        images.extend(_image_items_from(value))
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for image in images:
+        candidates = []
+        for key in ("download_url_list", "url_list"):
+            candidates.extend(_url_list_from(image.get(key)))
+        for key in ("display_image", "origin_image", "large", "thumb"):
+            candidates.extend(_url_list_from(image.get(key)))
+        candidates.extend(_collect_urls_recursive(image))
+        for url in candidates:
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+                break
+    if not urls:
+        for url in _collect_urls_recursive(detail.get("image_infos")):
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+    return urls
+
+
+def _looks_like_image_post(detail: dict) -> bool:
+    return (
+        detail.get("media_type") == 2
+        or detail.get("aweme_type") == 68
+        or bool(detail.get("image_infos"))
+        or bool(detail.get("image_item_quality_level"))
+    )
+
+
+def _is_image_post(detail: dict, image_urls: list[str]) -> bool:
+    return _looks_like_image_post(detail) and bool(image_urls)
 
 
 def _extract_video_meta(aweme_id: str, raw: dict, source_url: str) -> VideoMeta:
@@ -176,6 +255,28 @@ def _extract_video_meta(aweme_id: str, raw: dict, source_url: str) -> VideoMeta:
     if status.get("is_delete") or status.get("allow_share") is False:
         raise VideoNotFoundError(f"视频已被删除或限制访问：{aweme_id}")
 
+    image_urls = _extract_image_urls(detail)
+    author = detail.get("author") or {}
+    if _looks_like_image_post(detail) and not image_urls:
+        raise DouyinError(
+            f"识别为图文作品但未提取到图片 URL（aweme_id={aweme_id}），"
+            "可能是 metadata 结构变化、cookie 风控或图片字段缺失"
+        )
+    if _is_image_post(detail, image_urls):
+        return VideoMeta(
+            aweme_id=str(aweme_id),
+            title=(detail.get("desc") or detail.get("preview_title") or "").strip() or f"untitled-{aweme_id}",
+            author=(author.get("nickname") or "").strip(),
+            author_sec_uid=(author.get("sec_uid") or "").strip(),
+            duration_sec=0.0,
+            cover_url=image_urls[0] if image_urls else "",
+            play_url="",
+            source_url=source_url,
+            raw=detail,
+            media_type="image_post",
+            image_urls=image_urls,
+        )
+
     video = detail.get("video") or {}
     play_addr = video.get("play_addr") or {}
     url_list = play_addr.get("url_list") or []
@@ -192,7 +293,6 @@ def _extract_video_meta(aweme_id: str, raw: dict, source_url: str) -> VideoMeta:
     duration_ms = video.get("duration") or detail.get("duration") or 0
     duration_sec = float(duration_ms) / 1000.0 if duration_ms > 1000 else float(duration_ms)
 
-    author = detail.get("author") or {}
     return VideoMeta(
         aweme_id=str(aweme_id),
         title=(detail.get("desc") or "").strip() or f"untitled-{aweme_id}",
@@ -314,7 +414,9 @@ async def download_video(
                         got += len(chunk)
                         if progress_cb:
                             try:
-                                progress_cb(got, total)
+                                ret = progress_cb(got, total)
+                                if asyncio.iscoroutine(ret):
+                                    await ret
                             except Exception:
                                 pass
         except httpx.HTTPError as e:
@@ -329,6 +431,86 @@ async def download_video(
     return out_path
 
 
+def _extension_from_response(url: str, content_type: str) -> str:
+    content_type = content_type.split(";", 1)[0].strip().lower()
+    if content_type in {"image/jpeg", "image/jpg"}:
+        return ".jpg"
+    if content_type == "image/png":
+        return ".png"
+    if content_type == "image/webp":
+        return ".webp"
+    suffix = Path(url.split("?", 1)[0]).suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".webp"}:
+        return ".jpg" if suffix == ".jpeg" else suffix
+    return ".jpg"
+
+
+async def download_images(
+    meta: VideoMeta,
+    out_dir: Path,
+    *,
+    timeout: float = 60.0,
+    progress_cb=None,
+) -> list[Path]:
+    """Download all images for a Douyin image post."""
+    if not meta.image_urls:
+        raise NetworkError(f"图文作品没有可下载图片 URL：{meta.aweme_id}")
+
+    out_dir = Path(out_dir).expanduser()
+    date = time.strftime("%Y%m%d")
+    post_dir = out_dir / f"{date}-{_slugify(meta.title, 50)}-{meta.aweme_id[-6:]}"
+    post_dir.mkdir(parents=True, exist_ok=True)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://www.douyin.com/",
+    }
+
+    import httpx
+
+    paths: list[Path] = []
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout, read=timeout),
+        follow_redirects=True,
+    ) as client:
+        for index, url in enumerate(meta.image_urls, start=1):
+            try:
+                async with client.stream("GET", url, headers=headers) as resp:
+                    if resp.status_code >= 400:
+                        raise NetworkError(f"图片 CDN HTTP {resp.status_code}：{url}")
+                    ext = _extension_from_response(url, resp.headers.get("content-type", ""))
+                    out_path = post_dir / f"{index:02d}{ext}"
+                    tmp_path = out_path.with_suffix(out_path.suffix + ".part")
+                    total = int(resp.headers.get("content-length", "0"))
+                    got = 0
+                    with tmp_path.open("wb") as f:
+                        async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
+                            f.write(chunk)
+                            got += len(chunk)
+                            if progress_cb:
+                                try:
+                                    ret = progress_cb(got, total, index, len(meta.image_urls))
+                                    if asyncio.iscoroutine(ret):
+                                        await ret
+                                except TypeError:
+                                    ret = progress_cb(got, total)
+                                    if asyncio.iscoroutine(ret):
+                                        await ret
+                                except Exception:
+                                    pass
+            except httpx.HTTPError as e:
+                raise NetworkError(f"图片下载失败：{e}") from e
+
+            if not tmp_path.exists() or tmp_path.stat().st_size == 0:
+                tmp_path.unlink(missing_ok=True)
+                raise NetworkError("图片下载完成但文件为空")
+            tmp_path.rename(out_path)
+            paths.append(out_path)
+
+    return paths
+
+
 # ─────────────────────────────────────────────────────────────────
 # 高层入口（供 ingest 调用）
 # ─────────────────────────────────────────────────────────────────
@@ -338,6 +520,8 @@ async def download(url: str, *, cookie_path: Path, out_dir: Path,
                    progress_cb=None) -> tuple[VideoMeta, Path]:
     """端到端：URL → metadata → 下载 → (meta, 本地路径)"""
     meta = await fetch_metadata(url, cookie_path)
+    if meta.media_type == "image_post":
+        raise DouyinError("该链接是图文作品，请使用图文分支下载")
     path = await download_video(meta, out_dir, progress_cb=progress_cb)
     return meta, path
 
@@ -369,7 +553,11 @@ def _cli_main() -> int:
             print(f"  title:    {meta.title}")
             print(f"  author:   {meta.author}")
             print(f"  duration: {meta.duration_sec:.1f}s")
-            print(f"  play_url: {meta.play_url[:100]}...")
+            print(f"  media:    {meta.media_type}")
+            if meta.media_type == "image_post":
+                print(f"  images:   {len(meta.image_urls)}")
+            else:
+                print(f"  play_url: {meta.play_url[:100]}...")
             return
         meta, path = await download(
             args.url, cookie_path=cookie_path, out_dir=out_dir,

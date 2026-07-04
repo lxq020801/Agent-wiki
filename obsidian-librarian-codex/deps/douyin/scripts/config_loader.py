@@ -9,7 +9,7 @@ config_loader.py — 读取并校验 ~/.obsidian-librarian/config.toml
 公共契约：
     load_config(path=None) -> Config
     Config.provider
-    Config.ark_api_key / .ark_endpoint  # 当前 provider 的有效凭据/端点
+    Config.ark_api_key / .ark_endpoint  # 普通豆包 Ark 凭据/端点
     Config.analyzer_model / .analyzer_fallback
     Config.quality_params(quality) -> dict
     Config.vault_path / .vault_relative_root
@@ -47,7 +47,6 @@ def default_config_path() -> Path:
 DEFAULT_CONFIG_PATH = default_config_path()
 DEFAULT_PROVIDER = "doubao"
 DEFAULT_DOUBAO_ENDPOINT = "https://ark.cn-beijing.volces.com/api/v3"
-DEFAULT_AGENT_PLAN_ENDPOINT = "https://ark.cn-beijing.volces.com/api/plan/v3"
 
 
 def _normalize_provider(value: object) -> str:
@@ -57,14 +56,16 @@ def _normalize_provider(value: object) -> str:
         "ark_api": "doubao",
         "doubao_api": "doubao",
         "normal_ark": "doubao",
-        "agent_plan": "volcengine_agent_plan",
-        "agentplan": "volcengine_agent_plan",
-        "volcengine-agent-plan": "volcengine_agent_plan",
-        "volcengine_agent": "volcengine_agent_plan",
-        "ark_agent_plan": "volcengine_agent_plan",
+        # Agent Plan 曾验证过 inline base64 小视频路径，但不再作为产品运行通道。
+        "agent_plan": "doubao",
+        "agentplan": "doubao",
+        "volcengine-agent-plan": "doubao",
+        "volcengine_agent": "doubao",
+        "ark_agent_plan": "doubao",
+        "volcengine_agent_plan": "doubao",
     }
     normalized = aliases.get(raw, raw)
-    return normalized if normalized in {"doubao", "volcengine_agent_plan"} else DEFAULT_PROVIDER
+    return normalized if normalized == "doubao" else DEFAULT_PROVIDER
 
 
 class ConfigError(Exception):
@@ -101,7 +102,10 @@ class Config:
     doubao_api_key: str = ""
     doubao_endpoint: str = DEFAULT_DOUBAO_ENDPOINT
     agent_plan_api_key: str = ""
-    agent_plan_endpoint: str = DEFAULT_AGENT_PLAN_ENDPOINT
+    agent_plan_endpoint: str = ""
+    files_api_key: str = ""
+    files_endpoint: str = DEFAULT_DOUBAO_ENDPOINT
+    response_timeout_sec: int = 900
 
     # 计算属性（不暴露给 toml）
     @property
@@ -179,34 +183,21 @@ def load_config(path: Optional[Path] = None) -> Config:
         "endpoint",
         default=DEFAULT_DOUBAO_ENDPOINT,
     )
-    agent_plan_api_key = _get(
-        data,
-        "agent_plan",
-        "api_key",
-        default="",
-        config_file=config_file,
-    )
-    agent_plan_endpoint = _get(
-        data,
-        "agent_plan",
-        "endpoint",
-        default=DEFAULT_AGENT_PLAN_ENDPOINT,
-    )
-    if provider == "volcengine_agent_plan":
-        ark_api_key = agent_plan_api_key
-        ark_endpoint = agent_plan_endpoint
-        key_section = "agent_plan"
-        key_name = "火山 Agent Plan API Key"
-    else:
-        ark_api_key = doubao_api_key
-        ark_endpoint = doubao_endpoint
-        key_section = "ark"
-        key_name = "火山方舟 API Key"
+    # 保留字段只为读旧配置/测试兼容，不参与运行。不要把旧 Agent Plan key
+    # 自动迁移到普通 Ark key，避免用户误用不同权限体系的密钥。
+    agent_plan_api_key = _get(data, "agent_plan", "api_key", default="", config_file=config_file)
+    agent_plan_endpoint = _get(data, "agent_plan", "endpoint", default="")
+    ark_api_key = doubao_api_key
+    ark_endpoint = doubao_endpoint
+    files_api_key = doubao_api_key
+    files_endpoint = doubao_endpoint
+    key_section = "ark"
+    key_name = "火山方舟 API Key"
     if not ark_api_key or ark_api_key.strip() == "":
         raise ConfigError(
             f"{key_name} 未配置。\n"
             f"请编辑 {config_file}，在 [{key_section}] 段填入 api_key。\n"
-            f"普通方舟 API 和 Agent Plan 的 Key 分开保存，不要混填。"
+            f"Agent Plan Key 不会自动当作普通 Ark Key 使用。"
         )
 
     # models
@@ -244,6 +235,9 @@ def load_config(path: Optional[Path] = None) -> Config:
     file_active_timeout_sec = int(
         _get(data, "analysis", "file_active_timeout_sec", default=120)
     )
+    response_timeout_sec = int(
+        _get(data, "analysis", "response_timeout_sec", default=900)
+    )
 
     # douyin
     cookie_path_raw = _get(
@@ -274,7 +268,7 @@ def load_config(path: Optional[Path] = None) -> Config:
         data,
         "vault",
         "relative_root",
-        default="知识资产/视频分析",
+        default="知识资产/知识入库",
     )
 
     # server（预留）
@@ -293,6 +287,7 @@ def load_config(path: Optional[Path] = None) -> Config:
         fps_min=fps_min,
         fps_max=fps_max,
         file_active_timeout_sec=file_active_timeout_sec,
+        response_timeout_sec=response_timeout_sec,
         cookie_path=cookie_path,
         vault_path=vault_path,
         vault_relative_root=vault_relative_root,
@@ -305,6 +300,8 @@ def load_config(path: Optional[Path] = None) -> Config:
         doubao_endpoint=doubao_endpoint,
         agent_plan_api_key=agent_plan_api_key,
         agent_plan_endpoint=agent_plan_endpoint,
+        files_api_key=files_api_key,
+        files_endpoint=files_endpoint,
     )
 
 
@@ -314,19 +311,13 @@ CONFIG_TEMPLATE = """\
 # 后期 Chrome 扩展会提供 GUI 编辑，目前手动填。
 
 [provider]
-# doubao = 普通方舟 API；volcengine_agent_plan = 火山 Agent Plan
+# 固定使用普通豆包 / 火山方舟 API。旧 Agent Plan 配置会回落为 doubao。
 active = "doubao"
 
 [ark]
 # ⚠️ 普通火山方舟 API Key（provider.active = "doubao" 时必填）
 api_key = ""
 endpoint = "https://ark.cn-beijing.volces.com/api/v3"
-
-[agent_plan]
-# ⚠️ 火山 Agent Plan API Key（provider.active = "volcengine_agent_plan" 时必填）
-# Agent Plan 与普通方舟 API Key 分开保存，不要混填。
-api_key = ""
-endpoint = "https://ark.cn-beijing.volces.com/api/plan/v3"
 
 [models]
 # 拆解模型（豆包 Seed 2.0 Lite，复刻信息量最强）
@@ -335,13 +326,17 @@ analyzer = "doubao-seed-2-0-lite-260428"
 analyzer_fallback = "doubao-seed-2-0-mini-260428"
 
 [analysis]
-# 默认质量档固定为 quality（1250 目标帧）；balanced 仅保留为调试兼容档。
+# 默认质量档固定为 quality：优先 5fps，超过 1250 帧安全目标才下调 fps；
+# 1280 是火山硬上限，项目侧留 30 帧冗余。
+# balanced 仅保留为调试兼容档。
 default_quality = "quality"
 balanced_target_frames = 240
 quality_target_frames = 1250
 fps_min = 0.2
 fps_max = 5.0
 file_active_timeout_sec = 120
+# Responses API 分析超时；防止网络/代理/云端异常时无限占用 worker。
+response_timeout_sec = 900
 
 [douyin]
 # Cookie 文件路径（由 Chrome 扩展自动写入）
@@ -350,8 +345,9 @@ cookie_path = "~/.obsidian-librarian/cookie/douyin.txt"
 [vault]
 # ⚠️ Obsidian 仓库根目录（必填）
 path = ""
-# 视频拆解资产相对路径（必须符合 SCHEMA.md）
-relative_root = "知识资产/视频分析"
+# 默认知识资产相对路径。当前 Douyin 工具会按 ingest_intent 写入
+# 知识资产/知识入库 或 知识资产/创作模式。
+relative_root = "知识资产/知识入库"
 
 [server]
 # 预留：v0.x 启 HTTP 服务（iOS 快捷指令需要）
@@ -390,4 +386,4 @@ if __name__ == "__main__":
     elif sys.argv[1] == "init":
         p = write_template()
         print(f"✓ 模板已写入：{p}")
-        print(f"  请编辑该文件，填入当前 provider 对应的 api_key 和 [vault].path")
+        print(f"  请编辑该文件，填入 [ark].api_key 和 [vault].path")

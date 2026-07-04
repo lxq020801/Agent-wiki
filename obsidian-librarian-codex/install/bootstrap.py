@@ -35,7 +35,6 @@ CONFIG_PATH = RUNTIME_ROOT / "config.toml"
 DEFAULT_PROVIDER = "doubao"
 PROVIDER_KEY_SECTIONS = {
     "doubao": "ark",
-    "volcengine_agent_plan": "agent_plan",
 }
 
 BOOTSTRAP_CONFIG_TEMPLATE = """\
@@ -43,19 +42,13 @@ BOOTSTRAP_CONFIG_TEMPLATE = """\
 # Fill these fields through the Chrome extension control console.
 
 [provider]
-# doubao = 普通方舟 API；volcengine_agent_plan = 火山 Agent Plan
+# 固定使用普通豆包 / 火山方舟 API
 active = "doubao"
 
 [ark]
 # 普通方舟 API Key（provider.active = "doubao" 时使用）
 api_key = ""
 endpoint = "https://ark.cn-beijing.volces.com/api/v3"
-
-[agent_plan]
-# 火山 Agent Plan API Key（provider.active = "volcengine_agent_plan" 时使用）
-# Agent Plan 与普通方舟 API Key 分开保存，不要混填。
-api_key = ""
-endpoint = "https://ark.cn-beijing.volces.com/api/plan/v3"
 
 [models]
 analyzer = "doubao-seed-2-0-lite-260428"
@@ -74,7 +67,7 @@ cookie_path = "~/.obsidian-librarian/cookie/douyin.txt"
 
 [vault]
 path = ""
-relative_root = "知识资产/视频分析"
+relative_root = "知识资产/知识入库"
 
 [server]
 enabled = true
@@ -334,9 +327,10 @@ def _normalize_provider(value: str) -> str:
         "ark": "doubao",
         "ark_api": "doubao",
         "doubao_api": "doubao",
-        "agent_plan": "volcengine_agent_plan",
-        "agentplan": "volcengine_agent_plan",
-        "volcengine-agent-plan": "volcengine_agent_plan",
+        "agent_plan": "doubao",
+        "agentplan": "doubao",
+        "volcengine-agent-plan": "doubao",
+        "volcengine_agent_plan": "doubao",
     }
     normalized = aliases.get(raw, raw)
     return normalized if normalized in PROVIDER_KEY_SECTIONS else DEFAULT_PROVIDER
@@ -352,8 +346,7 @@ def _active_api_key() -> str:
 
 
 def _active_key_label() -> str:
-    provider = _active_provider()
-    return "Agent Plan API Key" if provider == "volcengine_agent_plan" else "Ark API Key"
+    return "Ark API Key"
 
 
 def check_vault(result: CheckResult) -> None:
@@ -414,12 +407,13 @@ def check_vault(result: CheckResult) -> None:
     for rel in [
         "templates",
         "raw/videos",
-        "知识资产/视频分析",
+        "知识资产/知识入库",
+        "知识资产/创作模式",
         "系统记录/维护报告",
     ]:
         (vault / rel).mkdir(parents=True, exist_ok=True)
     if not (vault / "index.md").exists():
-        (vault / "index.md").write_text("# 知识库索引\n> 最后更新：未开始 | 资产总数：0\n\n## 视频分析\n", encoding="utf-8")
+        (vault / "index.md").write_text("# 知识库索引\n> 最后更新：未开始 | 资产总数：0\n\n## 知识入库\n\n## 创作模式\n", encoding="utf-8")
     result.actions.append(f"vault structure ready: {vault}")
 
 

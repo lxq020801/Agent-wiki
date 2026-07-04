@@ -1,5 +1,10 @@
 # WebSocket Control Protocol
 
+> 历史归档 / 非权威资料：本文记录 2026-06-27 附近的旧控制面设想。
+> 当前协议以 `docs/websocket-protocol.md` 为准；当前扩展可以提交
+> `task_request`，但只提交 `ingest_intent` 和页面线索，业务编排仍由
+> Agent 本地执行层完成。
+
 P0 uses WebSocket only as a control plane between the Chrome extension and the
 Agent runtime. It syncs configuration and Douyin Cookie immediately. It does not
 start ingest jobs.

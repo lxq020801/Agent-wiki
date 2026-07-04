@@ -456,7 +456,7 @@ def write_vault_path_to_config(config_path: Path, vault_path: Path) -> None:
 
     text = config_path.read_text(encoding="utf-8")
     if "[vault]" not in text:
-        text = text.rstrip() + f'\n\n[vault]\npath = "{path_text}"\nrelative_root = "知识资产/视频分析"\n'
+        text = text.rstrip() + f'\n\n[vault]\npath = "{path_text}"\nrelative_root = "知识资产/知识入库"\n'
     else:
         lines = text.splitlines()
         out: list[str] = []

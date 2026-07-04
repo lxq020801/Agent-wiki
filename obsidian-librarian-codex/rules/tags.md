@@ -39,8 +39,10 @@
 |------|------|
 | `ai-agent` | AI Agent 相关 |
 | `video-analysis` | 视频分析与处理 |
+| `image-analysis` | 图文/图片理解与拆解 |
 | `code-generation` | 代码生成 |
 | `knowledge-management` | 知识管理 |
+| `creative-pattern` | 创作模式与表达样本 |
 | `web-scraping` | 网页抓取 |
 | `api-design` | API 设计 |
 | `prompt-engineering` | 提示工程 |
@@ -56,6 +58,7 @@
 
 | 标签 | 说明 |
 |------|------|
+| `knowledge-asset` | 知识资产 |
 | `tutorial` | 教程与指南 |
 | `reference` | 参考资料 |
 | `case-study` | 案例分析 |
@@ -82,8 +85,11 @@
 ## 正确示例
 
 ```yaml
-# 抖音视频分析 — 平台 + 领域 + 类型
-tags: [douyin, video-analysis, case-study]
+# 抖音知识入库 — 平台 + 资产用途 + 来源形态
+tags: [douyin, knowledge-asset, case-study, video-analysis]
+
+# 抖音爆款拆解 — 平台 + 创作模式 + 来源形态
+tags: [douyin, creative-pattern, case-study, image-analysis]
 
 # GitHub 项目评估 — 平台 + 领域 + 类型 + 质量
 tags: [github, ai-agent, library, verified]

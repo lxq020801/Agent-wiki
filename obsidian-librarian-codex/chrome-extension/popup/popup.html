@@ -39,6 +39,62 @@
       </div>
     </div>
 
+    <!-- 入库入口 -->
+    <div class="section section-collapsible" id="ingest-section" data-kind="ingest" data-state="warning">
+      <button class="status-toggle" id="ingest-toggle" type="button" aria-expanded="false" aria-controls="ingest-panel">
+        <div class="status-toggle-main">
+          <span class="status-dot inline-dot warning" id="ingest-status-dot"></span>
+          <div class="status-copy">
+            <span class="status-label">入库</span>
+            <strong id="ingest-status-text">当前视频或分享链接</strong>
+          </div>
+        </div>
+        <div class="status-toggle-meta">
+          <span class="time" id="ingest-time"></span>
+          <span class="chevron" aria-hidden="true">⌄</span>
+        </div>
+      </button>
+      <div class="status-panel" id="ingest-panel" aria-hidden="true" inert>
+        <div class="status-panel-inner">
+          <div class="field">
+            <label>分享链接</label>
+            <textarea id="douyin-share-text" rows="3" placeholder="粘贴整段抖音分享文案；留空则使用当前抖音页面"></textarea>
+          </div>
+          <div class="button-row">
+            <button class="primary" id="ingest-knowledge">知识入库</button>
+            <button class="secondary" id="ingest-viral">爆款拆解</button>
+          </div>
+          <div class="hint" id="ingest-hint">留空时会尝试识别当前打开的抖音视频或图文。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 任务状态 -->
+    <div class="section section-collapsible" id="tasks-section" data-kind="tasks" data-state="warning">
+      <button class="status-toggle" id="tasks-toggle" type="button" aria-expanded="false" aria-controls="tasks-panel">
+        <div class="status-toggle-main">
+          <span class="status-dot inline-dot warning" id="tasks-status-dot"></span>
+          <div class="status-copy">
+            <span class="status-label">任务</span>
+            <strong id="tasks-status-text">暂无任务</strong>
+          </div>
+        </div>
+        <div class="status-toggle-meta">
+          <span class="time" id="tasks-time"></span>
+          <span class="chevron" aria-hidden="true">⌄</span>
+        </div>
+      </button>
+      <div class="status-panel" id="tasks-panel" aria-hidden="true" inert>
+        <div class="status-panel-inner">
+          <div class="task-list" id="task-list">
+            <div class="empty">还没有入库任务</div>
+          </div>
+          <button class="secondary" id="refresh-tasks">刷新任务</button>
+          <div class="hint" id="tasks-hint"></div>
+        </div>
+      </div>
+    </div>
+
     <!-- 知识库状态 -->
     <div class="section section-collapsible" id="vault-section" data-kind="vault" data-state="warning">
       <button class="status-toggle" id="vault-toggle" type="button" aria-expanded="false" aria-controls="vault-panel">
@@ -90,7 +146,6 @@
             <label>厂商</label>
             <select id="provider">
               <option value="doubao">豆包</option>
-              <option value="volcengine_agent_plan">火山 Agent Plan</option>
             </select>
             <div class="provider-note" id="provider-note"></div>
           </div>
