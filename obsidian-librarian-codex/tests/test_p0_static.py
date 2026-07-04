@@ -868,12 +868,11 @@ def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
     assert analyzer.should_chunk_video(600) is False
     assert analyzer.should_chunk_video(601) is True
     assert analyzer._long_overview_fps(1200) == 1.0
-    assert analyzer._long_overview_fps(1800) == 0.69
-    assert int(analyzer._long_overview_fps(1800) * 1800) <= 1250
-    assert analyzer._long_overview_fps(7200) == 0.2
-    assert analyzer._ultra_long_threshold_sec() == 6250.0
-    assert analyzer._is_ultra_long_video(6250) is False
-    assert analyzer._is_ultra_long_video(6251) is True
+    assert analyzer._long_overview_fps(1800) == 1.0
+    assert analyzer._ultra_long_threshold_sec() == 1250.0
+    assert analyzer._is_ultra_long_video(1250) is False
+    assert analyzer._is_ultra_long_video(1251) is True
+    assert analyzer._is_ultra_long_video(1800) is True
     plan = analyzer._chunk_plan(601)
     assert len(plan) == 3
     assert plan[0]["start_sec"] == 0
@@ -1238,9 +1237,9 @@ def test_prepare_long_video_strategy_chunks_unsafe_full_overview(tmp: Path) -> N
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
-    video = tmp / "very-long.mp4"
+    video = tmp / "thirty-minutes.mp4"
     video.write_bytes(b"fake-video")
-    plan = analyzer._chunk_plan(7200)
+    plan = analyzer._chunk_plan(1800)
     chunk_paths = []
     for item in plan:
         path = tmp / f"part-{int(item['part_index']):03d}.mp4"
@@ -1357,6 +1356,7 @@ def test_prepare_long_video_strategy_chunks_unsafe_full_overview(tmp: Path) -> N
     assert "overview_strategy_chunked_started" in log_text
     assert "overview_strategy_chunked_synthesized" in log_text
     assert "ultra_long_video" in log_text
+    assert "1800" in log_text
     assert "response_id" not in log_text
 
 

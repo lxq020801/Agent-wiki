@@ -79,16 +79,15 @@ The WebSocket control server writes:
 - Responses memory is short-term only. Store returned `response_id` under
   `~/.obsidian-librarian/responses-memory/` for 3 days; never write it into
   vault Markdown, task status, or strategy logs.
-- Videos longer than 10 minutes first run a full-video overview at dynamic fps,
-  capped at `1fps` and lowered against the 1250-frame safety target, with the
-  strategy model (`models.strategy`, default mini). If even the official minimum
-  `0.2fps` would exceed the safety target, treat it as an ultra-long video:
-  split the overview phase too, analyze each 240s chunk at `1fps`, synthesize
-  those rough overviews into the same global strategy JSON, then continue through
-  the normal long-video precision pass. This means duration scales by chunk
-  count; the practical limits are still file size, download time, task timeout,
-  and model context windows. The overview extracts rough content and a per-chunk
-  strategy, then
+- Videos longer than 10 minutes first run a full-video overview at `1fps` when
+  the full overview stays within the 1250-frame safety target, with the strategy
+  model (`models.strategy`, default mini). If `1fps`
+  would exceed that target, treat it as an ultra-long video: split the overview
+  phase too, analyze each 240s chunk at `1fps`, synthesize those rough overviews
+  into the same global strategy JSON, then continue through the normal long-video
+  precision pass. This means duration scales by chunk count; the practical limits
+  are still file size, download time, task timeout, and model context windows. The
+  overview extracts rough content and a per-chunk strategy, then
   240s chunks with 10s overlap are uploaded/analyzed independently at `2-5fps`
   by the main analyzer model with default 2-way concurrency, configurable from
   1 to 4. Invalid JSON, missing segments, or missing required fields may be

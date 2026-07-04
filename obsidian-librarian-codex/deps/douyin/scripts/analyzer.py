@@ -18,7 +18,7 @@ analyzer.py — 火山方舟视频拆解
   ⑤ Files API 默认托管空间支持 ≤512MB；超过 512MB P0 直接失败
   ⑥ file_id 模式必须等 file.status == "active" 才能分析
   ⑦ file_id 模式同一视频换 quality 必须重新上传
-  ⑧ 超 10 分钟先做最高 1fps 的动态全片概览规划，再按 240s 分片用 2-5fps 精拆
+  ⑧ 超 10 分钟先做 1fps 全片概览规划，再按 240s 分片用 2-5fps 精拆
      超长视频则改为分片 1fps 概览，合成全局策略后再精拆
 
 公共契约：
@@ -484,19 +484,15 @@ def _prompt_hash(prompt: str) -> str:
 
 
 def _long_overview_fps(duration_sec: float) -> float:
-    if duration_sec <= 0:
-        return _LONG_OVERVIEW_FPS
-    raw = min(_LONG_OVERVIEW_FPS, _FRAMES_SAFE_TARGET / duration_sec)
-    fps = math.floor(max(_FPS_MIN, raw) * 100) / 100.0
-    return max(_FPS_MIN, min(_LONG_OVERVIEW_FPS, fps))
+    return _LONG_OVERVIEW_FPS
 
 
 def _ultra_long_threshold_sec() -> float:
-    return _FRAMES_SAFE_TARGET / _FPS_MIN
+    return _FRAMES_SAFE_TARGET / _LONG_OVERVIEW_FPS
 
 
 def _is_ultra_long_video(duration_sec: float) -> bool:
-    return duration_sec > _ultra_long_threshold_sec()
+    return duration_sec > 0 and duration_sec * _LONG_OVERVIEW_FPS > _FRAMES_SAFE_TARGET
 
 
 def _long_overview_exceeds_safe_target(duration_sec: float) -> bool:
@@ -1737,7 +1733,7 @@ async def _prepare_long_video_strategy(
     chunk_concurrency: int = _CHUNK_ANALYSIS_CONCURRENCY,
     on_progress: ProgressCb,
 ) -> dict[str, Any]:
-    """Run a dynamic-fps full-video overview and return a validated per-chunk strategy."""
+    """Run a 1fps full-video overview or chunked overview and return a per-chunk strategy."""
     overview_duration = float(chunk_plan[-1]["end_sec"]) if chunk_plan else 0.0
     try:
         if _is_ultra_long_video(overview_duration):
@@ -1934,7 +1930,7 @@ async def _prepare_chunked_overview_strategy(
     if len(chunk_paths) != len(chunk_plan):
         raise AnalyzerError("超长视频概览切片数量与计划不一致")
 
-    min_frames = int(math.ceil(duration_sec * _FPS_MIN))
+    full_overview_frames = int(math.ceil(duration_sec * _LONG_OVERVIEW_FPS))
     chunk_concurrency = max(1, min(4, int(chunk_concurrency or _CHUNK_ANALYSIS_CONCURRENCY)))
     total = len(chunk_plan)
     await _call_progress(on_progress, "overview_chunking", {
@@ -1942,7 +1938,7 @@ async def _prepare_chunked_overview_strategy(
         "chunk_count": total,
         "fps": _LONG_OVERVIEW_FPS,
         "concurrency": chunk_concurrency,
-        "estimated_full_overview_frames": min_frames,
+        "estimated_full_overview_frames": full_overview_frames,
         "safe_target": _FRAMES_SAFE_TARGET,
         "ultra_long_threshold_sec": _ultra_long_threshold_sec(),
     })
@@ -1950,8 +1946,8 @@ async def _prepare_chunked_overview_strategy(
     _write_strategy_log("overview_strategy_chunked_started", {
         "mode": "ultra_long_video",
         "duration_sec": duration_sec,
-        "min_fps": _FPS_MIN,
-        "estimated_full_overview_frames": min_frames,
+        "overview_fps": _LONG_OVERVIEW_FPS,
+        "estimated_full_overview_frames": full_overview_frames,
         "safe_target": _FRAMES_SAFE_TARGET,
         "ultra_long_threshold_sec": _ultra_long_threshold_sec(),
         "chunk_count": total,
