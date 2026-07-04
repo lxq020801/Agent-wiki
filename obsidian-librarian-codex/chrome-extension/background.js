@@ -415,26 +415,6 @@ function ensureModelHealthAlarm() {
   });
 }
 
-function reloadOpenDouyinTabs(reason = 'extension_updated') {
-  if (!chrome.tabs?.query || !chrome.tabs?.reload) return;
-  chrome.tabs.query({ url: DOUYIN_TAB_PATTERNS }, (tabs) => {
-    if (chrome.runtime.lastError) {
-      console.warn('[Librarian BG] 查询抖音标签页失败:', chrome.runtime.lastError.message);
-      return;
-    }
-    for (const tab of tabs || []) {
-      if (!tab.id) continue;
-      chrome.tabs.reload(tab.id, { bypassCache: false }, () => {
-        if (chrome.runtime.lastError) {
-          console.warn('[Librarian BG] 刷新抖音标签页失败:', chrome.runtime.lastError.message);
-        } else {
-          debugLog('[Librarian BG] 已刷新抖音标签页，清理旧 content script:', reason);
-        }
-      });
-    }
-  });
-}
-
 function cleanExtractedUrl(value) {
   return String(value || '')
     .trim()
@@ -913,9 +893,6 @@ function handleAgentMessage(msg) {
 chrome.runtime.onInstalled.addListener((details) => {
   debugLog('[Librarian BG] Extension installed');
   ensureModelHealthAlarm();
-  if (details?.reason === 'install' || details?.reason === 'update') {
-    reloadOpenDouyinTabs(details.reason);
-  }
   connectWebSocket();
 });
 
