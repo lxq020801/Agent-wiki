@@ -38,6 +38,7 @@ import sys
 import tempfile
 import time
 import hashlib
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
@@ -989,6 +990,18 @@ def _is_agent_plan_endpoint(endpoint: str) -> bool:
     return str(endpoint or "").rstrip("/").endswith("/api/plan/v3")
 
 
+def _validate_ark_endpoint(endpoint: str) -> str:
+    normalized = str(endpoint or "").strip().rstrip("/")
+    parsed = urllib.parse.urlparse(normalized)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise AnalyzerError("Ark endpoint 必须是有效的 HTTPS 地址")
+    if parsed.username or parsed.password:
+        raise AnalyzerError("Ark endpoint 不能包含账号密码")
+    if _is_agent_plan_endpoint(normalized):
+        raise AnalyzerError("Agent Plan 不再作为运行通道；请使用普通豆包 Ark API endpoint")
+    return normalized
+
+
 def _image_data_url(image_path: Path) -> str:
     import base64
 
@@ -1365,6 +1378,7 @@ async def analyze_video(
     source_id: Optional[str] = None,
     file_active_timeout_sec: int = 120,
     response_timeout_sec: int = 900,
+    chunk_concurrency: int = _CHUNK_ANALYSIS_CONCURRENCY,
     on_progress: ProgressCb = None,
 ) -> AnalyzeResult:
     """端到端拆解。
@@ -1398,6 +1412,7 @@ async def analyze_video(
         source_id=source_id,
         file_active_timeout_sec=file_active_timeout_sec,
         response_timeout_sec=response_timeout_sec,
+        chunk_concurrency=chunk_concurrency,
         on_progress=on_progress,
     )
     return results["default"]
@@ -1418,6 +1433,7 @@ async def analyze_video_many(
     source_id: Optional[str] = None,
     file_active_timeout_sec: int = 120,
     response_timeout_sec: int = 900,
+    chunk_concurrency: int = _CHUNK_ANALYSIS_CONCURRENCY,
     on_progress: ProgressCb = None,
 ) -> dict[str, AnalyzeResult]:
     """Analyze one video with multiple prompts while reusing one video input.
@@ -1427,14 +1443,15 @@ async def analyze_video_many(
     """
     if not prompts:
         raise AnalyzerError("缺少视频分析 prompt")
-    if _is_agent_plan_endpoint(endpoint):
-        raise AnalyzerError("Agent Plan 不再作为运行通道；请使用普通豆包 Ark API endpoint")
+    endpoint = _validate_ark_endpoint(endpoint)
+    file_endpoint = _validate_ark_endpoint(file_endpoint or _default_files_endpoint(endpoint))
 
     video_path = Path(video_path).expanduser().resolve()
     if not video_path.exists():
         raise AnalyzerError(f"视频文件不存在: {video_path}")
     memory_source_id = str(source_id or video_path.stem)
     strategy_model = strategy_model or model
+    chunk_concurrency = max(1, min(4, int(chunk_concurrency or _CHUNK_ANALYSIS_CONCURRENCY)))
 
     # 1. 测时长
     duration = get_duration_sec(video_path)
@@ -1470,7 +1487,7 @@ async def analyze_video_many(
 
     files_client = _build_client(
         file_api_key or api_key,
-        file_endpoint or _default_files_endpoint(endpoint),
+        file_endpoint,
     )
 
     chunk_plan = _chunk_plan(duration)
@@ -1514,6 +1531,7 @@ async def analyze_video_many(
                 strategy=strategy,
                 file_active_timeout_sec=file_active_timeout_sec,
                 response_timeout_sec=response_timeout_sec,
+                chunk_concurrency=chunk_concurrency,
                 on_progress=on_progress,
             )
 
@@ -1779,6 +1797,7 @@ async def _analyze_video_chunks(
     strategy: Optional[dict[str, Any]],
     file_active_timeout_sec: int,
     response_timeout_sec: int,
+    chunk_concurrency: int = _CHUNK_ANALYSIS_CONCURRENCY,
     on_progress: ProgressCb,
 ) -> dict[str, AnalyzeResult]:
     """Analyze fixed video chunks and return one aggregated result per intent."""
@@ -1807,7 +1826,8 @@ async def _analyze_video_chunks(
     }
     overview_context = _overview_text_for_prompt(strategy)
     lock = asyncio.Lock()
-    semaphore = asyncio.Semaphore(_CHUNK_ANALYSIS_CONCURRENCY)
+    chunk_concurrency = max(1, min(4, int(chunk_concurrency or _CHUNK_ANALYSIS_CONCURRENCY)))
+    semaphore = asyncio.Semaphore(chunk_concurrency)
 
     async def process_chunk(chunk_path: Path, plan_item: dict[str, float | int]) -> None:
         part_index = int(plan_item["part_index"])
@@ -1823,7 +1843,7 @@ async def _analyze_video_chunks(
         await _call_progress(on_progress, "chunk_uploading", {
             "part_index": part_index,
             "chunk_count": total,
-            "concurrency": _CHUNK_ANALYSIS_CONCURRENCY,
+            "concurrency": chunk_concurrency,
             "start_sec": plan_item["start_sec"],
             "end_sec": plan_item["end_sec"],
             "fps": fps,
@@ -1871,7 +1891,7 @@ async def _analyze_video_chunks(
                 "file_id": file_id,
                 "model": model,
                 "intent": intent,
-                "concurrency": _CHUNK_ANALYSIS_CONCURRENCY,
+                "concurrency": chunk_concurrency,
                 "has_previous_response": bool(previous_response_id),
             })
             call = _as_response_call_result(await _stream_responses(
@@ -2037,6 +2057,7 @@ async def analyze_images_many(
     """Analyze one image post with multiple prompts while reusing encoded images."""
     if not prompts:
         raise AnalyzerError("缺少图文分析 prompt")
+    endpoint = _validate_ark_endpoint(endpoint)
     paths = [Path(path).expanduser().resolve() for path in image_paths]
     missing = [str(path) for path in paths if not path.exists()]
     if missing:
@@ -2125,6 +2146,9 @@ def _cli_main() -> int:
         "--strategy-model", default="doubao-seed-2-0-mini-260428",
     )
     parser.add_argument(
+        "--chunk-concurrency", type=int, default=_CHUNK_ANALYSIS_CONCURRENCY,
+    )
+    parser.add_argument(
         "--endpoint", default="https://ark.cn-beijing.volces.com/api/v3",
     )
     args = parser.parse_args()
@@ -2160,6 +2184,7 @@ def _cli_main() -> int:
             endpoint=args.endpoint,
             model=args.model,
             strategy_model=args.strategy_model,
+            chunk_concurrency=args.chunk_concurrency,
             quality=args.quality,
             on_progress=_progress,
         )

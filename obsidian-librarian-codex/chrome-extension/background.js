@@ -11,16 +11,27 @@ const NOTIFICATION_ICON = 'icons/icon-128.png';
 const PROVIDERS = {
   doubao: {
     endpoint: 'https://ark.cn-beijing.volces.com/api/v3',
-    model: 'doubao-seed-2-0-lite-260428'
+    model: 'doubao-seed-2-0-lite-260428',
+    strategyModel: 'doubao-seed-2-0-mini-260428'
   }
 };
 const DEFAULT_PROVIDER = 'doubao';
+const MODEL_PRESETS = {
+  lite: 'doubao-seed-2-0-lite-260428',
+  mini: 'doubao-seed-2-0-mini-260428'
+};
+const DEFAULT_MODEL_PRESET = 'lite';
+const DEFAULT_TASK_CONCURRENCY = 2;
+const DEFAULT_CHUNK_CONCURRENCY = 2;
+const MIN_TASK_CONCURRENCY = 1;
+const MAX_TASK_CONCURRENCY = 4;
 const INGEST_INTENTS = {
   knowledge_ingest: '知识入库',
   viral_breakdown: '爆款拆解',
   knowledge_and_viral: '完整入库'
 };
 const DEFAULT_INGEST_INTENT = 'knowledge_ingest';
+const CURRENT_DOUYIN_VIDEO_ACTION = 'getCurrentDouyinVideoV3';
 const DOUYIN_URL_PATTERN = /https?:\/\/(?:v\.douyin\.com\/[A-Za-z0-9_-]+\/?|(?:www\.)?(?:douyin|iesdouyin)\.com\/(?:video|share\/video|note|share\/note)\/\d+(?:[/?#][^\s"'<>，。！？、；：）)]*)?)/i;
 const DOUYIN_TAB_PATTERNS = ['https://douyin.com/*', 'https://*.douyin.com/*'];
 let ws = null;
@@ -59,7 +70,45 @@ function expandIngestIntents(value) {
 }
 
 function providerStorageKeys(value) {
-  return { apiKey: 'arkApiKey', model: 'arkModel' };
+  return { apiKey: 'arkApiKey', model: 'arkModel', strategyModel: 'arkStrategyModel' };
+}
+
+function normalizeTaskConcurrency(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_TASK_CONCURRENCY;
+  return Math.max(MIN_TASK_CONCURRENCY, Math.min(MAX_TASK_CONCURRENCY, parsed));
+}
+
+function normalizeChunkConcurrency(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_CHUNK_CONCURRENCY;
+  return Math.max(1, Math.min(4, parsed));
+}
+
+function normalizeEndpoint(value, provider) {
+  const endpoint = String(value || PROVIDERS[provider].endpoint).trim().replace(/\/+$/, '');
+  try {
+    const url = new URL(endpoint);
+    if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) {
+      throw new Error('Endpoint 必须是有效 HTTPS 地址，且不能包含账号密码');
+    }
+    if (endpoint.endsWith('/api/plan/v3')) {
+      throw new Error('Agent Plan endpoint 不能作为普通 Ark API 使用');
+    }
+    return endpoint;
+  } catch (err) {
+    if (err instanceof Error && (
+      err.message.includes('Endpoint 必须') ||
+      err.message.includes('Agent Plan endpoint')
+    )) {
+      throw err;
+    }
+    throw new Error('Endpoint URL 格式不正确');
+  }
+}
+
+function normalizeModelPreset(value) {
+  return MODEL_PRESETS[value] ? value : DEFAULT_MODEL_PRESET;
 }
 
 function ownValue(source, key) {
@@ -77,28 +126,77 @@ function readStoredApiKey(source, provider) {
 
 function readStoredModel(source, provider) {
   const keys = providerStorageKeys(provider);
+  const preset = normalizeModelPreset(source.videoAnalysisModelPreset);
+  const explicit = ownValue(source, 'videoAnalysisModel');
+  if (explicit !== undefined && explicit !== null && String(explicit).trim()) {
+    const explicitValue = String(explicit).trim();
+    if (Object.values(MODEL_PRESETS).includes(explicitValue)) {
+      return explicitValue;
+    }
+  }
   const providerValue = ownValue(source, keys.model);
   if (providerValue !== undefined && providerValue !== null) {
-    return String(providerValue).trim();
+    const value = String(providerValue).trim();
+    return Object.values(MODEL_PRESETS).includes(value) ? value : MODEL_PRESETS[preset];
   }
-  return String(source.model || '').trim();
+  const legacy = String(source.model || '').trim();
+  return Object.values(MODEL_PRESETS).includes(legacy) ? legacy : MODEL_PRESETS[preset];
+}
+
+function readStoredStrategyModel(source, provider) {
+  const keys = providerStorageKeys(provider);
+  const providerValue = ownValue(source, keys.strategyModel);
+  const defaultStrategy = PROVIDERS[provider].strategyModel;
+  if (providerValue !== undefined && providerValue !== null) {
+    const value = String(providerValue).trim();
+    return value === defaultStrategy ? value : defaultStrategy;
+  }
+  const legacy = String(source.strategyModel || source.videoStrategyModel || '').trim();
+  return legacy === defaultStrategy ? legacy : defaultStrategy;
 }
 
 function buildAgentConfig(config) {
-  const provider = normalizeProvider(config.provider);
+  const provider = normalizeProvider(config.llmProvider || config.provider);
   const defaults = PROVIDERS[provider];
   const keys = providerStorageKeys(provider);
   const apiKey = readStoredApiKey(config, provider);
-  if (!apiKey) return null;
-
   const model = readStoredModel(config, provider) || defaults.model;
+  const strategyModel = readStoredStrategyModel(config, provider) || defaults.strategyModel;
+  const modelPreset = normalizeModelPreset(
+    config.videoAnalysisModelPreset ||
+      (model === MODEL_PRESETS.mini ? 'mini' : 'lite')
+  );
+  const endpoint = normalizeEndpoint(config.arkEndpoint || config.endpoint, provider);
+  const taskConcurrency = normalizeTaskConcurrency(config.serverTaskConcurrency || config.taskConcurrency || config.task_concurrency);
+  const chunkConcurrency = normalizeChunkConcurrency(config.videoChunkConcurrency || config.chunkConcurrency);
   const data = {
+    llm: {
+      provider,
+      apiKey,
+      endpoint
+    },
+    videoAnalysis: {
+      modelPreset,
+      analyzerModel: MODEL_PRESETS[modelPreset],
+      strategyModel,
+      chunkConcurrency
+    },
+    server: {
+      taskConcurrency
+    },
+    // Flat fields are kept for old servers/clients.
     provider,
     apiKey,
     [keys.apiKey]: apiKey,
-    model,
-    [keys.model]: model,
-    endpoint: defaults.endpoint
+    model: MODEL_PRESETS[modelPreset],
+    [keys.model]: MODEL_PRESETS[modelPreset],
+    strategyModel,
+    [keys.strategyModel]: strategyModel,
+    taskConcurrency,
+    serverTaskConcurrency: taskConcurrency,
+    videoChunkConcurrency: chunkConcurrency,
+    endpoint,
+    arkEndpoint: endpoint
   };
   if (config.vaultPath) {
     data.vaultPath = config.vaultPath;
@@ -109,10 +207,21 @@ function buildAgentConfig(config) {
 async function storedAgentConfig() {
   const config = await chrome.storage.local.get([
     'provider',
+    'llmProvider',
     'apiKey',
     'arkApiKey',
+    'arkEndpoint',
+    'endpoint',
     'model',
     'arkModel',
+    'videoAnalysisModelPreset',
+    'videoAnalysisModel',
+    'strategyModel',
+    'arkStrategyModel',
+    'videoStrategyModel',
+    'taskConcurrency',
+    'serverTaskConcurrency',
+    'videoChunkConcurrency',
     'vaultPath'
   ]);
   return buildAgentConfig(config);
@@ -225,27 +334,57 @@ function resolveTaskAck(msg) {
 }
 
 async function sendModelHealthCheck() {
-  const data = await storedAgentConfig();
-  if (!data) {
+  let data = null;
+  try {
+    data = await storedAgentConfig();
+    if (!data) {
+      pendingModelHealthCheck = false;
+      return false;
+    }
+  } catch (err) {
     pendingModelHealthCheck = false;
-    return;
+    chrome.storage.local.set({
+      modelStatus: {
+        ok: false,
+        state: 'error',
+        message: err.message || '模型配置无效',
+        checkedAt: new Date().toISOString()
+      }
+    });
+    return false;
   }
 
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     pendingModelHealthCheck = true;
     connectWebSocket();
-    return;
+    return true;
   }
 
   pendingModelHealthCheck = false;
   sendToAgent({ type: 'model_check', data });
+  return true;
 }
 
 async function sendModelConfigAndHealthCheck() {
-  const data = await storedAgentConfig();
-  if (!data) {
+  let data = null;
+  try {
+    data = await storedAgentConfig();
+    if (!data) {
+      pendingModelConfigSync = false;
+      pendingModelHealthCheck = false;
+      return false;
+    }
+  } catch (err) {
     pendingModelConfigSync = false;
     pendingModelHealthCheck = false;
+    chrome.storage.local.set({
+      modelStatus: {
+        ok: false,
+        state: 'error',
+        message: err.message || '模型配置无效',
+        checkedAt: new Date().toISOString()
+      }
+    });
     return false;
   }
 
@@ -335,6 +474,31 @@ function isSupportedDouyinUrl(value) {
   }
 }
 
+function isPotentialIngestDouyinUrl(value) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    const path = url.pathname.toLowerCase();
+    if (host === 'v.douyin.com') return true;
+    if (
+      host === 'douyin.com' ||
+      host.endsWith('.douyin.com') ||
+      host === 'iesdouyin.com' ||
+      host.endsWith('.iesdouyin.com')
+    ) {
+      return /\/(?:share\/)?(?:video|note)\/\d{8,}/i.test(path) ||
+        url.searchParams.has('modal_id') ||
+        url.searchParams.has('aweme_id') ||
+        url.searchParams.has('item_id') ||
+        url.searchParams.has('itemId') ||
+        url.searchParams.has('awemeId');
+    }
+  } catch (_err) {
+    // ignore
+  }
+  return false;
+}
+
 function inferDouyinUrlType(value) {
   try {
     const pathname = new URL(value).pathname.toLowerCase();
@@ -401,7 +565,7 @@ function candidateFromText(value, method, score) {
   const urls = text.match(/https?:\/\/[^\s"'<>]+/g) || [];
   for (const item of urls) {
     const url = cleanExtractedUrl(item);
-    if (isSupportedDouyinUrl(url)) {
+    if (isPotentialIngestDouyinUrl(url)) {
       return makeDouyinUrlCandidate(url, method, score, text);
     }
   }
@@ -419,6 +583,75 @@ function makeDouyinCandidate(id, type, method, score, raw) {
     method,
     score,
     raw: String(raw || '').slice(0, 300)
+  };
+}
+
+function decodeHtmlEntities(value) {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_match, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => String.fromCharCode(Number.parseInt(code, 16)));
+}
+
+function cleanPreviewTitle(value) {
+  let text = decodeHtmlEntities(value)
+    .replace(/\s+/g, ' ')
+    .replace(/\s*复制此链接.*$/i, '')
+    .replace(/\s*打开Dou音搜索.*$/i, '')
+    .replace(/\s*打开抖音搜索.*$/i, '')
+    .replace(/^抖音[-—\s]*/, '')
+    .replace(/[-—\s]*抖音[-—\s]*记录美好生活$/i, '')
+    .replace(/[-—\s]*抖音$/i, '')
+    .trim();
+  if (!text || text === '抖音-记录美好生活' || text === '抖音') return '';
+  return text.length > 180 ? `${text.slice(0, 180).trim()}...` : text;
+}
+
+function extractShareTitle(text) {
+  let value = String(text || '')
+    .replace(/https?:\/\/[^\s"'<>]+/g, ' ')
+    .replace(/\s*复制此链接.*$/i, ' ')
+    .replace(/\s*打开Dou音搜索.*$/i, ' ')
+    .replace(/\s*打开抖音搜索.*$/i, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const afterDate = value.match(/(?:^|\s)\d{1,2}\/\d{1,2}\s+(.+)$/);
+  if (afterDate) value = afterDate[1].trim();
+  value = value.split(/[＃#]/)[0].trim();
+  return cleanPreviewTitle(value);
+}
+
+function previewSourceLabel(source, type) {
+  if (source === 'share') return '分享链接';
+  return type === 'note' ? '当前图文预览' : '当前画面';
+}
+
+function normalizePreviewCandidate(candidate, source, message) {
+  if (!candidate?.ok || !candidate.url) {
+    return {
+      ok: false,
+      source,
+      message: message || '未识别到抖音内容'
+    };
+  }
+  const type = candidate.type === 'note' ? 'note' : 'video';
+  const title = cleanPreviewTitle(candidate.title || candidate.pageTitle || '') ||
+    (source === 'share' ? '已识别分享链接' : '已识别当前抖音内容');
+  return {
+    ok: true,
+    source,
+    sourceLabel: previewSourceLabel(source, type),
+    type,
+    url: candidate.url,
+    awemeId: candidate.awemeId || '',
+    title,
+    coverUrl: candidate.coverUrl || '',
+    pageTitle: candidate.pageTitle || '',
+    method: candidate.method || ''
   };
 }
 
@@ -462,20 +695,33 @@ async function currentDouyinCandidate(info, tab) {
 
   if (tab?.id) {
     try {
-      pageCandidate = await sendTabMessage(tab.id, { action: 'getCurrentDouyinVideo' });
+      pageCandidate = await sendTabMessage(tab.id, { action: CURRENT_DOUYIN_VIDEO_ACTION });
     } catch (_err) {
       try {
         await injectDouyinContentScript(tab.id);
-        pageCandidate = await sendTabMessage(tab.id, { action: 'getCurrentDouyinVideo' });
+        pageCandidate = await sendTabMessage(tab.id, { action: CURRENT_DOUYIN_VIDEO_ACTION });
       } catch (err) {
         console.warn('[Librarian BG] 抖音页面识别脚本不可用:', err.message);
+        try {
+          pageCandidate = await sendTabMessage(tab.id, { action: 'getCurrentDouyinVideo' });
+        } catch (_fallbackErr) {
+          // Old content script is unavailable too.
+        }
       }
     }
   }
 
+  if (
+    pageCandidate?.ok &&
+    pageCandidate.url &&
+    (pageCandidate.awemeId || pageCandidate.title || pageCandidate.coverUrl)
+  ) {
+    return pageCandidate;
+  }
+
   return bestCandidate([
-    hint,
-    pageCandidate && pageCandidate.ok ? pageCandidate : null
+    pageCandidate && pageCandidate.ok ? pageCandidate : null,
+    hint
   ]) || pageCandidate || hint || {
     ok: false,
     reason: 'douyin_current_video_not_found',
@@ -523,6 +769,8 @@ async function submitDouyinIngestTask(candidate, info, tab) {
     url: candidate.url,
     awemeId: candidate.awemeId,
     videoType: candidate.type || 'video',
+    title: candidate.title || '',
+    coverUrl: candidate.coverUrl || '',
     pageTitle: candidate.pageTitle || tab?.title || '',
     pageUrl: candidate.pageUrl || info?.pageUrl || tab?.url || '',
     detectedBy: candidate.method || 'unknown',
@@ -567,6 +815,9 @@ async function submitDouyinIngestFromPopup(request) {
   const pastedCandidate = shareText
     ? candidateFromText(shareText, 'popup-share-text', 1300)
     : null;
+  if (pastedCandidate) {
+    pastedCandidate.title = extractShareTitle(shareText);
+  }
   const candidate = pastedCandidate || await currentDouyinCandidate({
     pageUrl: tab?.url || '',
     ingestIntent: request?.ingestIntent
@@ -586,6 +837,30 @@ async function submitDouyinIngestFromPopup(request) {
     source: 'extension_popup',
     ingestIntent: request?.ingestIntent
   }, tab);
+}
+
+async function previewDouyinIngest(request) {
+  const shareText = String(request?.shareText || '').trim();
+  const tab = await activeTab();
+  if (shareText) {
+    const candidate = candidateFromText(shareText, 'popup-preview-share-text', 1300);
+    if (!candidate?.ok || !candidate.url) {
+      return normalizePreviewCandidate(null, 'share', '没有从输入内容里识别到抖音链接');
+    }
+    const shareTitle = extractShareTitle(shareText);
+    return normalizePreviewCandidate({
+      ...candidate,
+      title: shareTitle || candidate.title
+    }, 'share');
+  }
+
+  const candidate = await currentDouyinCandidate({
+    pageUrl: tab?.url || ''
+  }, tab);
+  if (!candidate?.ok || !candidate.url) {
+    return normalizePreviewCandidate(candidate, 'current', '没有识别到当前抖音视频');
+  }
+  return normalizePreviewCandidate(candidate, 'current');
 }
 
 async function handleDouyinContextMenu(info, tab) {
@@ -620,13 +895,39 @@ function handleAgentMessage(msg) {
       break;
 
     case 'status_snapshot':
-      if (msg.status?.model) {
-        chrome.storage.local.set({ modelStatus: msg.status.model });
+      if (msg.status?.model || msg.status?.llm || msg.status?.videoAnalysis) {
+        const modelStatus = msg.status.llm || msg.status.model || {};
+        const videoStatus = msg.status.videoAnalysis || {};
+        chrome.storage.local.set({
+          modelStatus,
+          videoAnalysisStatus: videoStatus,
+          ...(modelStatus.endpoint ? { arkEndpoint: modelStatus.endpoint } : {}),
+          ...(videoStatus.modelPreset ? { videoAnalysisModelPreset: videoStatus.modelPreset } : {}),
+          ...(videoStatus.analyzerModel ? { videoAnalysisModel: videoStatus.analyzerModel } : {}),
+          ...(videoStatus.strategyModel ? { videoStrategyModel: videoStatus.strategyModel } : {}),
+          ...(videoStatus.chunkConcurrency ? { videoChunkConcurrency: normalizeChunkConcurrency(videoStatus.chunkConcurrency) } : {})
+        });
+      }
+      if (msg.status?.tasks?.taskConcurrency) {
+        chrome.storage.local.set({
+          taskConcurrency: normalizeTaskConcurrency(msg.status.tasks.taskConcurrency),
+          serverTaskConcurrency: normalizeTaskConcurrency(msg.status.tasks.taskConcurrency)
+        });
       }
       break;
 
     case 'model_status':
-      chrome.storage.local.set({ modelStatus: msg.status });
+      chrome.storage.local.set({
+        modelStatus: msg.status,
+        ...(msg.status?.endpoint ? { arkEndpoint: msg.status.endpoint } : {}),
+        ...(msg.status?.taskConcurrency ? {
+          taskConcurrency: normalizeTaskConcurrency(msg.status.taskConcurrency),
+          serverTaskConcurrency: normalizeTaskConcurrency(msg.status.taskConcurrency)
+        } : {}),
+        ...(msg.status?.chunkConcurrency ? {
+          videoChunkConcurrency: normalizeChunkConcurrency(msg.status.chunkConcurrency)
+        } : {})
+      });
       break;
 
     case 'vault_status':
@@ -742,6 +1043,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({
         ok: false,
         message: err.message || '发送失败，请确认 Agent 已连接。'
+      });
+    });
+  } else if (request.action === 'previewDouyinIngest') {
+    previewDouyinIngest(request).then((result) => {
+      sendResponse(result);
+    }).catch((err) => {
+      sendResponse({
+        ok: false,
+        source: request.shareText ? 'share' : 'current',
+        message: err.message || '预览识别失败'
       });
     });
   }

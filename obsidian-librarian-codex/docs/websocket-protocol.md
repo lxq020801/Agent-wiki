@@ -34,20 +34,35 @@
 
 同步模型配置。`vaultPath` 只是线索，服务端必须校验后才写入配置。
 扩展不发送质量档；服务端固定 `[analysis].default_quality = "quality"`。
-`strategyModel` 是可选字段，缺省使用 `doubao-seed-2-0-mini-260428`。
+`videoAnalysis.strategyModel` 是可选字段，缺省使用 `doubao-seed-2-0-mini-260428`。
+`server.taskConcurrency` 控制任务队列同时处理多少个入库任务，范围 `1-4`，缺省为 `2`。
+`videoAnalysis.chunkConcurrency` 控制单个长视频内几个切片并发分析，范围 `1-4`，缺省为 `2`。
+Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 Agent Plan endpoint；非法地址必须返回 `config_rejected`，不能静默回退。
 
 ```json
 {
   "type": "config_update",
   "data": {
-    "provider": "doubao",
-    "apiKey": "sk-...",
-    "model": "doubao-seed-2-0-lite-260428",
-    "strategyModel": "doubao-seed-2-0-mini-260428",
+    "llm": {
+      "provider": "doubao",
+      "apiKey": "sk-...",
+      "endpoint": "https://ark.cn-beijing.volces.com/api/v3"
+    },
+    "videoAnalysis": {
+      "modelPreset": "lite",
+      "analyzerModel": "doubao-seed-2-0-lite-260428",
+      "strategyModel": "doubao-seed-2-0-mini-260428",
+      "chunkConcurrency": 2
+    },
+    "server": {
+      "taskConcurrency": 2
+    },
     "vaultPath": "/Users/xxx/Obsidian"
   }
 }
 ```
+
+旧版 flat 字段仍兼容读取：`provider/apiKey/model/strategyModel/taskConcurrency/serverTaskConcurrency/videoChunkConcurrency/endpoint`。
 
 ### `vault_discover`
 
@@ -79,9 +94,20 @@
 {
   "type": "model_check",
   "data": {
-    "provider": "doubao",
-    "apiKey": "sk-...",
-    "model": "doubao-seed-2-0-lite-260428"
+    "llm": {
+      "provider": "doubao",
+      "apiKey": "sk-...",
+      "endpoint": "https://ark.cn-beijing.volces.com/api/v3"
+    },
+    "videoAnalysis": {
+      "modelPreset": "lite",
+      "analyzerModel": "doubao-seed-2-0-lite-260428",
+      "strategyModel": "doubao-seed-2-0-mini-260428",
+      "chunkConcurrency": 2
+    },
+    "server": {
+      "taskConcurrency": 2
+    }
   }
 }
 ```
@@ -103,8 +129,12 @@
 提交一个抖音入库任务。扩展只发送入库意图、URL 和页面线索，不发送 Cookie/API Key。
 服务端写入 `~/.obsidian-librarian/inbox/{task_id}.json`，再由本地任务队列调用
 `deps/douyin/scripts/ingest.py --task ...`。
-任务执行支持有限并发，默认同时处理 2 个任务；可通过
-`OBSIDIAN_LIBRARIAN_TASK_CONCURRENCY` 调整，当前上限为 4。
+任务执行支持有限并发，默认同时处理 `2` 个任务；扩展可通过
+`config_update.server.taskConcurrency` 调整，范围 `1-4`。也可用旧字段
+`config_update.taskConcurrency` / `config_update.serverTaskConcurrency` 兼容调整。
+长视频内部切片并发通过 `config_update.videoAnalysis.chunkConcurrency` 调整，范围 `1-4`。
+也可用
+`OBSIDIAN_LIBRARIAN_TASK_CONCURRENCY` 作为启动时覆盖值。
 
 `ingest_intent` 是资产用途意图：
 
@@ -179,7 +209,13 @@
   "type": "status_snapshot",
   "status": {
     "vault": { "state": "ready", "path": "/...", "source": "obsidian_registry" },
-    "model": { "state": "ready", "provider": "doubao", "model": "..." },
+    "llm": { "state": "ready", "provider": "doubao", "model": "...", "endpoint": "https://ark.cn-beijing.volces.com/api/v3" },
+    "videoAnalysis": {
+      "modelPreset": "lite",
+      "analyzerModel": "doubao-seed-2-0-lite-260428",
+      "strategyModel": "doubao-seed-2-0-mini-260428",
+      "chunkConcurrency": 2
+    },
     "cookie": { "state": "ready", "platform": "douyin" },
     "tasks": {
       "running": 1,

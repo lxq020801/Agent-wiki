@@ -1,45 +1,22 @@
 (() => {
-  if (window.__obsidianLibrarianDouyinCurrentVideoLoaded) {
+  const SCRIPT_VERSION = '2026-07-04-no-page-widget-v1';
+
+  if (
+    window.__obsidianLibrarianDouyinCurrentVideoLoaded &&
+    window.__obsidianLibrarianDouyinCurrentVideoVersion === SCRIPT_VERSION
+  ) {
     document.getElementById('obsidian-librarian-douyin-widget')?.remove();
     document.getElementById('obsidian-librarian-douyin-intent-menu')?.remove();
     return;
   }
   window.__obsidianLibrarianDouyinCurrentVideoLoaded = true;
+  window.__obsidianLibrarianDouyinCurrentVideoVersion = SCRIPT_VERSION;
 
   const MAX_PARENT_DEPTH = 10;
   const CONTEXT_TTL_MS = 15000;
-  const NATIVE_HOST_GRACE_MS = 4500;
-  const NATIVE_HOST_STICKY_MS = 2000;
   const WIDGET_ID = 'obsidian-librarian-douyin-widget';
   const MENU_ID = 'obsidian-librarian-douyin-intent-menu';
-  const TOAST_ID = 'obsidian-librarian-douyin-toast';
-  const INGEST_INTENTS = [
-    {
-      id: 'knowledge_and_viral',
-      title: '完整入库',
-      desc: '同一来源生成知识资产和创作模式两篇笔记'
-    },
-    {
-      id: 'knowledge_ingest',
-      title: '知识入库',
-      desc: '沉淀知识、工具、项目、方法和风险'
-    },
-    {
-      id: 'viral_breakdown',
-      title: '爆款拆解',
-      desc: '沉淀文案、节奏、画面和可迁移创作模式'
-    }
-  ];
-  const scriptStartedAt = now();
   let lastContextCandidate = null;
-  let widget = null;
-  let widgetButton = null;
-  let intentMenu = null;
-  let widgetBusy = false;
-  let widgetMode = 'floating';
-  let widgetRaf = 0;
-  let lastWidgetPositionAt = 0;
-  let lastNativeHostAt = 0;
 
   function now() {
     return Date.now();
@@ -201,6 +178,137 @@
     return lastContextCandidate.candidate;
   }
 
+  function absoluteUrl(value) {
+    const text = normalizeText(value);
+    if (!text || text.startsWith('data:') || text.startsWith('blob:')) return '';
+    try {
+      return new URL(text, location.href).href;
+    } catch (_err) {
+      return '';
+    }
+  }
+
+  function cleanMediaTitle(value) {
+    let text = normalizeText(value).replace(/\s+/g, ' ');
+    if (!text) return '';
+    text = text
+      .replace(/\s*复制此链接.*$/i, '')
+      .replace(/\s*打开Dou音搜索.*$/i, '')
+      .replace(/\s*打开抖音搜索.*$/i, '')
+      .replace(/^抖音[-—\s]*/, '')
+      .replace(/[-—\s]*抖音[-—\s]*记录美好生活$/i, '')
+      .replace(/[-—\s]*抖音$/i, '')
+      .trim();
+    if (!text || text === '抖音-记录美好生活' || text === '抖音') return '';
+    return text.length > 180 ? `${text.slice(0, 180).trim()}...` : text;
+  }
+
+  function isNoiseText(value) {
+    const text = normalizeText(value);
+    if (!text) return true;
+    if (/^(倍速|智能|清屏|连播|发送|通知|私信|投稿|客户端|壁纸|充钻石|听抖音|识别画面|章节要点|下一章)$/.test(text)) return true;
+    if (/^(发一条友好的弹幕吧|点击|进入直播间|读屏标签已关闭)$/.test(text)) return true;
+    if (/^@/.test(text) || /^·/.test(text)) return true;
+    if (/^\d{1,2}:\d{2}(?:\s*\/\s*\d{1,2}:\d{2})?$/.test(text)) return true;
+    if (/^[\d.]+万?$/.test(text)) return true;
+    if (/^\d+(?:\.\d+)?x$/i.test(text)) return true;
+    if (/^相关搜索/.test(text)) return true;
+    if (/^[#＃][\s\S]{1,30}$/.test(text)) return true;
+    return false;
+  }
+
+  function isInsideIgnoredNode(element) {
+    if (!isElement(element)) return true;
+    return Boolean(element.closest?.('button, input, textarea, select, svg, canvas, [role="button"]'));
+  }
+
+  function extractTitleFromRoot(root) {
+    if (!isElement(root)) return '';
+    const candidates = [];
+    const elements = [root, ...Array.from(root.querySelectorAll?.('*') || [])];
+    for (const parent of elements) {
+      if (isInsideIgnoredNode(parent) || !isVisibleElement(parent, 12, 8)) continue;
+      for (const node of Array.from(parent.childNodes || [])) {
+        if (node.nodeType !== 3) continue;
+        const text = cleanMediaTitle(node.textContent);
+        if (
+          text &&
+          text.length >= 4 &&
+          text.length <= 260 &&
+          !isNoiseText(text)
+        ) {
+          let score = Math.min(text.length, 80);
+          if (text.length >= 8 && text.length <= 80) score += 60;
+          if (/[，。！？?!：:]/.test(text)) score += 16;
+          if (/[#＃]/.test(text)) score -= 10;
+          if (text.length > 100) score -= 80;
+          if (text.length > 140) score -= 40;
+          if ((text.match(/[。！？?!]/g) || []).length >= 2) score -= 60;
+          if (/^第\d+章/.test(text)) score -= 30;
+          if (/^原视频|作者声明|汽水音乐/.test(text)) score -= 30;
+          candidates.push({ text, score });
+        }
+      }
+    }
+    return candidates.sort((a, b) => b.score - a.score)[0]?.text || '';
+  }
+
+  function metaContent(selector) {
+    return normalizeText(document.querySelector(selector)?.getAttribute('content'));
+  }
+
+  function fallbackPageTitle() {
+    return cleanMediaTitle(
+      metaContent('meta[property="og:title"]') ||
+      metaContent('meta[name="twitter:title"]') ||
+      document.title
+    );
+  }
+
+  function extractCoverFromRoot(root, active) {
+    const video = active?.tagName === 'VIDEO' ? active : root?.querySelector?.('video');
+    const poster = absoluteUrl(video?.poster);
+    if (poster) return poster;
+
+    const badImagePattern = /avatar|head|icon|logo|emoji|sodaicon/i;
+    const images = Array.from(root?.querySelectorAll?.('img') || [])
+      .map((img) => {
+        const rect = img.getBoundingClientRect();
+        const src = absoluteUrl(img.currentSrc || img.src);
+        if (!src || /\.svg(?:\?|$)/i.test(src)) return null;
+        const markerText = [
+          src,
+          img.className,
+          img.alt,
+          Array.from(img.attributes || []).map((attr) => `${attr.name}=${attr.value}`).join(' ')
+        ].join(' ');
+        const renderedArea = Math.max(0, rect.width) * Math.max(0, rect.height);
+        if (renderedArea < 72 * 72 || !isVisibleElement(img, 72, 72)) return null;
+        let score = renderedArea + Math.max(0, visibleScore(img));
+        if (badImagePattern.test(markerText)) score -= 500000;
+        return { src, score };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score);
+    if (images[0]?.src) return images[0].src;
+
+    return absoluteUrl(
+      metaContent('meta[property="og:image"]') ||
+      metaContent('meta[name="twitter:image"]')
+    );
+  }
+
+  function collectCurrentMetadata() {
+    const active = activeVideoElement();
+    const root = closestVideoRoot(active) || active;
+    const title = extractTitleFromRoot(root) || fallbackPageTitle();
+    const coverUrl = extractCoverFromRoot(root, active);
+    return {
+      ...(title ? { title } : {}),
+      ...(coverUrl ? { coverUrl } : {})
+    };
+  }
+
   function collectCurrentCandidate() {
     const candidate = best([
       candidateFromContext(),
@@ -212,6 +320,7 @@
     if (candidate) {
       return {
         ...candidate,
+        ...collectCurrentMetadata(),
         collectedAt: new Date().toISOString()
       };
     }
@@ -266,446 +375,9 @@
     );
   }
 
-  function findControlBarHost(active) {
-    const candidates = [];
-
-    if (active) {
-      const activeRoots = [
-        active,
-        closestVideoRoot(active),
-        active.closest?.('.xgplayer'),
-        active.querySelector?.('.xgplayer')
-      ].filter(Boolean);
-
-      for (const root of activeRoots) {
-        candidates.push(
-          ...Array.from(root.querySelectorAll?.('xg-right-grid, .xg-right-grid') || [])
-        );
-        if (root.matches?.('xg-right-grid, .xg-right-grid')) {
-          candidates.push(root);
-        }
-      }
-    }
-
-    candidates.push(...Array.from(document.querySelectorAll('xg-right-grid, .xg-right-grid')));
-
-    return candidates
-      .filter((host, index, list) => host && list.indexOf(host) === index)
-      .filter((host) => isVisibleElement(host, 60, 24))
-      .sort((a, b) => {
-        const activeRoot = active ? closestVideoRoot(active) : null;
-        const aInActive = activeRoot && (a === activeRoot || activeRoot.contains(a)) ? 1000000 : 0;
-        const bInActive = activeRoot && (b === activeRoot || activeRoot.contains(b)) ? 1000000 : 0;
-        return (visibleScore(b) + bInActive) - (visibleScore(a) + aInActive);
-      })[0] || null;
-  }
-
-  function stopPlayerEvent(event) {
-    event.preventDefault();
-    event.stopPropagation();
-  }
-
-  function clamp(value, min, max) {
-    return Math.max(min, Math.min(max, value));
-  }
-
-  function nativeInsertAnchor(host) {
-    const children = Array.from(host.children || [])
-      .filter((child) => child.id !== WIDGET_ID);
-    const flexDirection = window.getComputedStyle(host).flexDirection || '';
-    if (flexDirection.includes('reverse')) {
-      return null;
-    }
-
-    return children.find((child) => /倍速|智能|清屏|连播/.test(child.innerText || child.textContent || '')) || null;
-  }
-
-  function ensureWidget() {
-    if (widget && widget.isConnected) {
-      return widget;
-    }
-
-    widget = document.createElement('div');
-    widget.id = WIDGET_ID;
-    widget.style.cssText = [
-      'position: fixed',
-      'z-index: 2147483647',
-      'display: none',
-      'align-items: center',
-      'gap: 6px',
-      'pointer-events: auto',
-      'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
-    ].join(';');
-
-    widgetButton = document.createElement('button');
-    widgetButton.type = 'button';
-    widgetButton.textContent = '入库';
-    widgetButton.title = '发送当前抖音视频给 Agent 拆解';
-    widgetButton.style.cssText = [
-      'height: 32px',
-      'min-width: 42px',
-      'padding: 0 10px',
-      'border: 1px solid rgba(255,255,255,.32)',
-      'border-radius: 6px',
-      'background: rgba(255,255,255,.08)',
-      'color: #fff',
-      'font-size: 13px',
-      'font-weight: 600',
-      'line-height: 30px',
-      'box-shadow: none',
-      'backdrop-filter: blur(12px)',
-      '-webkit-backdrop-filter: blur(12px)',
-      'cursor: pointer',
-      'white-space: nowrap'
-    ].join(';');
-    widgetButton.addEventListener('mouseenter', () => {
-      widgetButton.style.background = widgetMode === 'native' ? 'rgba(255,255,255,.16)' : 'rgba(28,31,38,.88)';
-      widgetButton.style.borderColor = 'rgba(255,255,255,.5)';
-    });
-    widgetButton.addEventListener('mouseleave', () => {
-      widgetButton.style.background = widgetMode === 'native' ? 'rgba(255,255,255,.08)' : 'rgba(16,18,22,.72)';
-      widgetButton.style.borderColor = 'rgba(255,255,255,.32)';
-    });
-	    widgetButton.addEventListener('pointerdown', stopPlayerEvent);
-	    widgetButton.addEventListener('mousedown', stopPlayerEvent);
-	    widgetButton.addEventListener('click', toggleIntentMenu);
-
-	    widget.appendChild(widgetButton);
-	    document.documentElement.appendChild(widget);
-	    ensureIntentMenu();
-	    return widget;
-	  }
-
-  function ensureIntentMenu() {
-    if (intentMenu) {
-      return intentMenu;
-    }
-
-    intentMenu = document.createElement('div');
-    intentMenu.id = MENU_ID;
-    intentMenu.style.cssText = [
-      'position: fixed',
-      'z-index: 2147483647',
-      'display: none',
-      'width: 228px',
-      'padding: 8px',
-      'border: 1px solid rgba(255,255,255,.22)',
-      'border-radius: 8px',
-      'background: rgba(18,20,26,.94)',
-      'box-shadow: 0 14px 34px rgba(0,0,0,.32)',
-      'backdrop-filter: blur(18px)',
-      '-webkit-backdrop-filter: blur(18px)',
-      'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-      'pointer-events: auto'
-    ].join(';');
-
-    for (const intent of INGEST_INTENTS) {
-      const card = document.createElement('button');
-      card.type = 'button';
-      card.dataset.intent = intent.id;
-      card.style.cssText = [
-        'display: block',
-        'width: 100%',
-        'padding: 9px 10px',
-        'margin: 0',
-        'border: 0',
-        'border-radius: 6px',
-        'background: transparent',
-        'color: #fff',
-        'text-align: left',
-        'cursor: pointer'
-      ].join(';');
-      card.innerHTML = [
-        `<strong style="display:block;font-size:13px;line-height:18px;">${intent.title}</strong>`,
-        `<span style="display:block;margin-top:2px;color:rgba(255,255,255,.68);font-size:12px;line-height:16px;">${intent.desc}</span>`
-      ].join('');
-      card.addEventListener('mouseenter', () => {
-        card.style.background = 'rgba(255,255,255,.1)';
-      });
-      card.addEventListener('mouseleave', () => {
-        card.style.background = 'transparent';
-      });
-      card.addEventListener('pointerdown', stopPlayerEvent);
-      card.addEventListener('mousedown', stopPlayerEvent);
-      card.addEventListener('click', (event) => submitCurrentVideoFromWidget(event, intent.id));
-      intentMenu.appendChild(card);
-    }
-
-    intentMenu.addEventListener('pointerdown', stopPlayerEvent);
-    intentMenu.addEventListener('mousedown', stopPlayerEvent);
-    document.documentElement.appendChild(intentMenu);
-    return intentMenu;
-  }
-
-  function positionIntentMenu() {
-    if (!intentMenu || !widgetButton) return;
-    const rect = widgetButton.getBoundingClientRect();
-    const width = 228;
-    const height = 184;
-    const left = clamp(rect.left + rect.width / 2 - width / 2, 12, window.innerWidth - width - 12);
-    const top = rect.top > height + 20 ? rect.top - height - 10 : rect.bottom + 10;
-    intentMenu.style.left = `${Math.round(left)}px`;
-    intentMenu.style.top = `${Math.round(clamp(top, 12, window.innerHeight - height - 12))}px`;
-  }
-
-  function hideIntentMenu() {
-    if (!intentMenu) return;
-    intentMenu.style.display = 'none';
-    widgetButton?.setAttribute('aria-expanded', 'false');
-  }
-
-  function toggleIntentMenu(event) {
-    event.preventDefault();
-    event.stopPropagation();
-    if (widgetBusy) return;
-    ensureIntentMenu();
-    if (intentMenu.style.display === 'flex') {
-      hideIntentMenu();
-      return;
-    }
-    positionIntentMenu();
-    intentMenu.style.display = 'flex';
-    intentMenu.style.flexDirection = 'column';
-    intentMenu.style.gap = '4px';
-    widgetButton?.setAttribute('aria-expanded', 'true');
-  }
-
-  function setWidgetNativeMode(host, target) {
-    widgetMode = 'native';
-    lastNativeHostAt = now();
-    const anchor = nativeInsertAnchor(host);
-    const shouldAppend = !anchor && target.parentElement === host && target.nextElementSibling !== null;
-    if (shouldAppend) {
-      host.appendChild(target);
-    } else if (
-      target.parentElement !== host ||
-      (anchor && target.nextElementSibling !== anchor)
-    ) {
-      host.insertBefore(target, anchor);
-    }
-
-    target.style.position = 'static';
-    target.style.zIndex = 'auto';
-    target.style.display = 'flex';
-    target.style.height = '40px';
-    target.style.width = '';
-    target.style.minWidth = '';
-    target.style.flex = '';
-    target.style.margin = '0 2px';
-    target.style.alignItems = 'center';
-    target.style.justifyContent = 'center';
-    target.style.overflow = '';
-    target.style.pointerEvents = 'auto';
-    target.style.left = '';
-    target.style.top = '';
-
-    widgetButton.textContent = widgetBusy ? '发送中' : '入库';
-    widgetButton.style.position = '';
-    widgetButton.style.right = '';
-    widgetButton.style.top = '';
-    widgetButton.style.transform = '';
-    widgetButton.style.width = '';
-    widgetButton.style.minWidth = '42px';
-    widgetButton.style.height = '32px';
-    widgetButton.style.padding = '0 10px';
-    widgetButton.style.fontSize = '13px';
-    widgetButton.style.lineHeight = '30px';
-    widgetButton.style.background = 'rgba(255,255,255,.08)';
-    widgetButton.style.boxShadow = 'none';
-  }
-
-  function setWidgetFloatingMode(target, rect) {
-    widgetMode = 'floating';
-    if (target.parentElement !== document.documentElement) {
-      document.documentElement.appendChild(target);
-    }
-
-    const left = Math.max(12, Math.min(rect.right - 132, window.innerWidth - 148));
-    const top = Math.max(12, Math.min(rect.bottom - 56, window.innerHeight - 48));
-    target.style.position = 'fixed';
-    target.style.zIndex = '2147483647';
-    target.style.left = `${Math.round(left)}px`;
-    target.style.top = `${Math.round(top)}px`;
-    target.style.height = '';
-    target.style.margin = '';
-    target.style.width = '';
-    target.style.minWidth = '';
-    target.style.flex = '';
-    target.style.alignItems = '';
-    target.style.justifyContent = '';
-    target.style.overflow = '';
-    target.style.display = 'flex';
-
-    widgetButton.textContent = widgetBusy ? '发送中' : '收入知识库';
-    widgetButton.style.position = '';
-    widgetButton.style.right = '';
-    widgetButton.style.top = '';
-    widgetButton.style.transform = '';
-    widgetButton.style.width = '';
-    widgetButton.style.minWidth = '42px';
-    widgetButton.style.height = '32px';
-    widgetButton.style.padding = '0 10px';
-    widgetButton.style.fontSize = '13px';
-    widgetButton.style.lineHeight = '30px';
-    widgetButton.style.background = 'rgba(16,18,22,.72)';
-    widgetButton.style.boxShadow = '0 8px 22px rgba(0,0,0,.28)';
-  }
-
-  function positionWidget() {
-    const element = activeVideoElement();
-    const target = ensureWidget();
-
-    if (!element) {
-      target.style.display = 'none';
-      return;
-    }
-
-    const host = findControlBarHost(element);
-    if (host) {
-      setWidgetNativeMode(host, target);
-      return;
-    }
-
-    if (
-      now() - scriptStartedAt < NATIVE_HOST_GRACE_MS ||
-      now() - lastNativeHostAt < NATIVE_HOST_STICKY_MS
-    ) {
-      target.style.display = 'none';
-      return;
-    }
-
-    const rect = element.getBoundingClientRect();
-    setWidgetFloatingMode(target, rect);
-  }
-
-  function schedulePositionWidget(force = false) {
-    if (!force && now() - lastWidgetPositionAt < 500) {
-      return;
-    }
-    if (widgetRaf) {
-      return;
-    }
-    widgetRaf = window.requestAnimationFrame(() => {
-      widgetRaf = 0;
-      lastWidgetPositionAt = now();
-      positionWidget();
-    });
-  }
-
-  function showToast(message, ok = true) {
-    let toast = document.getElementById(TOAST_ID);
-    if (!toast) {
-      toast = document.createElement('div');
-      toast.id = TOAST_ID;
-      toast.style.cssText = [
-        'position: fixed',
-        'left: 50%',
-        'bottom: 84px',
-        'transform: translateX(-50%)',
-        'z-index: 2147483647',
-        'max-width: min(420px, calc(100vw - 32px))',
-        'padding: 10px 14px',
-        'border-radius: 8px',
-        'color: #fff',
-        'font-size: 13px',
-        'font-weight: 600',
-        'line-height: 1.4',
-        'box-shadow: 0 10px 30px rgba(0,0,0,.28)',
-        'backdrop-filter: blur(18px)',
-        '-webkit-backdrop-filter: blur(18px)',
-        'pointer-events: none',
-        'transition: opacity .18s ease'
-      ].join(';');
-      document.documentElement.appendChild(toast);
-    }
-    toast.textContent = message;
-    toast.style.background = ok ? 'rgba(18,120,86,.92)' : 'rgba(172,54,54,.94)';
-    toast.style.opacity = '1';
-    window.clearTimeout(toast.__obsidianLibrarianTimer);
-    toast.__obsidianLibrarianTimer = window.setTimeout(() => {
-      toast.style.opacity = '0';
-    }, 2800);
-  }
-
-  function sendRuntimeMessage(message) {
-    return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage(message, (response) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
-        }
-        resolve(response);
-      });
-    });
-  }
-
   function removeInjectedWidget() {
     document.getElementById(WIDGET_ID)?.remove();
     document.getElementById(MENU_ID)?.remove();
-  }
-
-  async function submitCurrentVideoFromWidget(event, ingestIntent = 'knowledge_ingest') {
-    event.preventDefault();
-    event.stopPropagation();
-    if (widgetBusy) return;
-    hideIntentMenu();
-
-    const candidate = collectCurrentCandidate();
-    if (!candidate.ok || !candidate.url) {
-      showToast('没有识别到当前视频，请进入详情页或复制分享链接。', false);
-      return;
-    }
-
-    widgetBusy = true;
-    widgetButton.disabled = true;
-    widgetButton.textContent = '发送中';
-    try {
-      const response = await sendRuntimeMessage({
-        action: 'submitCurrentDouyinVideo',
-        candidate,
-        ingestIntent
-      });
-      if (response?.ok) {
-        showToast(response.message || '已发送给 Agent。');
-      } else {
-        showToast(response?.message || '发送失败，请确认 Agent 已连接。', false);
-      }
-    } catch (err) {
-      showToast(err.message || '发送失败，请确认扩展已启用。', false);
-    } finally {
-      widgetBusy = false;
-      widgetButton.disabled = false;
-      widgetButton.textContent = widgetMode === 'native' ? '入库' : '收入知识库';
-    }
-  }
-
-	  function startWidgetLoop() {
-	    ensureWidget();
-	    schedulePositionWidget(true);
-	    window.setInterval(() => schedulePositionWidget(true), 1500);
-	    window.addEventListener('scroll', () => {
-	      schedulePositionWidget();
-	      hideIntentMenu();
-	    }, true);
-	    window.addEventListener('resize', () => {
-	      schedulePositionWidget(true);
-	      hideIntentMenu();
-	    }, true);
-	    document.addEventListener('visibilitychange', () => schedulePositionWidget(true), true);
-	    document.addEventListener('pointerdown', (event) => {
-	      if (
-	        intentMenu?.style.display === 'flex' &&
-	        !intentMenu.contains(event.target) &&
-	        !widget?.contains(event.target)
-	      ) {
-	        hideIntentMenu();
-	      }
-	    }, true);
-    const observer = new MutationObserver(() => schedulePositionWidget());
-    observer.observe(document.documentElement, {
-      childList: true,
-      subtree: true
-    });
   }
 
   document.addEventListener('contextmenu', (event) => {
@@ -723,7 +395,11 @@
   }, true);
 
   chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
-    if (request?.action !== 'getCurrentDouyinVideo') {
+    if (
+      request?.action !== 'getCurrentDouyinVideo' &&
+      request?.action !== 'getCurrentDouyinVideoV2' &&
+      request?.action !== 'getCurrentDouyinVideoV3'
+    ) {
       return false;
     }
     sendResponse(collectCurrentCandidate());

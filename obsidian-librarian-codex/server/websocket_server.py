@@ -50,13 +50,41 @@ def default_runtime_root():
     return Path.home() / ".obsidian-librarian"
 
 
-def default_task_concurrency():
-    raw = os.environ.get("OBSIDIAN_LIBRARIAN_TASK_CONCURRENCY", "2")
+DEFAULT_TASK_CONCURRENCY = 2
+MIN_TASK_CONCURRENCY = 1
+MAX_TASK_CONCURRENCY = 4
+
+
+def _normalize_task_concurrency(value, default=DEFAULT_TASK_CONCURRENCY):
     try:
-        value = int(raw)
+        parsed = int(value)
     except (TypeError, ValueError):
-        value = 2
-    return max(1, min(4, value))
+        parsed = default
+    return max(MIN_TASK_CONCURRENCY, min(MAX_TASK_CONCURRENCY, parsed))
+
+
+def _normalize_chunk_concurrency(value, default=2):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(4, parsed))
+
+
+def default_task_concurrency(runtime_root=None):
+    raw = os.environ.get("OBSIDIAN_LIBRARIAN_TASK_CONCURRENCY")
+    if raw:
+        return _normalize_task_concurrency(raw)
+    if runtime_root is not None:
+        config_path = Path(runtime_root).expanduser() / "config.toml"
+        raw = _simple_config_value(
+            config_path,
+            "server",
+            "task_concurrency",
+            str(DEFAULT_TASK_CONCURRENCY),
+        )
+        return _normalize_task_concurrency(raw)
+    return DEFAULT_TASK_CONCURRENCY
 
 
 PROVIDERS = {
@@ -224,33 +252,66 @@ def _first_config_value(config_data, fields):
     return None
 
 
+def _nested_config_value(config_data, section, fields):
+    nested = config_data.get(section)
+    if not isinstance(nested, dict):
+        return None
+    return _first_config_value(nested, fields)
+
+
+def _explicit_endpoint_values(config_data):
+    fields = ('endpoint', 'arkEndpoint', 'doubaoEndpoint', 'agentPlanEndpoint', 'agent_plan_endpoint')
+    for source in (config_data, config_data.get('llm') if isinstance(config_data.get('llm'), dict) else {}):
+        if not isinstance(source, dict):
+            continue
+        for field in fields:
+            if field in source and str(source.get(field) or '').strip():
+                yield source.get(field)
+
+
 def _incoming_api_key(config_data, provider, existing=""):
     fields = _provider_default(provider, "api_key_fields")
     if _is_legacy_agent_plan_provider(config_data.get("provider")):
         fields = tuple(field for field in fields if field != "apiKey")
-    incoming = _first_config_value(config_data, fields)
+    incoming = (
+        _nested_config_value(config_data, "llm", fields)
+        or _first_config_value(config_data, fields)
+    )
     if incoming is None or str(incoming).strip() == "":
         return existing
     return str(incoming).strip()
 
 
 def _incoming_endpoint(config_data, provider, existing=""):
-    incoming = _first_config_value(config_data, _provider_default(provider, "endpoint_fields"))
+    fields = _provider_default(provider, "endpoint_fields")
+    incoming = _nested_config_value(config_data, "llm", fields) or _first_config_value(config_data, fields)
     if incoming is None or str(incoming).strip() == "":
         incoming = existing
-    return _safe_ark_endpoint(incoming, provider)
+    return _validate_ark_endpoint(incoming, provider)
 
 
 def _safe_ark_endpoint(value, provider=None):
     expected = _provider_default(provider or DEFAULT_PROVIDER, "endpoint")
-    endpoint = value or expected
-    parsed = urllib.parse.urlparse(endpoint)
-    if parsed.scheme != "https" or parsed.hostname not in TRUSTED_ARK_HOSTS:
+    try:
+        return _validate_ark_endpoint(value or expected, provider)
+    except ValueError:
         return expected
-    normalized = endpoint.rstrip("/")
-    if provider:
-        return normalized if normalized == expected else expected
-    return normalized
+
+
+def _validate_ark_endpoint(value, provider=None):
+    endpoint = (value or _provider_default(provider or DEFAULT_PROVIDER, "endpoint")).strip().rstrip("/")
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("Endpoint URL 必须是有效的 HTTPS 地址")
+    if parsed.username or parsed.password:
+        raise ValueError("Endpoint URL 不能包含账号密码")
+    if _is_agent_plan_endpoint_text(endpoint):
+        raise ValueError("Agent Plan endpoint 不能作为普通 Ark API 使用")
+    return endpoint
+
+
+def _is_agent_plan_endpoint_text(endpoint):
+    return str(endpoint or "").rstrip("/").endswith("/api/plan/v3")
 
 
 def _candidate_payload(candidate):
@@ -294,10 +355,11 @@ class LibrarianServer:
         self.enable_task_runner = enable_task_runner
         self.task_queue = None
         self.task_workers = set()
+        self.retire_worker_tokens = 0
         self.task_concurrency = (
-            default_task_concurrency()
+            default_task_concurrency(self.runtime_root)
             if task_concurrency is None
-            else max(1, min(4, int(task_concurrency)))
+            else _normalize_task_concurrency(task_concurrency)
         )
         self.queued_task_files = set()
         self.running_task_ids = set()
@@ -351,8 +413,9 @@ class LibrarianServer:
                     log(f"[Server] 消息处理失败: {type(e).__name__}: {e}")
                     await websocket.send(json.dumps({
                         'type': 'error',
-                        'error': type(e).__name__
-                    }))
+                        'error': type(e).__name__,
+                        'message': str(e),
+                    }, ensure_ascii=False))
                     
         except Exception as exc:
             if not _is_connection_closed(exc):
@@ -369,11 +432,20 @@ class LibrarianServer:
             log(f"[Server] 握手: {msg.get('client')} v{msg.get('version')}")
             
         elif msg_type == 'config_update':
-            await self.handle_config_update(msg.get('data', {}))
-            await websocket.send(json.dumps({
-                'type': 'config_synced',
-                'timestamp': datetime.now().isoformat()
-            }))
+            try:
+                await self.handle_config_update(msg.get('data', {}))
+            except ValueError as exc:
+                await websocket.send(json.dumps({
+                    'type': 'config_rejected',
+                    'error': 'config_invalid',
+                    'message': str(exc),
+                    'timestamp': datetime.now().isoformat()
+                }, ensure_ascii=False))
+            else:
+                await websocket.send(json.dumps({
+                    'type': 'config_synced',
+                    'timestamp': datetime.now().isoformat()
+                }))
             
         elif msg_type == 'cookie_update':
             status = await self.handle_cookie_update(msg.get('platform'), msg.get('data'))
@@ -409,7 +481,15 @@ class LibrarianServer:
             }, ensure_ascii=False))
 
         elif msg_type == 'model_check':
-            status = await self.check_model_health(msg.get('data') or {})
+            try:
+                status = await self.check_model_health(msg.get('data') or {})
+            except ValueError as exc:
+                status = {
+                    'ok': False,
+                    'state': 'error',
+                    'checkedAt': datetime.now().isoformat(),
+                    'message': str(exc),
+                }
             await websocket.send(json.dumps({
                 'type': 'model_status',
                 'status': status,
@@ -627,6 +707,10 @@ class LibrarianServer:
         if self.task_queue is None:
             self.task_queue = asyncio.Queue()
         self.task_workers = {worker for worker in self.task_workers if not worker.done()}
+        extra_workers = len(self.task_workers) - self.task_concurrency - self.retire_worker_tokens
+        for _ in range(max(0, extra_workers)):
+            self.retire_worker_tokens += 1
+            self.task_queue.put_nowait(None)
         while len(self.task_workers) < self.task_concurrency:
             worker_index = len(self.task_workers) + 1
             self.task_workers.add(asyncio.create_task(self.task_worker_loop(worker_index)))
@@ -655,8 +739,11 @@ class LibrarianServer:
             if self.task_queue is None:
                 self.task_queue = asyncio.Queue()
             task_file = await self.task_queue.get()
-            self.queued_task_files.discard(str(task_file))
             try:
+                if task_file is None:
+                    self.retire_worker_tokens = max(0, self.retire_worker_tokens - 1)
+                    return
+                self.queued_task_files.discard(str(task_file))
                 await self.run_task_file(task_file)
             except Exception as exc:
                 log(f"[Server] 任务执行器 {worker_index} 异常: {type(exc).__name__}: {exc}")
@@ -667,6 +754,7 @@ class LibrarianServer:
                     'tasks': await asyncio.to_thread(self.task_status_snapshot),
                     'timestamp': datetime.now().isoformat(),
                 })
+                asyncio.get_running_loop().call_soon(self.ensure_task_worker)
 
     async def run_task_file(self, task_file):
         task_file = Path(task_file)
@@ -901,6 +989,9 @@ class LibrarianServer:
         """处理配置更新"""
         log(f"[Server] 收到配置更新: {list(config_data.keys())}")
         self.config = config_data
+        llm_config = config_data.get('llm') if isinstance(config_data.get('llm'), dict) else {}
+        video_config = config_data.get('videoAnalysis') if isinstance(config_data.get('videoAnalysis'), dict) else {}
+        server_config = config_data.get('server') if isinstance(config_data.get('server'), dict) else {}
         
         # 保存完整 TOML（供 config_loader.py / ingest.py 读取）
         config_path = self.runtime_root / 'config.toml'
@@ -908,9 +999,11 @@ class LibrarianServer:
 
         previous_provider_raw = _simple_config_value(config_path, 'provider', 'active', DEFAULT_PROVIDER)
         previous_provider = _normalize_provider(previous_provider_raw)
-        provider_raw = config_data.get('provider') or previous_provider_raw
+        provider_raw = llm_config.get('provider') or config_data.get('provider') or previous_provider_raw
         provider = _normalize_provider(provider_raw)
         legacy_agent_plan_payload = _is_legacy_agent_plan_provider(provider_raw)
+        for endpoint_hint in _explicit_endpoint_values(config_data):
+            _validate_ark_endpoint(endpoint_hint, 'doubao')
         existing_doubao_api_key = _provider_api_key(config_path, 'doubao')
         existing_doubao_endpoint = _provider_endpoint(config_path, 'doubao')
         existing_model = _simple_config_value(
@@ -932,6 +1025,18 @@ class LibrarianServer:
             _provider_default(provider, 'fallback'),
         )
         existing_vault_path = _simple_config_value(config_path, 'vault', 'path')
+        existing_task_concurrency = _simple_config_value(
+            config_path,
+            'server',
+            'task_concurrency',
+            str(self.task_concurrency),
+        )
+        existing_chunk_concurrency = _simple_config_value(
+            config_path,
+            'analysis',
+            'chunk_concurrency',
+            '2',
+        )
 
         incoming_vault = config_data.get('vaultPath') or config_data.get('vault_path') or ''
         vault_path = existing_vault_path or ''
@@ -958,15 +1063,38 @@ class LibrarianServer:
                 vault_path = discovery.selected.path
 
         quality = 'quality'
-        model = None if legacy_agent_plan_payload else (config_data.get('model') or config_data.get('modelId'))
+        model = None if legacy_agent_plan_payload else (
+            video_config.get('analyzerModel')
+            or config_data.get('model')
+            or config_data.get('modelId')
+        )
         if not model:
             model = existing_model if provider == previous_provider else _provider_default(provider, 'model')
         fallback_model = None if legacy_agent_plan_payload else config_data.get('fallbackModel')
         if not fallback_model:
             fallback_model = existing_fallback if provider == previous_provider else _provider_default(provider, 'fallback')
-        strategy_model = None if legacy_agent_plan_payload else config_data.get('strategyModel')
+        strategy_model = None if legacy_agent_plan_payload else (
+            video_config.get('strategyModel')
+            or config_data.get('strategyModel')
+        )
         if not strategy_model:
             strategy_model = existing_strategy if provider == previous_provider else _provider_default(provider, 'fallback')
+        incoming_task_concurrency = (
+            _first_config_value(server_config, ('taskConcurrency', 'task_concurrency', 'concurrency'))
+            or _first_config_value(config_data, ('serverTaskConcurrency', 'taskConcurrency', 'task_concurrency', 'concurrency'))
+        )
+        task_concurrency = _normalize_task_concurrency(
+            incoming_task_concurrency if incoming_task_concurrency is not None else existing_task_concurrency,
+            default=self.task_concurrency,
+        )
+        incoming_chunk_concurrency = (
+            _first_config_value(video_config, ('chunkConcurrency', 'chunk_concurrency'))
+            or _first_config_value(config_data, ('videoChunkConcurrency', 'chunkConcurrency', 'chunk_concurrency'))
+        )
+        chunk_concurrency = _normalize_chunk_concurrency(
+            incoming_chunk_concurrency if incoming_chunk_concurrency is not None else existing_chunk_concurrency,
+            default=_normalize_chunk_concurrency(existing_chunk_concurrency),
+        )
 
         previous_active_key = _provider_api_key(config_path, previous_provider)
         if legacy_agent_plan_payload:
@@ -978,11 +1106,14 @@ class LibrarianServer:
         else:
             doubao_api_key = _incoming_api_key(config_data, 'doubao', existing_doubao_api_key)
         doubao_endpoint = _safe_ark_endpoint(
-            _first_config_value(config_data, ('arkEndpoint', 'doubaoEndpoint'))
+            _nested_config_value(config_data, 'llm', ('arkEndpoint', 'doubaoEndpoint', 'endpoint'))
+            or _first_config_value(config_data, ('arkEndpoint', 'doubaoEndpoint'))
             or (config_data.get('endpoint') if not legacy_agent_plan_payload else None)
             or existing_doubao_endpoint,
             'doubao',
         )
+        if not legacy_agent_plan_payload:
+            doubao_endpoint = _incoming_endpoint(config_data, 'doubao', existing_doubao_endpoint)
         current_active_key = doubao_api_key
         active_key_changed = (
             provider != previous_provider
@@ -1008,6 +1139,7 @@ fps_min = 0.2
 fps_max = 5.0
 file_active_timeout_sec = 120
 response_timeout_sec = 900
+chunk_concurrency = {int(chunk_concurrency)}
 
 [douyin]
 cookie_path = "{_toml_escape(str(self.runtime_root / 'cookie' / 'douyin.txt'))}"
@@ -1020,6 +1152,7 @@ relative_root = "知识资产/知识入库"
 enabled = true
 host = "{_toml_escape(self.host)}"
 port = {int(self.port)}
+task_concurrency = {int(task_concurrency)}
 """
 
         with open(config_path, 'w') as f:
@@ -1030,6 +1163,10 @@ port = {int(self.port)}
                 self.status_path('model_health.json').unlink()
             except FileNotFoundError:
                 pass
+        if self.task_concurrency != task_concurrency:
+            self.task_concurrency = task_concurrency
+            self.ensure_task_worker()
+            log(f"[Server] 任务并发数已更新: {self.task_concurrency}")
         log(f"[Server] 配置已保存到 {config_path}")
 
     def config_path(self):
@@ -1082,7 +1219,11 @@ port = {int(self.port)}
         provider = _normalize_provider(_simple_config_value(config_path, 'provider', 'active', DEFAULT_PROVIDER))
         api_key = _provider_api_key(config_path, provider)
         model = _simple_config_value(config_path, 'models', 'analyzer', _provider_default(provider, 'model'))
+        strategy_model = _simple_config_value(config_path, 'models', 'strategy', _provider_default(provider, 'fallback'))
         endpoint = _provider_endpoint(config_path, provider)
+        chunk_concurrency = _normalize_chunk_concurrency(
+            _simple_config_value(config_path, 'analysis', 'chunk_concurrency', '2')
+        )
         last = _json_file(self.status_path('model_health.json')) or {}
         if not api_key:
             return {
@@ -1091,7 +1232,10 @@ port = {int(self.port)}
                 'provider': provider,
                 'providerLabel': _provider_default(provider, 'label'),
                 'model': model,
+                'strategyModel': strategy_model,
                 'endpoint': endpoint,
+                'taskConcurrency': self.task_concurrency,
+                'chunkConcurrency': chunk_concurrency,
                 'checkedAt': '',
                 'message': f"缺少 {_provider_default(provider, 'label')} API Key",
             }
@@ -1108,7 +1252,10 @@ port = {int(self.port)}
                 'provider': provider,
                 'providerLabel': _provider_default(provider, 'label'),
                 'model': model,
+                'strategyModel': strategy_model,
                 'endpoint': endpoint,
+                'taskConcurrency': self.task_concurrency,
+                'chunkConcurrency': chunk_concurrency,
                 'checkedAt': '',
                 'message': '已配置，等待检查',
             }
@@ -1118,9 +1265,30 @@ port = {int(self.port)}
             'provider': last.get('provider', provider),
             'providerLabel': _provider_default(last.get('provider', provider), 'label'),
             'model': last.get('model', model),
+            'strategyModel': strategy_model,
             'endpoint': endpoint,
+            'taskConcurrency': self.task_concurrency,
+            'chunkConcurrency': chunk_concurrency,
             'checkedAt': last.get('checkedAt', ''),
             'message': last.get('message', '已配置，等待检查'),
+        }
+
+    def video_analysis_status(self):
+        config_path = self.config_path()
+        model = _simple_config_value(config_path, 'models', 'analyzer', _provider_default(DEFAULT_PROVIDER, 'model'))
+        strategy_model = _simple_config_value(config_path, 'models', 'strategy', _provider_default(DEFAULT_PROVIDER, 'fallback'))
+        chunk_concurrency = _normalize_chunk_concurrency(
+            _simple_config_value(config_path, 'analysis', 'chunk_concurrency', '2')
+        )
+        preset = 'mini' if model == _provider_default(DEFAULT_PROVIDER, 'fallback') else 'lite'
+        return {
+            'ok': True,
+            'state': 'ready',
+            'modelPreset': preset,
+            'analyzerModel': model,
+            'strategyModel': strategy_model,
+            'chunkConcurrency': chunk_concurrency,
+            'taskConcurrency': self.task_concurrency,
         }
 
     def _douyin_cookie_health(self, cookie_path):
@@ -1178,6 +1346,8 @@ port = {int(self.port)}
         return {
             'vault': self.vault_status(),
             'model': self.model_config_status(),
+            'llm': self.model_config_status(),
+            'videoAnalysis': self.video_analysis_status(),
             'cookie': self.cookie_status(),
             'tasks': self.task_status_snapshot(),
         }
@@ -1277,16 +1447,31 @@ port = {int(self.port)}
 
     def _check_model_health_sync(self, config_data):
         config_path = self.config_path()
+        llm_config = config_data.get('llm') if isinstance(config_data.get('llm'), dict) else {}
+        video_config = config_data.get('videoAnalysis') if isinstance(config_data.get('videoAnalysis'), dict) else {}
         provider = _normalize_provider(
-            config_data.get('provider')
+            llm_config.get('provider')
+            or config_data.get('provider')
             or _simple_config_value(config_path, 'provider', 'active', DEFAULT_PROVIDER)
         )
         api_key = _incoming_api_key(config_data, provider, _provider_api_key(config_path, provider))
         endpoint = _incoming_endpoint(config_data, provider, _provider_endpoint(config_path, provider))
         model = (
-            config_data.get('model')
+            video_config.get('analyzerModel')
+            or config_data.get('model')
             or config_data.get('modelId')
             or _simple_config_value(config_path, 'models', 'analyzer', _provider_default(provider, 'model'))
+        )
+        strategy_model = (
+            video_config.get('strategyModel')
+            or config_data.get('strategyModel')
+            or _simple_config_value(config_path, 'models', 'strategy', _provider_default(provider, 'fallback'))
+        )
+        chunk_concurrency = _normalize_chunk_concurrency(
+            video_config.get('chunkConcurrency')
+            or config_data.get('videoChunkConcurrency')
+            or config_data.get('chunkConcurrency')
+            or _simple_config_value(config_path, 'analysis', 'chunk_concurrency', '2')
         )
         checked_at = datetime.now().isoformat()
 
@@ -1297,7 +1482,10 @@ port = {int(self.port)}
                 'provider': provider,
                 'providerLabel': _provider_default(provider, 'label'),
                 'model': model,
+                'strategyModel': strategy_model,
                 'endpoint': endpoint,
+                'taskConcurrency': self.task_concurrency,
+                'chunkConcurrency': chunk_concurrency,
                 'checkedAt': checked_at,
                 'message': f"缺少 {_provider_default(provider, 'label')} API Key",
             }
@@ -1323,7 +1511,10 @@ port = {int(self.port)}
                     'provider': provider,
                     'providerLabel': _provider_default(provider, 'label'),
                     'model': model,
+                    'strategyModel': strategy_model,
                     'endpoint': endpoint,
+                    'taskConcurrency': self.task_concurrency,
+                    'chunkConcurrency': chunk_concurrency,
                     'checkedAt': checked_at,
                     'message': '模型连通正常' if ok else f'HTTP {resp.status}',
                 }
@@ -1339,7 +1530,10 @@ port = {int(self.port)}
                 'provider': provider,
                 'providerLabel': _provider_default(provider, 'label'),
                 'model': model,
+                'strategyModel': strategy_model,
                 'endpoint': endpoint,
+                'taskConcurrency': self.task_concurrency,
+                'chunkConcurrency': chunk_concurrency,
                 'checkedAt': checked_at,
                 'message': message,
             }
@@ -1350,7 +1544,10 @@ port = {int(self.port)}
                 'provider': provider,
                 'providerLabel': _provider_default(provider, 'label'),
                 'model': model,
+                'strategyModel': strategy_model,
                 'endpoint': endpoint,
+                'taskConcurrency': self.task_concurrency,
+                'chunkConcurrency': chunk_concurrency,
                 'checkedAt': checked_at,
                 'message': type(exc).__name__,
             }

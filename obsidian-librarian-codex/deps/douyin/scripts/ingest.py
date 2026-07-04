@@ -951,6 +951,7 @@ async def run_task(
             source_id=meta.aweme_id,
             file_active_timeout_sec=config.file_active_timeout_sec,
             response_timeout_sec=config.response_timeout_sec,
+            chunk_concurrency=config.chunk_concurrency,
             on_progress=an_progress,
         )
     except FileTooLargeError as e:

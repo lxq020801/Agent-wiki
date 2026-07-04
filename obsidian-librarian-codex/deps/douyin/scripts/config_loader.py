@@ -18,6 +18,7 @@ config_loader.py — 读取并校验 ~/.obsidian-librarian/config.toml
 from __future__ import annotations
 
 import os
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -72,6 +73,18 @@ class ConfigError(Exception):
     """配置错误。message 不应包含敏感字段值。"""
 
 
+def _validate_ark_endpoint(value: object) -> str:
+    endpoint = str(value or DEFAULT_DOUBAO_ENDPOINT).strip().rstrip("/")
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ConfigError("Ark endpoint 必须是有效的 HTTPS 地址")
+    if parsed.username or parsed.password:
+        raise ConfigError("Ark endpoint 不能包含账号密码")
+    if endpoint.endswith("/api/plan/v3"):
+        raise ConfigError("Agent Plan endpoint 不能作为普通 Ark API 使用")
+    return endpoint
+
+
 @dataclass
 class Config:
     # ark
@@ -107,6 +120,7 @@ class Config:
     files_api_key: str = ""
     files_endpoint: str = DEFAULT_DOUBAO_ENDPOINT
     response_timeout_sec: int = 900
+    chunk_concurrency: int = 2
 
     # 计算属性（不暴露给 toml）
     @property
@@ -184,6 +198,7 @@ def load_config(path: Optional[Path] = None) -> Config:
         "endpoint",
         default=DEFAULT_DOUBAO_ENDPOINT,
     )
+    doubao_endpoint = _validate_ark_endpoint(doubao_endpoint)
     # 保留字段只为读旧配置/测试兼容，不参与运行。不要把旧 Agent Plan key
     # 自动迁移到普通 Ark key，避免用户误用不同权限体系的密钥。
     agent_plan_api_key = _get(data, "agent_plan", "api_key", default="", config_file=config_file)
@@ -245,6 +260,11 @@ def load_config(path: Optional[Path] = None) -> Config:
     response_timeout_sec = int(
         _get(data, "analysis", "response_timeout_sec", default=900)
     )
+    try:
+        chunk_concurrency = int(_get(data, "analysis", "chunk_concurrency", default=2))
+    except (TypeError, ValueError):
+        chunk_concurrency = 2
+    chunk_concurrency = max(1, min(4, chunk_concurrency))
 
     # douyin
     cookie_path_raw = _get(
@@ -310,6 +330,7 @@ def load_config(path: Optional[Path] = None) -> Config:
         agent_plan_endpoint=agent_plan_endpoint,
         files_api_key=files_api_key,
         files_endpoint=files_endpoint,
+        chunk_concurrency=chunk_concurrency,
     )
 
 
@@ -347,6 +368,7 @@ fps_max = 5.0
 file_active_timeout_sec = 120
 # Responses API 分析超时；防止网络/代理/云端异常时无限占用 worker。
 response_timeout_sec = 900
+chunk_concurrency = 2
 
 [douyin]
 # Cookie 文件路径（由 Chrome 扩展自动写入）
@@ -360,10 +382,11 @@ path = ""
 relative_root = "知识资产/知识入库"
 
 [server]
-# 预留：v0.x 启 HTTP 服务（iOS 快捷指令需要）
+# Agent 控制服务；task_concurrency 控制同时处理多少个入库任务。
 enabled = false
 host = "127.0.0.1"
 port = 8765
+task_concurrency = 2
 """
 
 

@@ -65,6 +65,63 @@ port = 8765
     assert cfg.strategy_model == "doubao-seed-2-0-mini-260428"
 
 
+def test_config_loader_rejects_invalid_ark_endpoints(tmp: Path) -> None:
+    import sys
+
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "endpoint-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    from config_loader import ConfigError, load_config
+
+    vault = tmp / "endpoint-vault"
+    vault.mkdir()
+    invalid_cases = [
+        ("http://evil.example.invalid/api/v3", "HTTPS"),
+        ("https://user:pass@ark.cn-beijing.volces.com/api/v3", "账号密码"),
+        ("https://ark.cn-beijing.volces.com/api/plan/v3", "Agent Plan endpoint"),
+    ]
+    for index, (endpoint, expected) in enumerate(invalid_cases):
+        config = tmp / f"endpoint-runtime-{index}" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            f"""
+[ark]
+api_key = "test-key"
+endpoint = "{endpoint}"
+
+[models]
+analyzer = "doubao-seed-2-0-lite-260428"
+analyzer_fallback = "doubao-seed-2-0-mini-260428"
+
+[analysis]
+default_quality = "quality"
+balanced_target_frames = 240
+quality_target_frames = 1250
+fps_min = 0.2
+fps_max = 5.0
+file_active_timeout_sec = 120
+
+[douyin]
+cookie_path = "{config.parent / 'cookie' / 'douyin.txt'}"
+
+[vault]
+path = "{vault}"
+relative_root = "知识资产/知识入库"
+
+[server]
+enabled = true
+host = "127.0.0.1"
+port = 8765
+""",
+            encoding="utf-8",
+        )
+        try:
+            load_config(config)
+        except ConfigError as e:
+            assert expected in str(e)
+        else:
+            raise AssertionError(f"invalid endpoint must be rejected: {endpoint}")
+
+
 def test_netscape_cookie_conversion(tmp: Path) -> None:
     import sys
 
@@ -717,9 +774,19 @@ def test_websocket_config_writer(tmp: Path) -> None:
     (vault / "index.md").write_text("# 知识库索引\n", encoding="utf-8")
     server = LibrarianServer()
     asyncio.run(server.handle_config_update({
-        "apiKey": "test-key",
+        "llm": {
+            "provider": "doubao",
+            "apiKey": "test-key",
+            "endpoint": "https://ark.cn-beijing.volces.com/api/v3",
+        },
         "vaultPath": str(vault),
-        "model": "doubao-seed-2-0-lite-260428",
+        "videoAnalysis": {
+            "modelPreset": "lite",
+            "analyzerModel": "doubao-seed-2-0-lite-260428",
+            "strategyModel": "doubao-seed-2-0-mini-260428",
+            "chunkConcurrency": 4,
+        },
+        "server": {"taskConcurrency": 3},
         "quality": "balanced",
         "qualityTargetFrames": 1,
         "fpsMin": 5.0,
@@ -735,8 +802,14 @@ def test_websocket_config_writer(tmp: Path) -> None:
     assert cfg.fps_max == 5.0
     assert cfg.response_timeout_sec == 900
     assert cfg.strategy_model == "doubao-seed-2-0-mini-260428"
+    assert cfg.chunk_concurrency == 4
+    assert server.task_concurrency == 3
 
-    assert oct((tmp / "ws-runtime" / "config.toml").stat().st_mode & 0o777) == "0o600"
+    config_path = tmp / "ws-runtime" / "config.toml"
+    config_text = config_path.read_text(encoding="utf-8")
+    assert "task_concurrency = 3" in config_text
+    assert "chunk_concurrency = 4" in config_text
+    assert oct(config_path.stat().st_mode & 0o777) == "0o600"
 
     weak_status = asyncio.run(server.handle_cookie_update(
         "douyin",
@@ -1413,7 +1486,6 @@ def test_websocket_config_writer_rejects_agent_plan_payload_key(tmp: Path) -> No
     os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
-    from config_loader import load_config, ConfigError
 
     vault = tmp / "ws-vault-plan"
     vault.mkdir()
@@ -1421,26 +1493,78 @@ def test_websocket_config_writer_rejects_agent_plan_payload_key(tmp: Path) -> No
     (vault / "index.md").write_text("# 知识库索引\n", encoding="utf-8")
 
     server = LibrarianServer()
-    asyncio.run(server.handle_config_update({
-        "provider": "volcengine_agent_plan",
-        "apiKey": "plan-key",
-        "agentPlanApiKey": "plan-key",
-        "agentPlanEndpoint": "https://ark.cn-beijing.volces.com/api/plan/v3",
-        "model": "doubao-seed-2.0-lite",
-        "vaultPath": str(vault),
-    }))
-
-    config_path = runtime / "config.toml"
-    text = config_path.read_text(encoding="utf-8")
-    assert "[agent_plan]" not in text
-    assert "plan-key" not in text
-    assert 'api_key = ""' in text
     try:
-        load_config(config_path)
-    except ConfigError as e:
-        assert "Agent Plan Key 不会自动当作普通 Ark Key 使用" in str(e)
+        asyncio.run(server.handle_config_update({
+            "provider": "volcengine_agent_plan",
+            "apiKey": "plan-key",
+            "agentPlanApiKey": "plan-key",
+            "agentPlanEndpoint": "https://ark.cn-beijing.volces.com/api/plan/v3",
+            "model": "doubao-seed-2.0-lite",
+            "vaultPath": str(vault),
+        }))
+    except ValueError as e:
+        assert "Agent Plan endpoint" in str(e)
     else:
-        raise AssertionError("old Agent Plan payload must not become valid Ark config")
+        raise AssertionError("old Agent Plan endpoint must be rejected")
+
+    assert not (runtime / "config.toml").exists()
+
+
+def test_websocket_config_writer_rejects_invalid_explicit_endpoints(tmp: Path) -> None:
+    import asyncio
+    import sys
+
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "ws-runtime-invalid-endpoints")
+    sys.path.insert(0, str(ROOT / "server"))
+    from websocket_server import LibrarianServer
+
+    vault = tmp / "ws-vault-invalid-endpoints"
+    vault.mkdir()
+    (vault / ".obsidian").mkdir()
+    (vault / "index.md").write_text("# 知识库索引\n", encoding="utf-8")
+
+    invalid_payloads = [
+        (
+            {
+                "llm": {
+                    "provider": "doubao",
+                    "apiKey": "test-key",
+                    "endpoint": "http://evil.example.invalid/api/v3",
+                },
+                "vaultPath": str(vault),
+            },
+            "HTTPS",
+        ),
+        (
+            {
+                "provider": "doubao",
+                "apiKey": "test-key",
+                "endpoint": "https://user:pass@ark.cn-beijing.volces.com/api/v3",
+                "vaultPath": str(vault),
+            },
+            "账号密码",
+        ),
+        (
+            {
+                "provider": "doubao",
+                "apiKey": "test-key",
+                "endpoint": "https://ark.cn-beijing.volces.com/api/plan/v3",
+                "vaultPath": str(vault),
+            },
+            "Agent Plan endpoint",
+        ),
+    ]
+    for index, (payload, expected) in enumerate(invalid_payloads):
+        runtime = tmp / f"ws-runtime-invalid-endpoints-{index}"
+        os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
+        server = LibrarianServer()
+        try:
+            asyncio.run(server.handle_config_update(payload))
+        except ValueError as e:
+            assert expected in str(e)
+        else:
+            raise AssertionError(f"invalid config endpoint must be rejected: {payload}")
+        assert not (runtime / "config.toml").exists()
 
 
 def test_websocket_config_writer_uses_explicit_ark_key_when_old_provider_present(tmp: Path) -> None:
@@ -1741,6 +1865,61 @@ def test_analyzer_rejects_agent_plan_endpoint(tmp: Path) -> None:
     else:
         raise AssertionError("Agent Plan endpoint must be rejected")
 
+    try:
+        asyncio.run(analyzer.analyze_video(
+            video,
+            "prompt",
+            api_key="key",
+            endpoint="https://user:pass@ark.cn-beijing.volces.com/api/v3",
+            model="doubao-seed-2-0-lite-260428",
+        ))
+    except analyzer.AnalyzerError as e:
+        assert "账号密码" in str(e)
+    else:
+        raise AssertionError("endpoint with userinfo must be rejected")
+
+    try:
+        asyncio.run(analyzer.analyze_video(
+            video,
+            "prompt",
+            api_key="key",
+            endpoint="http://evil.example.invalid/api/v3",
+            model="doubao-seed-2-0-lite-260428",
+        ))
+    except analyzer.AnalyzerError as e:
+        assert "HTTPS" in str(e)
+    else:
+        raise AssertionError("non-HTTPS endpoint must be rejected")
+
+
+def test_analyzer_rejects_invalid_image_endpoint(tmp: Path) -> None:
+    import asyncio
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    image = tmp / "image.jpg"
+    image.write_bytes(b"fake-image")
+    invalid_cases = [
+        ("https://ark.cn-beijing.volces.com/api/plan/v3", "Agent Plan 不再作为运行通道"),
+        ("http://evil.example.invalid/api/v3", "HTTPS"),
+        ("https://user:pass@ark.cn-beijing.volces.com/api/v3", "账号密码"),
+    ]
+    for endpoint, expected in invalid_cases:
+        try:
+            asyncio.run(analyzer.analyze_images_many(
+                [image],
+                {"knowledge_ingest": "prompt"},
+                api_key="key",
+                endpoint=endpoint,
+                model="doubao-seed-2-0-lite-260428",
+            ))
+        except analyzer.AnalyzerError as e:
+            assert expected in str(e)
+        else:
+            raise AssertionError(f"image endpoint must be rejected: {endpoint}")
+
 
 def test_analyzer_wait_and_stream_protocol(tmp: Path) -> None:
     import asyncio
@@ -1887,24 +2066,21 @@ def test_model_health_check_redacts_secret(tmp: Path) -> None:
     websocket_server.urllib.request.urlopen = fake_urlopen
     try:
         server = LibrarianServer()
-        status = server._check_model_health_sync({
-            "provider": "doubao",
-            "apiKey": "secret-health-key",
-            "model": "doubao-seed-2-0-lite-260428",
-            "endpoint": "https://evil.example.invalid/api/v3",
-        })
+        try:
+            server._check_model_health_sync({
+                "provider": "doubao",
+                "apiKey": "secret-health-key",
+                "model": "doubao-seed-2-0-lite-260428",
+                "endpoint": "http://evil.example.invalid/api/v3",
+            })
+        except ValueError as exc:
+            assert "HTTPS" in str(exc)
+        else:
+            raise AssertionError("invalid endpoint must be rejected")
     finally:
         websocket_server.urllib.request.urlopen = old_urlopen
 
-    assert status["ok"] is True
-    assert status["state"] == "ready"
-    assert "secret-health-key" not in str(status)
-    assert calls
-    request, timeout = calls[0]
-    assert request.full_url == "https://ark.cn-beijing.volces.com/api/v3/tokenization"
-    assert timeout == 10
-    assert b'"text": "ping"' in request.data
-    assert "secret-health-key" in request.headers.get("Authorization", "")
+    assert calls == []
 
 
 def test_model_health_status_persists(tmp: Path) -> None:
@@ -2034,6 +2210,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
         test_config_loads(tmp)
+        test_config_loader_rejects_invalid_ark_endpoints(tmp)
         test_netscape_cookie_conversion(tmp)
         test_douyin_share_text_url_extraction()
         test_ingest_url_preserves_share_text_argument()
@@ -2057,11 +2234,13 @@ def main() -> int:
         test_chunk_analysis_uses_strategy_fps_and_context(tmp)
         test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp)
         test_websocket_config_writer_rejects_agent_plan_payload_key(tmp)
+        test_websocket_config_writer_rejects_invalid_explicit_endpoints(tmp)
         test_websocket_config_writer_uses_explicit_ark_key_when_old_provider_present(tmp)
         test_config_loader_does_not_use_agent_plan_section(tmp)
         test_vault_discovery_is_strict(tmp)
         test_analyzer_ark_file_protocol(tmp)
         test_analyzer_rejects_agent_plan_endpoint(tmp)
+        test_analyzer_rejects_invalid_image_endpoint(tmp)
         test_analyzer_wait_and_stream_protocol(tmp)
         test_model_health_check_ignores_old_agent_plan_provider(tmp)
         test_model_health_check_redacts_secret(tmp)

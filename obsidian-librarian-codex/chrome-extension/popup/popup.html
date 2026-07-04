@@ -7,191 +7,218 @@
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <div class="header">
-    <h1>知识库控制台</h1>
-    <div class="status-row">
-      <div class="status-dot" id="system-status"></div>
-      <div class="status-dot" id="connection-status" title="Agent 未连接"></div>
+  <header class="topbar">
+    <div>
+      <h1>知识库控制台</h1>
+      <p id="system-summary">正在连接 Agent</p>
     </div>
-  </div>
+    <button class="icon-button" id="open-settings" type="button" aria-label="打开设置">设置</button>
+  </header>
 
-  <main class="console">
-    <!-- Agent 状态 -->
-    <div class="section section-collapsible" id="agent-section" data-kind="agent" data-state="offline">
-      <button class="status-toggle" id="agent-toggle" type="button" aria-expanded="false" aria-controls="agent-panel">
-        <div class="status-toggle-main">
-          <span class="status-dot inline-dot offline" id="agent-status-dot"></span>
-          <div class="status-copy">
-            <span class="status-label">Agent</span>
-            <strong id="agent-status-text">未连接</strong>
-          </div>
-        </div>
-        <div class="status-toggle-meta">
-          <span class="time" id="agent-time"></span>
-          <span class="chevron" aria-hidden="true">⌄</span>
-        </div>
+  <main class="view active" id="home-view">
+    <section class="status-grid" aria-label="系统状态">
+      <button class="status-chip" id="status-agent" type="button" data-target="agent-settings">
+        <span class="status-dot inline-dot offline" id="agent-status-dot"></span>
+        <span><b>Agent</b><em id="agent-status-text">未连接</em></span>
       </button>
-      <div class="status-panel" id="agent-panel" aria-hidden="true" inert>
-        <div class="status-panel-inner">
-          <button class="secondary" id="refresh-status">刷新状态</button>
-          <div class="hint" id="notification-area"></div>
+      <button class="status-chip" id="status-api" type="button" data-target="api-settings">
+        <span class="status-dot inline-dot warning" id="api-status-dot"></span>
+        <span><b>API</b><em id="api-status-text">未检查</em></span>
+      </button>
+      <button class="status-chip" id="status-cookie" type="button" data-target="cookie-settings">
+        <span class="status-dot inline-dot warning" id="cookie-status-dot"></span>
+        <span><b>Cookie</b><em id="cookie-status-text">未同步</em></span>
+      </button>
+      <button class="status-chip" id="status-vault" type="button" data-target="vault-settings">
+        <span class="status-dot inline-dot warning" id="vault-status-dot"></span>
+        <span><b>知识库</b><em id="vault-status-text">待识别</em></span>
+      </button>
+      <button class="status-chip wide" id="status-tasks" type="button" data-target="task-settings">
+        <span class="status-dot inline-dot warning" id="tasks-status-dot"></span>
+        <span><b>任务</b><em id="tasks-status-text">暂无任务</em></span>
+      </button>
+    </section>
+
+    <section class="action-block primary-action ingest-card">
+      <div class="section-heading compact">
+        <h2>入库当前抖音视频</h2>
+        <p>输入框留空时，默认使用当前抖音页面正在看的内容。</p>
+      </div>
+      <div class="ingest-preview" id="douyin-preview" aria-live="polite">
+        <div class="preview-thumb" id="douyin-preview-thumb">
+          <img id="douyin-preview-image" alt="" hidden>
+          <span id="douyin-preview-fallback">视频</span>
+        </div>
+        <div class="preview-copy">
+          <div class="preview-kicker" id="douyin-preview-source">当前视频</div>
+          <div class="preview-title" id="douyin-preview-title" title="正在识别当前抖音视频">正在识别当前抖音视频</div>
+          <div class="preview-meta" id="douyin-preview-meta">打开抖音页面后自动检测；也可以粘贴分享链接。</div>
         </div>
       </div>
+      <div class="button-row">
+        <button class="primary" id="share-knowledge" type="button">知识入库</button>
+        <button class="secondary" id="share-viral" type="button">爆款拆解</button>
+      </div>
+      <label class="share-input-label" for="douyin-share-text">分享链接或文案（可选）</label>
+      <textarea id="douyin-share-text" rows="3" placeholder="可选：粘贴整段抖音分享文案或链接；不填则入库当前正在看的内容"></textarea>
+      <div class="hint" id="ingest-hint"></div>
+    </section>
+  </main>
+
+  <main class="view" id="settings-index-view" aria-hidden="true" inert>
+    <div class="settings-page-head">
+      <button class="back-button" id="back-home-from-index" type="button">← 首页</button>
+      <h2>设置</h2>
+    </div>
+    <section class="settings-menu" aria-label="设置分类">
+      <button class="settings-card" type="button" data-target="agent-settings">
+        <span class="status-dot inline-dot offline" id="settings-agent-dot"></span>
+        <span><b>Agent 连接</b><em id="settings-agent-summary">未连接</em></span>
+      </button>
+      <button class="settings-card" type="button" data-target="api-settings">
+        <span class="status-dot inline-dot warning" id="settings-api-dot"></span>
+        <span><b>API 设置</b><em id="settings-api-summary">未检查</em></span>
+      </button>
+      <button class="settings-card" type="button" data-target="video-settings">
+        <span class="status-dot inline-dot online" id="settings-video-dot"></span>
+        <span><b>并发设置</b><em class="online" id="settings-video-summary">Lite · 并发 2/2</em></span>
+      </button>
+      <button class="settings-card" type="button" data-target="vault-settings">
+        <span class="status-dot inline-dot warning" id="settings-vault-dot"></span>
+        <span><b>知识库</b><em id="settings-vault-summary">待识别</em></span>
+      </button>
+      <button class="settings-card" type="button" data-target="cookie-settings">
+        <span class="status-dot inline-dot warning" id="settings-cookie-dot"></span>
+        <span><b>Cookie</b><em id="settings-cookie-summary">未同步</em></span>
+      </button>
+      <button class="settings-card" type="button" data-target="task-settings">
+        <span class="status-dot inline-dot warning" id="settings-tasks-dot"></span>
+        <span><b>任务状态</b><em id="settings-tasks-summary">暂无任务</em></span>
+      </button>
+    </section>
+  </main>
+
+  <main class="view" id="settings-detail-view" aria-hidden="true" inert>
+    <div class="settings-page-head detail-head">
+      <button class="back-button" id="back-home" type="button">← 首页</button>
+      <h2 id="settings-detail-title">设置</h2>
     </div>
 
-    <!-- 入库入口 -->
-    <div class="section section-collapsible" id="ingest-section" data-kind="ingest" data-state="warning">
-      <button class="status-toggle" id="ingest-toggle" type="button" aria-expanded="false" aria-controls="ingest-panel">
-        <div class="status-toggle-main">
-          <span class="status-dot inline-dot warning" id="ingest-status-dot"></span>
-          <div class="status-copy">
-            <span class="status-label">入库</span>
-            <strong id="ingest-status-text">当前视频或分享链接</strong>
-          </div>
+    <section class="settings-group detail-section" id="agent-settings" data-title="Agent 连接" tabindex="-1" hidden>
+      <div class="section-heading inline">
+        <div>
+          <h3>Agent 连接</h3>
+          <p id="agent-settings-copy">本地 Agent 未连接</p>
         </div>
-        <div class="status-toggle-meta">
-          <span class="time" id="ingest-time"></span>
-          <span class="chevron" aria-hidden="true">⌄</span>
-        </div>
-      </button>
-      <div class="status-panel" id="ingest-panel" aria-hidden="true" inert>
-        <div class="status-panel-inner">
-          <div class="field">
-            <label>分享链接</label>
-            <textarea id="douyin-share-text" rows="3" placeholder="粘贴整段抖音分享文案；留空则使用当前抖音页面"></textarea>
-          </div>
-          <div class="button-row">
-            <button class="primary" id="ingest-knowledge">知识入库</button>
-            <button class="secondary" id="ingest-viral">爆款拆解</button>
-          </div>
-          <div class="hint" id="ingest-hint">留空时会尝试识别当前打开的抖音视频或图文。</div>
-        </div>
+        <button class="secondary small" id="refresh-status" type="button">刷新</button>
       </div>
-    </div>
+      <div class="hint persistent" id="notification-area"></div>
+    </section>
 
-    <!-- 任务状态 -->
-    <div class="section section-collapsible" id="tasks-section" data-kind="tasks" data-state="warning">
-      <button class="status-toggle" id="tasks-toggle" type="button" aria-expanded="false" aria-controls="tasks-panel">
-        <div class="status-toggle-main">
-          <span class="status-dot inline-dot warning" id="tasks-status-dot"></span>
-          <div class="status-copy">
-            <span class="status-label">任务</span>
-            <strong id="tasks-status-text">暂无任务</strong>
-          </div>
-        </div>
-        <div class="status-toggle-meta">
-          <span class="time" id="tasks-time"></span>
-          <span class="chevron" aria-hidden="true">⌄</span>
-        </div>
-      </button>
-      <div class="status-panel" id="tasks-panel" aria-hidden="true" inert>
-        <div class="status-panel-inner">
-          <div class="task-list" id="task-list">
-            <div class="empty">还没有入库任务</div>
-          </div>
-          <button class="secondary" id="refresh-tasks">刷新任务</button>
-          <div class="hint" id="tasks-hint"></div>
+    <section class="settings-group detail-section" id="api-settings" data-title="API 设置" tabindex="-1" hidden>
+      <div class="section-heading">
+        <h3>API 设置</h3>
+        <p>这里只配置厂商、Key 和 Endpoint，不放视频拆解偏好。</p>
+      </div>
+      <div class="field">
+        <label for="provider">厂商</label>
+        <select id="provider">
+          <option value="doubao">豆包</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="api-key">API Key</label>
+        <div class="input-shell">
+          <input type="password" id="api-key" placeholder="Ark API Key">
+          <button class="toggle-btn" id="toggle-key" type="button" aria-pressed="false">显示</button>
         </div>
       </div>
-    </div>
+      <div class="field">
+        <label for="endpoint-url">Endpoint URL</label>
+        <input type="url" id="endpoint-url" placeholder="https://ark.cn-beijing.volces.com/api/v3">
+      </div>
+      <div class="button-row">
+        <button class="primary" id="save-api-config" type="button">保存 API</button>
+        <button class="secondary" id="check-model" type="button">测试连接</button>
+      </div>
+      <div class="hint persistent" id="model-hint"></div>
+      <div class="hint persistent" id="config-hint"></div>
+    </section>
 
-    <!-- 知识库状态 -->
-    <div class="section section-collapsible" id="vault-section" data-kind="vault" data-state="warning">
-      <button class="status-toggle" id="vault-toggle" type="button" aria-expanded="false" aria-controls="vault-panel">
-        <div class="status-toggle-main">
-          <span class="status-dot inline-dot warning" id="vault-status-dot"></span>
-          <div class="status-copy">
-            <span class="status-label">知识库</span>
-            <strong id="vault-status-text">等待识别</strong>
-          </div>
+    <section class="settings-group detail-section" id="video-settings" data-title="并发设置" tabindex="-1" hidden>
+      <div class="section-heading">
+        <h3>并发设置</h3>
+        <p>这里只控制拆解模型和并发，不保存 API Key。</p>
+      </div>
+      <div class="field">
+        <label for="analysis-model-preset">拆解模型</label>
+        <select id="analysis-model-preset">
+          <option value="lite">Lite · 默认质量档</option>
+          <option value="mini">Mini · 轻量测试</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <div class="field half">
+          <label for="task-concurrency">任务队列并发</label>
+          <select id="task-concurrency">
+            <option value="1">1 个任务</option>
+            <option value="2">2 个任务</option>
+            <option value="3">3 个任务</option>
+            <option value="4">4 个任务</option>
+          </select>
+          <p class="microcopy">同时处理几个入库任务。</p>
         </div>
-        <div class="status-toggle-meta">
-          <span class="time" id="vault-time"></span>
-          <span class="chevron" aria-hidden="true">⌄</span>
-        </div>
-      </button>
-      <div class="status-panel" id="vault-panel" aria-hidden="true" inert>
-        <div class="status-panel-inner">
-          <div class="field">
-            <label>路径线索</label>
-            <input type="text" id="vault-path" placeholder="可留空，Agent 会自动查找">
-          </div>
-          <div class="button-row">
-            <button class="secondary" id="detect-vault">重新识别</button>
-            <button class="secondary" id="pick-vault">选择文件夹</button>
-          </div>
-          <div class="hint" id="vault-hint"></div>
+        <div class="field half">
+          <label for="chunk-concurrency">长视频分片并发</label>
+          <select id="chunk-concurrency">
+            <option value="1">1 路</option>
+            <option value="2">2 路</option>
+            <option value="3">3 路</option>
+            <option value="4">4 路</option>
+          </select>
+          <p class="microcopy">单个长视频内几个切片同时分析。</p>
         </div>
       </div>
-    </div>
+      <button class="primary" id="save-video-config" type="button">保存拆解设置</button>
+      <div class="hint persistent" id="video-config-hint"></div>
+    </section>
 
-    <!-- 模型状态 -->
-    <div class="section section-collapsible" id="model-section" data-kind="model" data-state="warning">
-      <button class="status-toggle" id="model-toggle" type="button" aria-expanded="false" aria-controls="model-panel">
-        <div class="status-toggle-main">
-          <span class="status-dot inline-dot warning" id="model-status-dot"></span>
-          <div class="status-copy">
-            <span class="status-label">模型</span>
-            <strong id="model-status-text">未检查</strong>
-          </div>
-        </div>
-        <div class="status-toggle-meta">
-          <span class="time" id="model-time"></span>
-          <span class="chevron" aria-hidden="true">⌄</span>
-        </div>
-      </button>
-      <div class="status-panel" id="model-panel" aria-hidden="true" inert>
-        <div class="status-panel-inner">
-          <div class="field">
-            <label>厂商</label>
-            <select id="provider">
-              <option value="doubao">豆包</option>
-            </select>
-            <div class="provider-note" id="provider-note"></div>
-          </div>
-          <div class="field">
-            <label>API Key</label>
-            <div class="input-shell">
-              <input type="password" id="api-key" placeholder="Ark API Key">
-              <button class="toggle-btn" id="toggle-key" type="button" aria-pressed="false">显示</button>
-            </div>
-          </div>
-          <div class="field">
-            <label>模型 ID</label>
-            <input type="text" id="model" placeholder="doubao-seed-2-0-lite-260428">
-          </div>
-          <div class="button-row">
-            <button class="primary" id="save-config">保存模型配置</button>
-            <button class="secondary" id="check-model">测试连接</button>
-          </div>
-          <div class="hint" id="model-hint"></div>
-          <div class="hint" id="config-hint"></div>
-        </div>
+    <section class="settings-group detail-section" id="vault-settings" data-title="知识库" tabindex="-1" hidden>
+      <div class="section-heading">
+        <h3>知识库</h3>
       </div>
-    </div>
+      <div class="field">
+        <label for="vault-path">路径线索</label>
+        <input type="text" id="vault-path" placeholder="可留空，Agent 会自动查找">
+      </div>
+      <div class="button-row">
+        <button class="secondary" id="detect-vault" type="button">自动识别</button>
+        <button class="secondary" id="pick-vault" type="button">选择文件夹</button>
+      </div>
+      <div class="hint persistent" id="vault-hint"></div>
+    </section>
 
-    <!-- Cookie 抓取 -->
-    <div class="section section-collapsible" id="cookie-section" data-kind="cookie" data-state="warning">
-      <button class="status-toggle" id="cookie-toggle" type="button" aria-expanded="false" aria-controls="cookie-panel">
-        <div class="status-toggle-main">
-          <span class="status-dot inline-dot warning" id="cookie-status-dot"></span>
-          <div class="status-copy">
-            <span class="status-label">Cookie</span>
-            <strong id="cookie-status-text">未同步</strong>
-          </div>
-        </div>
-        <div class="status-toggle-meta">
-          <span class="time" id="cookie-time"></span>
-          <span class="chevron" aria-hidden="true">⌄</span>
-        </div>
-      </button>
-      <div class="status-panel" id="cookie-panel" aria-hidden="true" inert>
-        <div class="status-panel-inner">
-          <button class="primary" id="grab-cookie">抓取抖音 Cookie</button>
-          <div class="hint" id="cookie-hint">需要在抖音网页版登录后点击</div>
-        </div>
+    <section class="settings-group detail-section" id="cookie-settings" data-title="抖音 Cookie" tabindex="-1" hidden>
+      <div class="section-heading">
+        <h3>抖音 Cookie</h3>
+        <p id="cookie-settings-copy">需要在抖音网页版登录后抓取。</p>
       </div>
-    </div>
+      <button class="primary" id="grab-cookie" type="button">抓取抖音 Cookie</button>
+      <div class="hint persistent" id="cookie-hint"></div>
+    </section>
+
+    <section class="settings-group detail-section" id="task-settings" data-title="任务状态" tabindex="-1" hidden>
+      <div class="section-heading inline">
+        <div>
+          <h3>任务状态</h3>
+          <p>队列并发在“并发设置”中调整。</p>
+        </div>
+        <button class="secondary small" id="refresh-tasks" type="button">刷新</button>
+      </div>
+      <div class="task-list" id="settings-task-list">
+        <div class="empty">还没有入库任务</div>
+      </div>
+    </section>
   </main>
 
   <script src="popup.js"></script>
