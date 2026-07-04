@@ -81,7 +81,7 @@
       </button>
       <button class="settings-card" type="button" data-target="video-settings">
         <span class="status-dot inline-dot online" id="settings-video-dot"></span>
-        <span><b>并发设置</b><em class="online" id="settings-video-summary">Lite · 并发 2/2</em></span>
+        <span><b>模型与并发</b><em class="online" id="settings-video-summary">Lite · 并发 2/2</em></span>
       </button>
       <button class="settings-card" type="button" data-target="vault-settings">
         <span class="status-dot inline-dot warning" id="settings-vault-dot"></span>
@@ -117,7 +117,7 @@
     <section class="settings-group detail-section" id="api-settings" data-title="API 设置" tabindex="-1" hidden>
       <div class="section-heading">
         <h3>API 设置</h3>
-        <p>这里只配置厂商、Key 和 Endpoint，不放视频拆解偏好。</p>
+        <p>这里只配置厂商、Key 和 Endpoint；拆解模型在“模型与并发”里设置。</p>
       </div>
       <div class="field">
         <label>厂商</label>
@@ -143,10 +143,10 @@
       <div class="hint persistent" id="config-hint"></div>
     </section>
 
-    <section class="settings-group detail-section" id="video-settings" data-title="并发设置" tabindex="-1" hidden>
+    <section class="settings-group detail-section" id="video-settings" data-title="模型与并发" tabindex="-1" hidden>
       <div class="section-heading">
-        <h3>并发设置</h3>
-        <p>这里只控制拆解模型和并发，不保存 API Key。</p>
+        <h3>模型与并发</h3>
+        <p>选择 Lite / Mini 拆解模型，并控制任务队列和长视频分片并发。</p>
       </div>
       <div class="field">
         <label id="analysis-model-label">拆解模型</label>
@@ -222,7 +222,7 @@
       <div class="section-heading inline">
         <div>
           <h3>任务状态</h3>
-          <p>队列并发在“并发设置”中调整。</p>
+          <p>队列并发在“模型与并发”中调整。</p>
         </div>
         <button class="secondary small" id="refresh-tasks" type="button">刷新</button>
       </div>

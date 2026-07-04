@@ -24,7 +24,7 @@ const TRUSTED_ARK_HOSTS = new Set(['ark.cn-beijing.volces.com']);
 const SETTINGS_DETAIL_TITLES = {
   'agent-settings': 'Agent 连接',
   'api-settings': 'API 设置',
-  'video-settings': '并发设置',
+  'video-settings': '模型与并发',
   'vault-settings': '知识库',
   'cookie-settings': '抖音 Cookie',
   'task-settings': '任务状态'

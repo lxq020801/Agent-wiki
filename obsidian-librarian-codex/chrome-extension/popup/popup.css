@@ -80,6 +80,9 @@ h1 {
 }
 
 .icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
   padding: 7px 9px;
   border: 1px solid var(--border);
@@ -232,6 +235,14 @@ body[data-view="settings-detail-view"] #open-settings {
   gap: 12px;
 }
 
+.section-heading.inline > div {
+  min-width: 0;
+}
+
+.section-heading:last-child {
+  margin-bottom: 0;
+}
+
 h2,
 h3 {
   font-size: 13px;
@@ -246,6 +257,9 @@ h3 {
 
 button.primary,
 button.secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
   min-height: 38px;
   padding: 9px 12px;
@@ -286,7 +300,7 @@ button.secondary:focus-visible {
 button.small {
   width: auto;
   min-height: 34px;
-  padding: 7px 10px;
+  padding: 0 10px;
   font-size: 12px;
 }
 
@@ -565,6 +579,9 @@ textarea:focus {
 }
 
 .toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   align-self: stretch;
   min-width: 60px;
   margin: 5px;
@@ -652,9 +669,12 @@ textarea:focus {
 }
 
 .back-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-height: 34px;
   min-width: 70px;
-  padding: 7px 10px;
+  padding: 0 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #1a1f27;
