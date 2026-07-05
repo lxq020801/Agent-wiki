@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 
+_AUDIT_ROOT_NAME = "run-artifacts"
 ALLOWED_TARGET_TYPES = {"github_project", "official_doc", "web_research"}
 MAX_RAW_CANDIDATES = 12
 MAX_RETAINED_CANDIDATES = 8
@@ -85,7 +86,13 @@ def _redact_value(value: Any) -> Any:
         clean: dict[str, Any] = {}
         for key, child in value.items():
             canonical = re.sub(r"[^a-z0-9]", "", str(key).lower())
-            if canonical.endswith("apikey") or canonical in {"cookie", "setcookie", "authorization"}:
+            if canonical.endswith("apikey") or canonical in {
+                "cookie",
+                "setcookie",
+                "authorization",
+                "responseid",
+                "previousresponseid",
+            }:
                 continue
             clean[key] = _redact_value(child)
         return clean
@@ -94,6 +101,54 @@ def _redact_value(value: Any) -> Any:
     if isinstance(value, str):
         return _redact_text(value)
     return value
+
+
+def _safe_artifact_name(value: Any, *, default: str = "run") -> str:
+    text = str(value or "").strip() or default
+    text = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip(".-")
+    return text[:120] or default
+
+
+def _audit_dir(task_id: str) -> Path | None:
+    if not task_id:
+        return None
+    path = _runtime_root() / _AUDIT_ROOT_NAME / _safe_artifact_name(task_id) / "05-derive"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _audit_rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(_runtime_root()))
+    except ValueError:
+        return str(path)
+
+
+def _trim_artifact_text(text: Any, *, limit: int = 220_000) -> dict[str, Any]:
+    source = _redact_text(text)
+    truncated = len(source) > limit
+    return {
+        "text": source[:limit],
+        "chars": len(source),
+        "truncated": truncated,
+    }
+
+
+def _write_audit_json(audit_dir: Path | None, rel_path: str, payload: Any) -> str:
+    if audit_dir is None:
+        return ""
+    target = audit_dir / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(_redact_value(payload), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return _audit_rel(target)
+
+
+def _add_artifact(artifacts: dict[str, Any], key: str, path: str) -> None:
+    if path:
+        artifacts[key] = path
 
 
 def _write_derive_log(event: str, payload: dict[str, Any]) -> None:
@@ -740,18 +795,42 @@ def derive_tasks_from_analysis(
             "items": [],
             "counts": {"candidate": 0, "rejected": 0, "suppressed": 0},
         }
+    audit_root = _audit_dir(task_id)
+    audit_files: dict[str, Any] = {}
+    _add_artifact(audit_files, "derive_input", _write_audit_json(audit_root, "00-input.json", {
+        "task_id": task_id,
+        "source_id": source_id,
+        "source_url": source_url,
+        "source_media": source_media,
+        "ingest_intent": ingest_intent,
+        "analysis": _trim_artifact_text(analysis_text),
+    }))
 
-    raw_candidates = _candidates_from_json(analysis_text)
+    raw_json_candidates = _candidates_from_json(analysis_text)
+    raw_markdown_candidates = _candidates_from_markdown(analysis_text)
+    _add_artifact(
+        audit_files,
+        "derive_raw_json_candidates",
+        _write_audit_json(audit_root, "01-raw-json-candidates.json", raw_json_candidates),
+    )
+    _add_artifact(
+        audit_files,
+        "derive_raw_markdown_candidates",
+        _write_audit_json(audit_root, "02-raw-markdown-candidates.json", raw_markdown_candidates),
+    )
+    raw_candidates = raw_json_candidates
     source = "json"
     if not raw_candidates:
-        raw_candidates = _candidates_from_markdown(analysis_text)
+        raw_candidates = raw_markdown_candidates
         source = "markdown_fallback"
     raw_candidates = raw_candidates[:MAX_RAW_CANDIDATES]
 
     by_key: dict[str, dict[str, Any]] = {}
     duplicate_count = 0
+    normalized_candidates: list[dict[str, Any]] = []
     for raw in raw_candidates:
         item = _normalize_candidate(raw, source_id=source_id, vault_path=vault_path)
+        normalized_candidates.append(item)
         current = by_key.get(item["dedupe_key"])
         if current is None or item["score"] > current["score"]:
             by_key[item["dedupe_key"]] = item
@@ -771,12 +850,14 @@ def derive_tasks_from_analysis(
         reverse=True,
     )
     retained: list[dict[str, Any]] = []
+    suppressed_items: list[dict[str, Any]] = []
     suppressed_count = 0
     for item in ranked:
         if len(retained) >= MAX_RETAINED_CANDIDATES:
             suppressed_count += 1
             item["execution_status"] = "suppressed"
             item["reject_reasons"] = sorted(set(item.get("reject_reasons", []) + ["retained_limit_exceeded"]))
+            suppressed_items.append(item)
             _write_derive_log("derive_candidate_suppressed", {
                 "task_id": task_id,
                 "source_id": source_id,
@@ -791,9 +872,29 @@ def derive_tasks_from_analysis(
             "source_media": source_media,
             "ingest_intent": ingest_intent,
             "candidate": item,
-            })
+        })
 
     _mark_auto_eligible(retained)
+    _add_artifact(
+        audit_files,
+        "derive_normalized_candidates",
+        _write_audit_json(audit_root, "03-normalized-candidates.json", {
+            "source": source,
+            "raw_count": len(raw_candidates),
+            "normalized_count": len(normalized_candidates),
+            "duplicate_count": duplicate_count,
+            "items": normalized_candidates,
+        }),
+    )
+    _add_artifact(
+        audit_files,
+        "derive_scored_retained_candidates",
+        _write_audit_json(audit_root, "04-scored-retained-candidates.json", {
+            "source": source,
+            "retained": retained,
+            "suppressed": suppressed_items,
+        }),
+    )
     for item in retained:
         if item.get("auto_eligible"):
             _write_derive_log("derive_auto_ready", {
@@ -816,7 +917,7 @@ def derive_tasks_from_analysis(
         "duplicate": duplicate_count,
         "retained": len(retained),
     }
-    return {
+    decision = {
         "enabled": True,
         "source": source,
         "limits": {
@@ -825,7 +926,25 @@ def derive_tasks_from_analysis(
         },
         "counts": counts,
         "items": retained,
+        "audit_artifacts": {
+            "dir": _audit_rel(audit_root.parent) if audit_root else "",
+            "files": audit_files,
+        } if audit_files else {},
     }
+    _add_artifact(
+        audit_files,
+        "derive_public_candidates",
+        _write_audit_json(audit_root, "05-public-candidates.json", {
+            "counts": counts,
+            "items": public_derived_tasks(decision),
+        }),
+    )
+    if audit_files:
+        decision["audit_artifacts"] = {
+            "dir": _audit_rel(audit_root.parent) if audit_root else "",
+            "files": audit_files,
+        }
+    return decision
 
 
 def public_derived_tasks(decision: dict[str, Any]) -> list[dict[str, Any]]:

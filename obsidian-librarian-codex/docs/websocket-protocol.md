@@ -199,7 +199,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 允许动作：
 
 - `confirm`：确认执行派生。只有 `candidate` / `auto_ready` / `needs_target` 且父资产已写入时可执行。
-- `ignore`：忽略候选。忽略动作不校验输入框 URL，也不会创建子任务。
+- `ignore`：忽略候选。忽略动作不校验输入框 URL，也不会创建子任务；结果写入 `~/.obsidian-librarian/derived-actions/{parent_task_id}.json`，后续自动派生不会再次入队。
 
 `official_doc` / `web_research` 或其他缺目标候选必须提供公开 HTTPS URL。URL 不能包含账号密码、localhost/private IP，也会删除 token/key/secret/signature 等敏感 query。
 
@@ -303,11 +303,18 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
     "unique": 1,
     "duplicate": 0,
     "retained": 1
+  },
+  "derivedAuditArtifacts": {
+    "dir": "run-artifacts/20260705-170000-abcd",
+    "files": {
+      "derive_input": "run-artifacts/20260705-170000-abcd/05-derive/00-input.json",
+      "derive_public_candidates": "run-artifacts/20260705-170000-abcd/05-derive/05-public-candidates.json"
+    }
   }
 }
 ```
 
-完整评分、证据、验收标准、去重信息和父资产追溯信息不通过 WebSocket 全量返回；它们写入 vault 的 `系统记录/派生任务候选/*.json`。
+完整评分、证据、验收标准、去重信息、父资产追溯信息和 prompt/source material 不通过 WebSocket 全量返回；它们写入 vault 的 `系统记录/派生任务候选/*.json` 以及 runtime 的 `run-artifacts/{task_id}/05-derive/` / `run-artifacts/{child_task_id}/05-derive-executor/`。
 
 ### `derived_task_action_done` / `derived_task_action_rejected`
 

@@ -269,6 +269,13 @@ def _status_derived_decision(
     return decisions.get(primary_intent, {})
 
 
+def _derived_audit_artifacts(decision: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(decision, dict):
+        return {}
+    artifacts = decision.get("audit_artifacts")
+    return artifacts if isinstance(artifacts, dict) else {}
+
+
 def _prompt_for(source_media: str, ingest_intent: str) -> str:
     suffix = "image_post" if source_media == "douyin_image_post" else "video"
     return f"{suffix}_{normalize_ingest_intent(ingest_intent)}.md"
@@ -1259,6 +1266,7 @@ async def run_task(
         stage="derived_candidates_ready",
         derived_tasks=public_derived_tasks(primary_derived),
         derived_summary=primary_derived.get("counts", {}),
+        derived_audit_artifacts=_derived_audit_artifacts(primary_derived),
     )
 
     # ── 阶段 5：写 vault ──
@@ -1284,6 +1292,7 @@ async def run_task(
                 "git_status": git_status,
                 "derived_tasks": public_derived_tasks(derived_decisions.get(intent, {})),
                 "derived_summary": derived_decisions.get(intent, {}).get("counts", {}),
+                "derived_audit_artifacts": _derived_audit_artifacts(derived_decisions.get(intent)),
                 "audit_artifacts": getattr(results[intent], "audit_artifacts", {}),
             })
     except Exception as e:
@@ -1321,6 +1330,7 @@ async def run_task(
         "cost": total_cost,
         "derived_tasks": public_derived_tasks(primary_derived),
         "derived_summary": primary_derived.get("counts", {}),
+        "derived_audit_artifacts": _derived_audit_artifacts(primary_derived),
     }
 
 
@@ -1399,6 +1409,7 @@ async def run_image_post_task(
         stage="derived_candidates_ready",
         derived_tasks=public_derived_tasks(primary_derived),
         derived_summary=primary_derived.get("counts", {}),
+        derived_audit_artifacts=_derived_audit_artifacts(primary_derived),
     )
 
     sw.update(stage="writing_vault")
@@ -1423,6 +1434,7 @@ async def run_image_post_task(
                 "git_status": git_status,
                 "derived_tasks": public_derived_tasks(derived_decisions.get(intent, {})),
                 "derived_summary": derived_decisions.get(intent, {}).get("counts", {}),
+                "derived_audit_artifacts": _derived_audit_artifacts(derived_decisions.get(intent)),
             })
     except Exception as e:
         raise IngestError("vault_write_error", str(e)) from e
@@ -1454,6 +1466,7 @@ async def run_image_post_task(
         "cost": total_cost,
         "derived_tasks": public_derived_tasks(primary_derived),
         "derived_summary": primary_derived.get("counts", {}),
+        "derived_audit_artifacts": _derived_audit_artifacts(primary_derived),
     }
 
 

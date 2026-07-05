@@ -732,6 +732,10 @@ class LibrarianServer:
         safe = ''.join(ch if ch.isalnum() or ch in '-_' else '-' for ch in str(candidate_id or 'derived'))
         return f"{parent_task_id}-derive-{safe[:18]}"
 
+    def _task_audit_artifacts(self, task_id):
+        safe = ''.join(ch if ch.isalnum() or ch in '-_.' else '-' for ch in str(task_id or ''))
+        return {'dir': f'run-artifacts/{safe}', 'files': {}} if safe else {}
+
     def _merge_derived_actions(self, parent_task_id, tasks):
         if not isinstance(tasks, list) or not parent_task_id:
             return tasks if isinstance(tasks, list) else []
@@ -1049,6 +1053,7 @@ class LibrarianServer:
             'parent_task_id': parent_task_id,
             'derived_candidate_id': candidate_id,
             'derived_task': candidate,
+            'audit_artifacts': self._task_audit_artifacts(child_id),
         })
         if self.enable_task_runner:
             self.ensure_task_worker()
@@ -1487,8 +1492,10 @@ class LibrarianServer:
             'hint': status.get('hint') or '',
             'vaultPath': status.get('vault_path') or '',
             'assets': assets,
+            'auditArtifacts': status.get('audit_artifacts') if isinstance(status.get('audit_artifacts'), dict) else {},
             'derivedTasks': derived_tasks,
             'derivedSummary': derived_summary,
+            'derivedAuditArtifacts': status.get('derived_audit_artifacts') if isinstance(status.get('derived_audit_artifacts'), dict) else {},
             'parentTaskId': status.get('parent_task_id') or '',
             'derivedCandidateId': status.get('derived_candidate_id') or '',
             'derivedTask': status.get('derived_task') if isinstance(status.get('derived_task'), dict) else {},

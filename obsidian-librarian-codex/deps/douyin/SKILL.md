@@ -22,6 +22,7 @@ download, analysis, vault writes, status, and git commits.
 | `scripts/status_writer.py` | Write diagnostic status JSON for Agent/debugging |
 | `scripts/cost_estimator.py` | Estimate RMB cost from model usage |
 | `scripts/derive_strategy.py` | Score, dedupe, and record bounded derivation candidates |
+| `scripts/derive_executor.py` | Resolve approved derived targets, generate child assets, and link parent/child notes |
 | `vendor/` | Embedded Douyin crawler code; treat as read-only |
 
 ## Runtime Inputs
@@ -61,7 +62,9 @@ The WebSocket control server writes:
    summary table. High-confidence, low-risk, resolvable candidates may be queued
    as `derived_ingest` tasks by the WebSocket service after the parent asset is
    written. Ambiguous or missing-target candidates remain pending for extension
-   confirmation.
+   confirmation. Debuggable process nodes live under
+   `run-artifacts/{task_id}/05-derive/` and
+   `run-artifacts/{child_task_id}/05-derive-executor/`, not in the asset body.
 
 `--task` is used by the WebSocket task queue and remains useful for debugging.
 
@@ -140,6 +143,9 @@ Derivation candidate contract:
 - Allowed target types: `github_project`, `official_doc`, `web_research`.
 - Full candidate fields, scores, evidence, dedupe status, parent lineage, and
   acceptance criteria live in `系统记录/派生任务候选/*.json`.
+- Raw candidate extraction, normalization, target resolution, source material,
+  prompt/output, write result, and linkback records live in runtime
+  `run-artifacts/`.
 - Candidate-stage Markdown must not contain future `[[wikilink]]` targets. The
   derived executor writes child assets first, then updates parent/child links.
 - GitHub candidates may omit URL when the project name and context are strong;

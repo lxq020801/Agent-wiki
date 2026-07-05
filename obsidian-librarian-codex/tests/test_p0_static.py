@@ -524,6 +524,25 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
     assert "api_key" not in log_text.lower()
     assert "cookie" not in log_text.lower()
 
+    audit = decision["audit_artifacts"]
+    assert audit["dir"] == "run-artifacts/derive-task"
+    files = audit["files"]
+    for key in (
+        "derive_input",
+        "derive_raw_json_candidates",
+        "derive_raw_markdown_candidates",
+        "derive_normalized_candidates",
+        "derive_scored_retained_candidates",
+        "derive_public_candidates",
+    ):
+        assert key in files
+        artifact_path = tmp / "derive-runtime" / files[key]
+        assert artifact_path.exists(), key
+        artifact_text = artifact_path.read_text(encoding="utf-8")
+        assert "api_key" not in artifact_text.lower()
+        assert "cookie" not in artifact_text.lower()
+        assert "resp-" not in artifact_text
+
 
 def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp: Path) -> None:
     import sys
@@ -1214,7 +1233,12 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
         def update(self, **fields):
             calls.append(("status", fields.get("stage"), fields.get("ingest_intents")))
             if fields.get("stage") == "derived_candidates_ready":
-                calls.append(("derived_status", fields.get("derived_tasks"), fields.get("derived_summary")))
+                calls.append((
+                    "derived_status",
+                    fields.get("derived_tasks"),
+                    fields.get("derived_summary"),
+                    fields.get("derived_audit_artifacts"),
+                ))
 
         def progress(self, stage, info):
             calls.append(("progress", stage, info.get("intent")))
@@ -1258,6 +1282,10 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
         "enabled": True,
         "source": "json",
         "counts": {"candidate": 1, "rejected": 0, "suppressed": 0},
+        "audit_artifacts": {
+            "dir": "run-artifacts/multi-intent",
+            "files": {"derive_public_candidates": "run-artifacts/multi-intent/05-derive/05-public-candidates.json"},
+        },
         "items": [{
             "id": "dt-primary",
             "name": "Primary API",
@@ -1354,11 +1382,15 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
         assert summary["derived_tasks"][0][key] == value
     assert summary["assets"][0]["derived_tasks"] == summary["derived_tasks"]
     assert summary["assets"][0]["derived_summary"] == summary["derived_summary"]
+    assert summary["assets"][0]["derived_audit_artifacts"] == primary_derived_decision["audit_artifacts"]
     assert summary["assets"][1]["derived_tasks"] == []
+    assert summary["assets"][1]["derived_audit_artifacts"] == {}
+    assert summary["derived_audit_artifacts"] == primary_derived_decision["audit_artifacts"]
     assert (
         "derived_status",
         summary["derived_tasks"],
         summary["derived_summary"],
+        summary["derived_audit_artifacts"],
     ) in calls
     assert ("write_derived", "knowledge_ingest", primary_derived_decision, "multi-intent") in calls
 
@@ -3193,6 +3225,10 @@ def test_websocket_public_task_status_exposes_derived_candidates(tmp: Path) -> N
         "reason": "需要核验状态 API。",
     }]
     derived_summary = {"candidate": 1, "rejected": 1, "suppressed": 0}
+    audit_artifacts = {
+        "dir": "run-artifacts/task-derived-status",
+        "files": {"derive_input": "run-artifacts/task-derived-status/05-derive/00-input.json"},
+    }
     status_file = status_dir / "task-derived-status.json"
     status_file.write_text(json.dumps({
         "id": "task-derived-status",
@@ -3205,6 +3241,7 @@ def test_websocket_public_task_status_exposes_derived_candidates(tmp: Path) -> N
         "ingest_intents": ["knowledge_ingest"],
         "derived_tasks": derived_tasks,
         "derived_summary": derived_summary,
+        "derived_audit_artifacts": audit_artifacts,
     }, ensure_ascii=False), encoding="utf-8")
 
     server = LibrarianServer(enable_task_runner=False)
@@ -3212,6 +3249,7 @@ def test_websocket_public_task_status_exposes_derived_candidates(tmp: Path) -> N
     assert item["derivedTasks"] == derived_tasks
     for key, value in derived_summary.items():
         assert item["derivedSummary"][key] == value
+    assert item["derivedAuditArtifacts"] == audit_artifacts
     assert item["stageLabel"] == "派生候选已生成"
 
     snapshot = server.task_status_snapshot()
@@ -3219,6 +3257,7 @@ def test_websocket_public_task_status_exposes_derived_candidates(tmp: Path) -> N
     assert snapshot["items"][0]["derivedTasks"] == derived_tasks
     for key, value in derived_summary.items():
         assert snapshot["items"][0]["derivedSummary"][key] == value
+    assert snapshot["items"][0]["derivedAuditArtifacts"] == audit_artifacts
 
 
 def test_websocket_auto_enqueues_derived_ingest_task(tmp: Path) -> None:
@@ -3262,8 +3301,10 @@ def test_websocket_auto_enqueues_derived_ingest_task(tmp: Path) -> None:
     assert task_file.exists()
     assert status_file.exists()
     written = json.loads(task_file.read_text(encoding="utf-8"))
+    child_status = json.loads(status_file.read_text(encoding="utf-8"))
     assert written["type"] == "derived_ingest"
     assert written["parent_asset_path"].endswith("20260705-parent.md")
+    assert child_status["audit_artifacts"]["dir"] == f"run-artifacts/{child['id']}"
     sidecar = json.loads((tmp / "ws-runtime-derived-auto" / "derived-actions" / "parent-task.json").read_text(encoding="utf-8"))
     assert sidecar["items"]["dt-auto"]["childTaskId"] == child["id"]
 
@@ -3635,6 +3676,7 @@ def test_derive_executor_sanitizes_leading_h1() -> None:
 def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> None:
     import sys
 
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "derive-exec-runtime")
     sys.path.insert(0, str(SCRIPTS))
     import derive_executor
     from config_loader import Config
@@ -3715,7 +3757,7 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
         def update(self, **fields):
             self.updates.append(fields)
 
-    def fake_resolve(candidate):
+    def fake_resolve(candidate, **_kwargs):
         return target
 
     def fake_model(config, prompt):
@@ -3766,6 +3808,27 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
     assert "parent_candidate_id: \"dt-e2e\"" in child_text
     assert "## 相关资产" in parent_text
     assert (vault / "index.md").exists()
+    assert summary["audit_artifacts"]["dir"] == "run-artifacts/child-task"
+    artifact_files = summary["audit_artifacts"]["files"]
+    for key in (
+        "derive_executor_task",
+        "derive_source_material",
+        "derive_model_prompt",
+        "derive_model_output_raw",
+        "derive_model_output_sanitized",
+        "derive_write_result",
+        "derive_linkback",
+    ):
+        assert key in artifact_files
+        artifact_path = tmp / "derive-exec-runtime" / artifact_files[key]
+        assert artifact_path.exists(), key
+    raw_output = (tmp / "derive-exec-runtime" / artifact_files["derive_model_output_raw"]).read_text(encoding="utf-8")
+    sanitized_output = (tmp / "derive-exec-runtime" / artifact_files["derive_model_output_sanitized"]).read_text(encoding="utf-8")
+    assert "父资产与派生上下文" in raw_output
+    assert "父资产与派生上下文" not in sanitized_output
+    write_result = json.loads((tmp / "derive-exec-runtime" / artifact_files["derive_write_result"]).read_text(encoding="utf-8"))
+    assert write_result["mode"] == "new_asset"
+    assert write_result["vault_path"] == str(child)
 
     all_stems = {path.stem for path in vault.glob("**/*.md")}
     for text in (parent_text, child_text):

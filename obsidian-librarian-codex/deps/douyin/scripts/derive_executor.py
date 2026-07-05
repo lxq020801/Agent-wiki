@@ -11,6 +11,7 @@ import argparse
 import base64
 import ipaddress
 import json
+import os
 import re
 import sys
 import time
@@ -39,6 +40,7 @@ from status_writer import StatusWriter, write_terminal
 
 
 DEFAULT_BRIDGE_ROOT = Path.home() / ".obsidian-librarian"
+_AUDIT_ROOT_NAME = "run-artifacts"
 AUTO_MATCH_SCORE = 6
 AUTO_MATCH_MARGIN = 2
 MAX_GITHUB_SEARCH_QUERIES = 8
@@ -51,6 +53,15 @@ SECRET_PATTERNS = [
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), "github_pat_[REDACTED]"),
     (re.compile(r"(?i)(access_token|private_token|github_token)=([^&\s]+)"), r"\1=[REDACTED]"),
     (re.compile(r"(?i)([?&][^=&#]*(token|key|secret|signature|sig)[^=&#]*=)[^&#\s]+"), r"\1[REDACTED]"),
+    (re.compile(r"\bresp[_-][A-Za-z0-9._-]+\b"), "resp-[REDACTED]"),
+    (
+        re.compile(
+            r"(?i)[\"']?(api[_-]?key|ark[_-]?api[_-]?key|authorization|cookie|set-cookie|"
+            r"response[_-]?id|previous[_-]?response[_-]?id)[\"']?\s*[:=]\s*"
+            r"(\"[^\"]*\"|'[^']*'|[^,\s}\]\n\r]+)"
+        ),
+        "sensitive=[REDACTED]",
+    ),
 ]
 MACHINE_CONTEXT_LABELS = ("父资产与派生上下文", "目标来源材料")
 MACHINE_CONTEXT_KEYS = ("candidate_name", "parent_source_url", "acceptance_criteria", "source_block")
@@ -82,6 +93,94 @@ def _redact_text(text: Any) -> str:
     for pattern, repl in SECRET_PATTERNS:
         cleaned = pattern.sub(repl, cleaned)
     return cleaned
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        clean: dict[str, Any] = {}
+        for key, child in value.items():
+            canonical = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if canonical.endswith("apikey") or canonical in {
+                "authorization",
+                "cookie",
+                "setcookie",
+                "responseid",
+                "previousresponseid",
+                "githubtoken",
+                "accesstoken",
+                "privatetoken",
+            }:
+                continue
+            clean[key] = _redact_value(child)
+        return clean
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, str):
+        return _redact_text(value)
+    return value
+
+
+def _runtime_root() -> Path:
+    raw = os.environ.get("OBSIDIAN_LIBRARIAN_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    return DEFAULT_BRIDGE_ROOT
+
+
+def _safe_artifact_name(value: Any, *, default: str = "run") -> str:
+    text = str(value or "").strip() or default
+    text = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip(".-")
+    return text[:120] or default
+
+
+def _audit_dir(task_id: str) -> Path | None:
+    if not task_id:
+        return None
+    path = _runtime_root() / _AUDIT_ROOT_NAME / _safe_artifact_name(task_id) / "05-derive-executor"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _audit_rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(_runtime_root()))
+    except ValueError:
+        return str(path)
+
+
+def _write_audit_text(audit_dir: Path | None, rel_path: str, text: Any) -> str:
+    if audit_dir is None:
+        return ""
+    target = audit_dir / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(_redact_text(text), encoding="utf-8")
+    return _audit_rel(target)
+
+
+def _write_audit_json(audit_dir: Path | None, rel_path: str, payload: Any) -> str:
+    if audit_dir is None:
+        return ""
+    target = audit_dir / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(_redact_value(payload), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return _audit_rel(target)
+
+
+def _add_artifact(artifacts: dict[str, Any], key: str, path: str) -> None:
+    if path:
+        artifacts[key] = path
+
+
+def _artifact_index(audit_dir: Path | None, artifacts: dict[str, Any]) -> dict[str, Any]:
+    if not artifacts:
+        return {}
+    return {
+        "dir": _audit_rel(audit_dir.parent) if audit_dir else "",
+        "files": artifacts,
+    }
 
 
 def _find_balanced_json_end(text: str, start: int) -> int | None:
@@ -387,6 +486,53 @@ def _display_url(value: str) -> str:
         return _redact_text(value)
 
 
+def _repo_audit_summary(repo: dict[str, Any], *, score: int | None = None, query: str = "") -> dict[str, Any]:
+    owner = repo.get("owner") if isinstance(repo.get("owner"), dict) else {}
+    summary: dict[str, Any] = {
+        "full_name": repo.get("full_name"),
+        "html_url": repo.get("html_url"),
+        "description": repo.get("description"),
+        "language": repo.get("language"),
+        "stars": repo.get("stargazers_count"),
+        "forks": repo.get("forks_count"),
+        "archived": repo.get("archived"),
+        "owner": owner.get("login") if isinstance(owner, dict) else "",
+    }
+    if score is not None:
+        summary["match_score"] = score
+    if query:
+        summary["search_query"] = query
+    return summary
+
+
+def _target_audit_summary(target: ResolvedTarget) -> dict[str, Any]:
+    raw_summary: dict[str, Any] = {}
+    if target.kind == "github_project":
+        repo = target.raw.get("repo") if isinstance(target.raw, dict) else {}
+        readme = str(target.raw.get("readme") or "") if isinstance(target.raw, dict) else ""
+        raw_summary = {
+            "repo": _repo_audit_summary(repo) if isinstance(repo, dict) else {},
+            "readme": readme[:120_000],
+            "readme_chars": len(readme),
+        }
+    else:
+        text = str(target.raw.get("text") or "") if isinstance(target.raw, dict) else ""
+        raw_summary = {
+            "title": target.raw.get("title") if isinstance(target.raw, dict) else "",
+            "domain": target.raw.get("domain") if isinstance(target.raw, dict) else "",
+            "text": text[:120_000],
+            "text_chars": len(text),
+        }
+    return {
+        "url": target.url,
+        "title": target.title,
+        "kind": target.kind,
+        "confidence": target.confidence,
+        "evidence": target.evidence,
+        "source_material": raw_summary,
+    }
+
+
 def _github_owner_repo(url: str) -> tuple[str, str] | None:
     parsed = urllib.parse.urlparse(str(url or ""))
     if parsed.hostname and parsed.hostname.lower() == "github.com":
@@ -629,7 +775,13 @@ def _score_repo_match(candidate: dict[str, Any], repo: dict[str, Any], readme: s
     return score
 
 
-def resolve_github_target(candidate: dict[str, Any]) -> ResolvedTarget:
+def resolve_github_target(
+    candidate: dict[str, Any],
+    *,
+    audit_dir: Path | None = None,
+    audit_files: dict[str, Any] | None = None,
+) -> ResolvedTarget:
+    audit_files = audit_files if audit_files is not None else {}
     target_url = str(candidate.get("targetUrl") or candidate.get("target_url") or "").strip()
     repo_ref = _github_owner_repo(target_url)
     if not repo_ref:
@@ -637,7 +789,7 @@ def resolve_github_target(candidate: dict[str, Any]) -> ResolvedTarget:
     if repo_ref:
         owner, repo = repo_ref
         meta, readme = _github_repo_payload(owner, repo)
-        return ResolvedTarget(
+        target = ResolvedTarget(
             url=str(meta.get("html_url") or f"https://github.com/{owner}/{repo}"),
             title=str(meta.get("full_name") or f"{owner}/{repo}"),
             kind="github_project",
@@ -645,6 +797,17 @@ def resolve_github_target(candidate: dict[str, Any]) -> ResolvedTarget:
             evidence=["候选已提供明确 GitHub URL"],
             raw={"repo": meta, "readme": readme},
         )
+        _add_artifact(audit_files, "derive_target_resolution", _write_audit_json(
+            audit_dir,
+            "01-target-resolution.json",
+            {
+                "method": "explicit_github_reference",
+                "candidate": candidate,
+                "repo_ref": f"{owner}/{repo}",
+                "resolved_target": _target_audit_summary(target),
+            },
+        ))
+        return target
 
     name = str(candidate.get("name") or "").strip()
     query = str(candidate.get("searchQuery") or candidate.get("search_query") or name).strip()
@@ -653,13 +816,16 @@ def resolve_github_target(candidate: dict[str, Any]) -> ResolvedTarget:
     search_queries = _github_search_queries(candidate) or [f"{name or query} in:name,description,readme"]
     seen: set[str] = set()
     repo_candidates: list[tuple[dict[str, Any], str]] = []
+    search_audit: list[dict[str, Any]] = []
     for search_query in search_queries:
         search_q = urllib.parse.quote(search_query)
         search = _json_request(f"https://api.github.com/search/repositories?q={search_q}&sort=stars&order=desc&per_page=5")
         repos = search.get("items") if isinstance(search.get("items"), list) else []
+        query_hits: list[dict[str, Any]] = []
         for repo in repos[:5]:
             if not isinstance(repo, dict):
                 continue
+            query_hits.append(_repo_audit_summary(repo, query=search_query))
             full_name = str(repo.get("full_name") or "")
             if full_name and full_name.lower() in seen:
                 continue
@@ -668,6 +834,11 @@ def resolve_github_target(candidate: dict[str, Any]) -> ResolvedTarget:
             repo_candidates.append((repo, search_query))
             if len(repo_candidates) >= MAX_GITHUB_REPOS_TO_SCORE:
                 break
+        search_audit.append({
+            "query": search_query,
+            "total_count": search.get("total_count"),
+            "hits": query_hits,
+        })
         if len(repo_candidates) >= MAX_GITHUB_REPOS_TO_SCORE:
             break
     prelim = sorted(
@@ -685,18 +856,48 @@ def resolve_github_target(candidate: dict[str, Any]) -> ResolvedTarget:
             meta, readme = repo, ""
         scored.append((_score_repo_match(candidate, meta, readme), meta, readme, search_query))
     scored.sort(key=lambda item: item[0], reverse=True)
+    scored_audit = [
+        _repo_audit_summary(repo, score=score, query=search_query)
+        for score, repo, _readme, search_query in scored
+    ]
     if not scored:
+        _add_artifact(audit_files, "derive_target_resolution", _write_audit_json(
+            audit_dir,
+            "01-target-resolution.json",
+            {
+                "method": "github_search",
+                "candidate": candidate,
+                "queries": search_queries,
+                "search_results": search_audit,
+                "scored_results": scored_audit,
+                "outcome": "needs_target",
+            },
+        ))
         raise DeriveError("needs_target", f"GitHub API 未找到项目：{name or query}", recoverable=True)
     best_score, best, best_readme, best_query = scored[0]
     second = scored[1][0] if len(scored) > 1 else 0
     if best_score < AUTO_MATCH_SCORE or best_score - second < AUTO_MATCH_MARGIN:
+        _add_artifact(audit_files, "derive_target_resolution", _write_audit_json(
+            audit_dir,
+            "01-target-resolution.json",
+            {
+                "method": "github_search",
+                "candidate": candidate,
+                "queries": search_queries,
+                "search_results": search_audit,
+                "scored_results": scored_audit,
+                "best_score": best_score,
+                "second_score": second,
+                "outcome": "ambiguous_target",
+            },
+        ))
         raise DeriveError(
             "ambiguous_target",
             f"GitHub 项目无法唯一匹配：{name or query}",
             hint="请在扩展里补充明确 GitHub URL 后再确认派生。",
             recoverable=True,
         )
-    return ResolvedTarget(
+    target = ResolvedTarget(
         url=str(best.get("html_url") or ""),
         title=str(best.get("full_name") or name or query),
         kind="github_project",
@@ -708,16 +909,39 @@ def resolve_github_target(candidate: dict[str, Any]) -> ResolvedTarget:
         ],
         raw={"repo": best, "readme": best_readme},
     )
+    _add_artifact(audit_files, "derive_target_resolution", _write_audit_json(
+        audit_dir,
+        "01-target-resolution.json",
+        {
+            "method": "github_search",
+            "candidate": candidate,
+            "queries": search_queries,
+            "search_results": search_audit,
+            "scored_results": scored_audit,
+            "best_score": best_score,
+            "second_score": second,
+            "resolved_target": _target_audit_summary(target),
+            "outcome": "resolved",
+        },
+    ))
+    return target
 
 
-def resolve_web_target(candidate: dict[str, Any], target_type: str) -> ResolvedTarget:
+def resolve_web_target(
+    candidate: dict[str, Any],
+    target_type: str,
+    *,
+    audit_dir: Path | None = None,
+    audit_files: dict[str, Any] | None = None,
+) -> ResolvedTarget:
+    audit_files = audit_files if audit_files is not None else {}
     target_url = str(candidate.get("targetUrl") or candidate.get("target_url") or "").strip()
     if not target_url:
         raise DeriveError("needs_target", f"{target_type} 派生需要明确 URL", recoverable=True)
     target_url = _clean_external_url(target_url)
     title, text = _text_request(target_url)
     parsed = urllib.parse.urlparse(target_url)
-    return ResolvedTarget(
+    target = ResolvedTarget(
         url=target_url,
         title=title or str(candidate.get("name") or parsed.netloc or target_url),
         kind=target_type,
@@ -725,14 +949,30 @@ def resolve_web_target(candidate: dict[str, Any], target_type: str) -> ResolvedT
         evidence=["候选已提供明确网页 URL"],
         raw={"title": title, "text": text[:120_000], "domain": parsed.hostname or ""},
     )
+    _add_artifact(audit_files, "derive_target_resolution", _write_audit_json(
+        audit_dir,
+        "01-target-resolution.json",
+        {
+            "method": "explicit_web_url",
+            "candidate": candidate,
+            "resolved_target": _target_audit_summary(target),
+            "outcome": "resolved",
+        },
+    ))
+    return target
 
 
-def resolve_target(candidate: dict[str, Any]) -> ResolvedTarget:
+def resolve_target(
+    candidate: dict[str, Any],
+    *,
+    audit_dir: Path | None = None,
+    audit_files: dict[str, Any] | None = None,
+) -> ResolvedTarget:
     target_type = str(candidate.get("targetType") or candidate.get("target_type") or "")
     if target_type == "github_project":
-        return resolve_github_target(candidate)
+        return resolve_github_target(candidate, audit_dir=audit_dir, audit_files=audit_files)
     if target_type in {"official_doc", "web_research"}:
-        return resolve_web_target(candidate, target_type)
+        return resolve_web_target(candidate, target_type, audit_dir=audit_dir, audit_files=audit_files)
     raise DeriveError("unsupported_target_type", f"不支持的派生类型：{target_type}")
 
 
@@ -1153,15 +1393,51 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
     candidate = task.get("candidate") if isinstance(task.get("candidate"), dict) else {}
     if not candidate:
         raise DeriveError("invalid_task", "派生任务缺少 candidate")
-    sw.update(stage="resolving_target", candidate_id=candidate.get("id"), derived_task=candidate)
-    target = resolve_target(candidate)
+    task_id = str(task.get("id") or task.get("task_id") or "")
+    audit_root = _audit_dir(task_id)
+    audit_files: dict[str, Any] = {}
+    _add_artifact(audit_files, "derive_executor_task", _write_audit_json(
+        audit_root,
+        "00-task.json",
+        {
+            "task": task,
+            "candidate": candidate,
+        },
+    ))
+    sw.update(
+        stage="resolving_target",
+        candidate_id=candidate.get("id"),
+        derived_task=candidate,
+        audit_artifacts=_artifact_index(audit_root, audit_files),
+    )
+    try:
+        target = resolve_target(candidate, audit_dir=audit_root, audit_files=audit_files)
+    except DeriveError as exc:
+        _add_artifact(audit_files, "derive_executor_error", _write_audit_json(
+            audit_root,
+            "99-error.json",
+            {
+                "stage": "resolving_target",
+                "error_kind": exc.kind,
+                "error": str(exc),
+                "hint": exc.hint,
+                "recoverable": exc.recoverable,
+            },
+        ))
+        sw.update(audit_artifacts=_artifact_index(audit_root, audit_files))
+        raise
     sw.update(stage="target_resolved", resolved_target={
         "url": target.url,
         "title": target.title,
         "kind": target.kind,
         "confidence": target.confidence,
         "evidence": target.evidence,
-    })
+    }, audit_artifacts=_artifact_index(audit_root, audit_files))
+    _add_artifact(audit_files, "derive_source_material", _write_audit_json(
+        audit_root,
+        "02-source-material.json",
+        _target_audit_summary(target),
+    ))
 
     parent_link, parent_path = _parent_link(task, config.vault_path)
     existing_path, existing_title = _existing_asset_for_target(config.vault_path, target)
@@ -1172,6 +1448,29 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
         git_status = "existing_asset"
         if touched:
             git_status = _git_commit(config.vault_path, existing_title or existing_path.stem, touched, asset_type="derived_ingest")
+        child_link = _asset_link(existing_path, existing_title or existing_path.stem)
+        _add_artifact(audit_files, "derive_write_result", _write_audit_json(
+            audit_root,
+            "06-write-result.json",
+            {
+                "mode": "existing_asset",
+                "vault_path": str(existing_path),
+                "git_status": git_status,
+                "touched": [str(path) for path in touched],
+            },
+        ))
+        _add_artifact(audit_files, "derive_linkback", _write_audit_json(
+            audit_root,
+            "07-linkback.json",
+            {
+                "parent_path": str(parent_path) if parent_path else "",
+                "parent_link": parent_link,
+                "child_path": str(existing_path),
+                "child_link": child_link,
+                "relation": relation,
+                "updated_files": [str(path) for path in touched],
+            },
+        ))
         return {
             "vault_path": str(existing_path),
             "git_status": git_status,
@@ -1185,19 +1484,69 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
                 "evidence": target.evidence + ["vault 中已存在同一目标资产，已避免重复写入"],
             },
             "parent_asset_path": str(parent_path) if parent_path else "",
-            "asset_link": _asset_link(existing_path, existing_title or existing_path.stem),
+            "asset_link": child_link,
             "cost": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost_rmb_estimate": 0.0},
             "dedupe_status": "existing_asset_linked",
+            "audit_artifacts": _artifact_index(audit_root, audit_files),
         }
     prompt = _build_prompt(task, candidate, target, parent_link)
-    sw.update(stage="analyzing_derived_target", model=config.analyzer_model)
-    body, usage = _call_lite_model(config, prompt)
-    body = _sanitize_generated_body(body)
+    _add_artifact(audit_files, "derive_model_prompt", _write_audit_text(
+        audit_root,
+        "03-model-prompt.md",
+        prompt,
+    ))
+    sw.update(
+        stage="analyzing_derived_target",
+        model=config.analyzer_model,
+        audit_artifacts=_artifact_index(audit_root, audit_files),
+    )
+    try:
+        body_raw, usage = _call_lite_model(config, prompt)
+    except DeriveError as exc:
+        _add_artifact(audit_files, "derive_executor_error", _write_audit_json(
+            audit_root,
+            "99-error.json",
+            {
+                "stage": "analyzing_derived_target",
+                "error_kind": exc.kind,
+                "error": str(exc),
+                "hint": exc.hint,
+                "recoverable": exc.recoverable,
+            },
+        ))
+        sw.update(audit_artifacts=_artifact_index(audit_root, audit_files))
+        raise
+    _add_artifact(audit_files, "derive_model_output_raw", _write_audit_text(
+        audit_root,
+        "04-model-output-raw.md",
+        body_raw,
+    ))
+    try:
+        body = _sanitize_generated_body(body_raw)
+    except DeriveError as exc:
+        _add_artifact(audit_files, "derive_executor_error", _write_audit_json(
+            audit_root,
+            "99-error.json",
+            {
+                "stage": "sanitize_model_output",
+                "error_kind": exc.kind,
+                "error": str(exc),
+                "hint": exc.hint,
+                "recoverable": exc.recoverable,
+            },
+        ))
+        sw.update(audit_artifacts=_artifact_index(audit_root, audit_files))
+        raise
+    _add_artifact(audit_files, "derive_model_output_sanitized", _write_audit_text(
+        audit_root,
+        "05-model-output-sanitized.md",
+        body,
+    ))
     title = _asset_title(target.title or str(candidate.get("name") or "派生资产"))
     summary = _summary_from_text(body, title)
     cost = estimate_cost_rmb(config.analyzer_model, usage)
 
-    sw.update(stage="writing_vault")
+    sw.update(stage="writing_vault", audit_artifacts=_artifact_index(audit_root, audit_files))
     _ensure_vault_structure(config.vault_path)
     frontmatter, md_path, tags = _child_frontmatter(
         config=config,
@@ -1222,8 +1571,37 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
     section = "GitHub项目" if target.kind == "github_project" else "网页剪藏"
     _update_index(config.vault_path, md_path, title, summary, section=section, tags=tags)
     touched = [md_path, config.vault_path / "index.md"]
-    touched.extend(_link_parent_child(parent_path, md_path, title, str(candidate.get("relationType") or "派生资产")))
+    relation = str(candidate.get("relationType") or "派生资产")
+    parent_touched = _link_parent_child(parent_path, md_path, title, relation)
+    touched.extend(parent_touched)
     git_status = _git_commit(config.vault_path, title, touched, asset_type="derived_ingest")
+    child_link = _asset_link(md_path, title)
+    _add_artifact(audit_files, "derive_write_result", _write_audit_json(
+        audit_root,
+        "06-write-result.json",
+        {
+            "mode": "new_asset",
+            "vault_path": str(md_path),
+            "title": title,
+            "summary": summary,
+            "section": section,
+            "git_status": git_status,
+            "touched": [str(path) for path in touched],
+            "cost": cost,
+        },
+    ))
+    _add_artifact(audit_files, "derive_linkback", _write_audit_json(
+        audit_root,
+        "07-linkback.json",
+        {
+            "parent_path": str(parent_path) if parent_path else "",
+            "parent_link": parent_link,
+            "child_path": str(md_path),
+            "child_link": child_link,
+            "relation": relation,
+            "updated_files": [str(path) for path in parent_touched],
+        },
+    ))
 
     return {
         "vault_path": str(md_path),
@@ -1238,8 +1616,9 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
             "evidence": target.evidence,
         },
         "parent_asset_path": str(parent_path) if parent_path else "",
-        "asset_link": _asset_link(md_path, title),
+        "asset_link": child_link,
         "cost": cost,
+        "audit_artifacts": _artifact_index(audit_root, audit_files),
     }
 
 
