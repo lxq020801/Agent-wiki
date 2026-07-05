@@ -144,6 +144,7 @@ TASK_STAGES = {
     "synthesizing_done": "汇总完成",
     "analyzing_done": "分析完成",
     "analyzed": "分析完成",
+    "derived_candidates_ready": "派生候选已生成",
     "writing_vault": "写入知识库",
     "done": "成功",
     "failed": "失败",
@@ -935,6 +936,7 @@ class LibrarianServer:
             'synthesizing_done': 90,
             'analyzing_done': 90,
             'analyzed': 92,
+            'derived_candidates_ready': 94,
             'writing_vault': 96,
         }.get(stage, 10)
 
@@ -979,6 +981,8 @@ class LibrarianServer:
             'hint': status.get('hint') or '',
             'vaultPath': status.get('vault_path') or '',
             'assets': status.get('assets') if isinstance(status.get('assets'), list) else [],
+            'derivedTasks': status.get('derived_tasks') if isinstance(status.get('derived_tasks'), list) else [],
+            'derivedSummary': status.get('derived_summary') if isinstance(status.get('derived_summary'), dict) else {},
         }
 
     def task_status_snapshot(self, limit=20):

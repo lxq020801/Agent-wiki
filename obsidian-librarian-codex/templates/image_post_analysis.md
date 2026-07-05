@@ -17,6 +17,8 @@ confidence: medium      # low | medium | high
 weight: 100             # 100=新，<50=旧，0=归档
 status: active          # active | deprecated | archived
 related: []             # 关联资产路径列表
+derived_candidate_record: "" # 系统记录/派生任务候选/*.json，无则留空
+derived_candidate_ids: []    # 只放 dt-...，不放完整候选对象
 ---
 
 # [图文标题]
@@ -38,6 +40,9 @@ related: []             # 关联资产路径列表
 - **资产用途**：[knowledge_asset / creative_pattern]
 - **来源形态**：[douyin_image_post / other]
 - **入库意图**：[knowledge_ingest / viral_breakdown]
+
+## 派生候选
+[若有派生候选，只展示摘要；完整评分、证据、去重和验收标准见系统记录 JSON]
 
 ## 图文拆解正文
 [图片理解模型输出的完整拆解文本，保持原文结构]

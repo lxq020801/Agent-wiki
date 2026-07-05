@@ -374,6 +374,157 @@ class FakeImageResult:
     truncated: bool = False
 
 
+def _derived_candidate_json(*, name: str = "LangGraph", url: str = "https://github.com/langchain-ai/langgraph") -> str:
+    return json.dumps({
+        "candidates": [
+            {
+                "name": name,
+                "target_type": "github_project",
+                "target_url": url,
+                "subtype": "",
+                "mentioned_context": "视频提到用它构建 Agent Harness 的状态图和人工确认节点。",
+                "reason": "它是父笔记里方法能否复用的关键工具，需要沉淀成可执行项目资产。",
+                "evidence": ["时间码[估算 320s]：字幕出现 LangGraph 和 GitHub 仓库名"],
+                "confidence": 0.86,
+                "requires_confirmation": True,
+                "scores": {
+                    "knowledge_value": 5,
+                    "parent_dependency": 5,
+                    "evidence_strength": 5,
+                    "actionability": 5,
+                    "freshness_risk": 4,
+                    "novelty": 4,
+                    "asset_fit": 5,
+                    "cost_risk_inverse": 4,
+                    "ambiguity_inverse": 5,
+                },
+            }
+        ],
+    }, ensure_ascii=False)
+
+
+def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
+    import sys
+
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "derive-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    from derive_strategy import derive_tasks_from_analysis, public_derived_tasks
+
+    vault = tmp / "derive-vault"
+    existing = vault / "知识资产" / "GitHub项目"
+    existing.mkdir(parents=True)
+    (existing / "20260705-langgraph.md").write_text(
+        "---\nrepo: langchain-ai/langgraph\n---\n",
+        encoding="utf-8",
+    )
+
+    high_scores = {
+        "knowledge_value": 5,
+        "parent_dependency": 4,
+        "evidence_strength": 5,
+        "actionability": 5,
+        "freshness_risk": 4,
+        "novelty": 4,
+        "asset_fit": 5,
+        "cost_risk_inverse": 4,
+        "ambiguity_inverse": 5,
+    }
+    candidates = [
+        {
+            "name": "LangGraph",
+            "target_type": "github_project",
+            "target_url": "https://github.com/langchain-ai/langgraph/tree/main?utm_source=douyin",
+            "reason": "父视频用它解释 Agent Harness 状态图。",
+            "evidence": ["时间码 03:20 出现 GitHub 仓库"],
+            "scores": high_scores,
+            "requires_confirmation": True,
+        },
+        {
+            "name": "LangGraph duplicate",
+            "target_type": "github_project",
+            "target_url": "https://github.com/langchain-ai/langgraph/issues/1",
+            "reason": "重复线索，分数更低，应被同源去重。",
+            "evidence": ["重复 URL"],
+            "scores": {**high_scores, "knowledge_value": 3},
+            "requires_confirmation": True,
+        },
+    ]
+    for index in range(9):
+        candidates.append({
+            "name": f"Official API Doc {index}",
+            "target_type": "official_doc",
+            "target_url": f"https://example.com/docs/api/{index}?utm_campaign=x",
+            "subtype": "api_doc",
+            "reason": f"第 {index} 个官方文档线索，用于核验 API 参数。",
+            "evidence": [f"时间码 0{index}:10 出现文档名"],
+            "scores": high_scores,
+            "requires_confirmation": False,
+        })
+    candidates.append({
+        "name": "AI",
+        "target_type": "web_research",
+        "reason": "泛概念不应成为派生任务。",
+        "evidence": ["口播泛称"],
+        "scores": {
+            "knowledge_value": 1,
+            "parent_dependency": 1,
+            "evidence_strength": 1,
+            "actionability": 1,
+            "freshness_risk": 1,
+            "novelty": 1,
+            "asset_fit": 1,
+            "cost_risk_inverse": 5,
+            "ambiguity_inverse": 1,
+        },
+        "requires_confirmation": True,
+    })
+    placeholder = {
+        "candidates": [{
+            "name": "候选名称",
+            "target_type": "official_doc",
+            "reason": "为什么这个派生能提升父笔记可信度、可复用性或可执行性",
+        }]
+    }
+    analysis = "```json\n" + json.dumps(placeholder, ensure_ascii=False) + "\n```\n## 九、派生决策 JSON\n```json\n" + json.dumps(
+        {"candidates": candidates},
+        ensure_ascii=False,
+    ) + "\n```"
+
+    decision = derive_tasks_from_analysis(
+        analysis,
+        source_id="aweme-derive",
+        source_url="https://v.douyin.com/derive/",
+        source_media="douyin_video",
+        ingest_intent="knowledge_ingest",
+        vault_path=vault,
+        task_id="derive-task",
+    )
+
+    assert decision["enabled"] is True
+    assert len(decision["items"]) <= 8
+    assert decision["counts"]["suppressed"] >= 1
+    assert len({item["dedupe_key"] for item in decision["items"]}) == len(decision["items"])
+    existing_items = [
+        item for item in decision["items"]
+        if item["canonical_target"] == "https://github.com/langchain-ai/langgraph"
+    ]
+    assert len(existing_items) == 1
+    assert existing_items[0]["score"] >= 80
+    assert existing_items[0]["dedupe"]["status"] == "existing_related"
+    assert existing_items[0]["execution_status"] == "existing_related"
+    assert not any(item["name"] == "LangGraph duplicate" for item in decision["items"])
+    assert all(item.get("execution_status") != "queued" for item in decision["items"])
+
+    public = public_derived_tasks(decision)
+    assert len(public) <= 8
+    assert all(item["status"] in {"candidate", "existing_related"} for item in public)
+    assert all(item["decision"] == "candidate" for item in public)
+    log_text = (tmp / "derive-runtime" / "logs" / "derive-strategy-events.jsonl").read_text(encoding="utf-8")
+    assert "derive_decision" in log_text
+    assert "api_key" not in log_text.lower()
+    assert "cookie" not in log_text.lower()
+
+
 def test_vault_write_schema(tmp: Path) -> None:
     import sys
 
@@ -432,6 +583,176 @@ def test_vault_write_schema(tmp: Path) -> None:
     assert "[[" in index_text
     assert git_status in {"committed", "no changes to commit"}
     assert (vault / ".git").exists()
+
+
+def test_derive_strategy_ignores_candidates_json_outside_derived_section(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from derive_strategy import derive_tasks_from_analysis
+
+    vault = tmp / "derive-section-vault"
+    vault.mkdir()
+    analysis = """
+## 三、正文示例
+教程里展示了一个业务 JSON，不应被当成派生候选。
+
+```json
+{"candidates":[{"name":"Wrong API","target_type":"official_doc","target_url":"https://example.com/wrong","scores":{"knowledge_value":5,"parent_dependency":5,"evidence_strength":5,"actionability":5,"freshness_risk":5,"novelty":5,"asset_fit":5,"cost_risk_inverse":5,"ambiguity_inverse":5}}]}
+```
+
+## 四、工具、项目、API、关键词
+| 名称 | 类型 | 上下文 | 后续动作 |
+|---|---|---|---|
+| LangGraph | GitHub | Agent 状态图工具 | 派生 GitHub 任务 |
+"""
+    decision = derive_tasks_from_analysis(
+        analysis,
+        source_id="aweme-json-noise",
+        source_url="https://v.douyin.com/noise/",
+        source_media="douyin_video",
+        ingest_intent="knowledge_ingest",
+        vault_path=vault,
+        task_id="noise-task",
+    )
+
+    assert decision["source"] == "markdown_fallback"
+    assert all(item["name"] != "Wrong API" for item in decision["items"])
+    assert any(item["name"] == "LangGraph" for item in decision["items"])
+
+
+def test_derived_status_prefers_knowledge_decision_even_when_second() -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from ingest import _status_derived_decision
+
+    viral = {
+        "enabled": False,
+        "items": [],
+        "counts": {"candidate": 0, "rejected": 0, "suppressed": 0},
+    }
+    knowledge = {
+        "enabled": True,
+        "items": [{"id": "dt-knowledge", "decision": "candidate"}],
+        "counts": {"candidate": 1, "rejected": 0, "suppressed": 0},
+    }
+
+    selected = _status_derived_decision(
+        {"viral_breakdown": viral, "knowledge_ingest": knowledge},
+        "viral_breakdown",
+    )
+
+    assert selected is knowledge
+
+
+def test_vault_write_includes_derived_tasks_and_record(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from config_loader import Config
+    from ingest import write_to_vault
+
+    vault = tmp / "derived-vault"
+    vault.mkdir()
+    runtime = tmp / "derived-runtime"
+    runtime.mkdir()
+    video = tmp / "video.mp4"
+    video.write_bytes(b"fake-video")
+
+    cfg = Config(
+        ark_api_key="test",
+        ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
+        analyzer_model="doubao-seed-2-0-lite-260428",
+        analyzer_fallback="doubao-seed-2-0-mini-260428",
+        strategy_model="doubao-seed-2-0-mini-260428",
+        default_quality="quality",
+        balanced_target_frames=240,
+        quality_target_frames=1250,
+        fps_min=0.2,
+        fps_max=5.0,
+        file_active_timeout_sec=120,
+        cookie_path=runtime / "cookie" / "douyin.txt",
+        vault_path=vault,
+        vault_relative_root="知识资产/知识入库",
+        server_enabled=True,
+        server_host="127.0.0.1",
+        server_port=8765,
+        config_file=runtime / "config.toml",
+    )
+    derived_decision = {
+        "enabled": True,
+        "source": "json",
+        "counts": {"candidate": 1, "rejected": 0, "suppressed": 0},
+        "items": [{
+            "id": "dt-test",
+            "name": "LangGraph",
+            "target_type": "github_project",
+            "derived_kind": "github_project",
+            "target_url": "https://github.com/langchain-ai/langgraph",
+            "canonical_target": "https://github.com/langchain-ai/langgraph",
+            "dedupe_key": "dedupe-test",
+            "decision": "candidate",
+            "execution_status": "candidate",
+            "score": 88,
+            "confidence": 0.86,
+            "scores": {
+                "knowledge_value": 5,
+                "parent_dependency": 5,
+                "evidence_strength": 5,
+                "actionability": 5,
+                "freshness_risk": 4,
+                "novelty": 4,
+                "asset_fit": 5,
+                "cost_risk_inverse": 4,
+                "ambiguity_inverse": 5,
+            },
+            "reason": "父视频用它解释 Agent Harness 状态图。",
+            "evidence": ["时间码 03:20 出现仓库名"],
+            "relation_type": "implements",
+            "intended_asset_family": "github_project",
+            "lineage_depth": 1,
+            "dedupe": {"status": "new", "matched_asset": ""},
+            "downgrade_flags": ["requires_confirmation"],
+            "reject_reasons": [],
+            "next_action": "manual_review",
+        }],
+    }
+
+    md_path, _ = write_to_vault(
+        cfg,
+        FakeMeta(),
+        video,
+        FakeResult(text=(
+            "## 一、摘要\n视频介绍 Agent Harness。\n\n"
+            "## 九、派生决策 JSON\n```json\n"
+            + _derived_candidate_json()
+            + "\n```\n"
+        )),
+        {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3, "cost_rmb_estimate": 0.1},
+        "knowledge_ingest",
+        derived_decision,
+        "task-derived",
+    )
+
+    text = md_path.read_text(encoding="utf-8")
+    assert "derived_candidate_record:" in text
+    assert 'derived_candidate_ids: ["dt-test"]' in text
+    assert "target_type:" not in text.split("---", 2)[1]
+    assert "## 派生任务候选" in text
+    assert "[LangGraph](https://github.com/langchain-ai/langgraph)" in text
+    assert "## 九、派生决策 JSON" not in text
+    assert "候选名称" not in text
+
+    records = list((vault / "系统记录" / "派生任务候选").glob("*.json"))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text(encoding="utf-8"))
+    item = record["items"][0]
+    assert item["parent_task_id"] == "task-derived"
+    assert item["parent_asset_id"]
+    assert item["parent_asset_path"] == str(md_path.relative_to(vault))
+    assert item["parent_source_url"] == FakeMeta.source_url
+    assert item["parent_aweme_id"] == FakeMeta.aweme_id
 
 
 def test_image_post_metadata_detection_from_image_infos() -> None:
@@ -751,6 +1072,8 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
     class FakeStatusWriter:
         def update(self, **fields):
             calls.append(("status", fields.get("stage"), fields.get("ingest_intents")))
+            if fields.get("stage") == "derived_candidates_ready":
+                calls.append(("derived_status", fields.get("derived_tasks"), fields.get("derived_summary")))
 
         def progress(self, stage, info):
             calls.append(("progress", stage, info.get("intent")))
@@ -790,8 +1113,42 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
             "model": model,
         }
 
-    def fake_write(config, meta, video_path, result, cost, ingest_intent):
+    primary_derived_decision = {
+        "enabled": True,
+        "source": "json",
+        "counts": {"candidate": 1, "rejected": 0, "suppressed": 0},
+        "items": [{
+            "id": "dt-primary",
+            "name": "Primary API",
+            "target_type": "official_doc",
+            "target_url": "https://example.com/docs/primary-api",
+            "decision": "candidate",
+            "execution_status": "candidate",
+            "score": 84,
+            "reason": "需要核验父视频里的 API 参数。",
+        }],
+    }
+
+    def fake_derive_tasks(text, *, source_id, source_url, source_media, ingest_intent, vault_path,
+                          task_id=""):
+        calls.append(("derive_tasks", ingest_intent, source_media, task_id))
+        if ingest_intent != "knowledge_ingest":
+            return {
+                "enabled": False,
+                "reason": "derivation_only_runs_for_knowledge_ingest",
+                "items": [],
+                "counts": {"candidate": 0, "rejected": 0, "suppressed": 0},
+            }
+        assert source_id == FakeMeta.aweme_id
+        assert source_url == FakeMeta.source_url
+        assert source_media == "douyin_video"
+        assert vault_path == cfg.vault_path
+        return primary_derived_decision
+
+    def fake_write(config, meta, video_path, result, cost, ingest_intent,
+                   derived_decision=None, task_id=""):
         calls.append(("write_to_vault", ingest_intent))
+        calls.append(("write_derived", ingest_intent, derived_decision, task_id))
         md_path = config.vault_path / "知识资产" / ingest_intent / "fake.md"
         md_path.parent.mkdir(parents=True, exist_ok=True)
         md_path.write_text("# fake", encoding="utf-8")
@@ -804,6 +1161,7 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
             "download_video",
             "analyze_video_many",
             "estimate_cost_rmb",
+            "derive_tasks_from_analysis",
             "write_to_vault",
         ]
     }
@@ -812,14 +1170,16 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
         ingest.download_video = fake_download_video
         ingest.analyze_video_many = fake_analyze_video_many
         ingest.estimate_cost_rmb = fake_cost
+        ingest.derive_tasks_from_analysis = fake_derive_tasks
         ingest.write_to_vault = fake_write
+        sw = FakeStatusWriter()
         summary = asyncio.run(ingest.run_task(
             task_id="multi-intent",
             url="https://v.douyin.com/test/",
             quality="quality",
             ingest_intents=("knowledge_ingest", "viral_breakdown"),
             config=cfg,
-            sw=FakeStatusWriter(),
+            sw=sw,
             cache_dir=cache,
         ))
     finally:
@@ -837,6 +1197,29 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
     assert len(summary["assets"]) == 2
     assert summary["ingest_intents"] == ["knowledge_ingest", "viral_breakdown"]
     assert summary["analysis"]["file_id"] == "file-one-upload"
+    assert summary["derived_summary"] == {"candidate": 1, "rejected": 0, "suppressed": 0}
+    assert len(summary["derived_tasks"]) == 1
+    expected_public = {
+        "id": "dt-primary",
+        "name": "Primary API",
+        "targetType": "official_doc",
+        "targetUrl": "https://example.com/docs/primary-api",
+        "decision": "candidate",
+        "status": "candidate",
+        "score": 84,
+        "reason": "需要核验父视频里的 API 参数。",
+    }
+    for key, value in expected_public.items():
+        assert summary["derived_tasks"][0][key] == value
+    assert summary["assets"][0]["derived_tasks"] == summary["derived_tasks"]
+    assert summary["assets"][0]["derived_summary"] == summary["derived_summary"]
+    assert summary["assets"][1]["derived_tasks"] == []
+    assert (
+        "derived_status",
+        summary["derived_tasks"],
+        summary["derived_summary"],
+    ) in calls
+    assert ("write_derived", "knowledge_ingest", primary_derived_decision, "multi-intent") in calls
 
 
 def test_analyzer_rejects_empty_response_text(tmp: Path) -> None:
@@ -2498,6 +2881,53 @@ def test_websocket_accepts_task_request(tmp: Path) -> None:
     assert snapshot["items"][0]["ingestIntents"] == ["knowledge_ingest", "viral_breakdown"]
 
 
+def test_websocket_public_task_status_exposes_derived_candidates(tmp: Path) -> None:
+    import sys
+
+    runtime = tmp / "ws-runtime-derived"
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
+    sys.path.insert(0, str(ROOT / "server"))
+    from websocket_server import LibrarianServer
+
+    status_dir = runtime / "status"
+    status_dir.mkdir(parents=True)
+    derived_tasks = [{
+        "id": "dt-status",
+        "name": "Status API",
+        "targetType": "official_doc",
+        "targetUrl": "https://example.com/docs/status-api",
+        "decision": "candidate",
+        "status": "candidate",
+        "score": 82,
+        "reason": "需要核验状态 API。",
+    }]
+    derived_summary = {"candidate": 1, "rejected": 1, "suppressed": 0}
+    status_file = status_dir / "task-derived-status.json"
+    status_file.write_text(json.dumps({
+        "id": "task-derived-status",
+        "ok": None,
+        "stage": "derived_candidates_ready",
+        "started_at": 100.0,
+        "updated_at": 105.0,
+        "source_url": "https://v.douyin.com/status/",
+        "ingest_intent": "knowledge_ingest",
+        "ingest_intents": ["knowledge_ingest"],
+        "derived_tasks": derived_tasks,
+        "derived_summary": derived_summary,
+    }, ensure_ascii=False), encoding="utf-8")
+
+    server = LibrarianServer(enable_task_runner=False)
+    item = server._public_task_status(status_file)
+    assert item["derivedTasks"] == derived_tasks
+    assert item["derivedSummary"] == derived_summary
+    assert item["stageLabel"] == "派生候选已生成"
+
+    snapshot = server.task_status_snapshot()
+    assert snapshot["items"][0]["id"] == "task-derived-status"
+    assert snapshot["items"][0]["derivedTasks"] == derived_tasks
+    assert snapshot["items"][0]["derivedSummary"] == derived_summary
+
+
 def test_websocket_rejects_invalid_ingest_intent(tmp: Path) -> None:
     import asyncio
     import sys
@@ -2526,7 +2956,11 @@ def main() -> int:
         test_douyin_share_text_url_extraction()
         test_download_video_resumes_partial_file(tmp)
         test_ingest_url_preserves_share_text_argument()
+        test_derive_strategy_scores_limits_dedupes_and_redacts(tmp)
+        test_derive_strategy_ignores_candidates_json_outside_derived_section(tmp)
+        test_derived_status_prefers_knowledge_decision_even_when_second()
         test_vault_write_schema(tmp)
+        test_vault_write_includes_derived_tasks_and_record(tmp)
         test_image_post_metadata_detection_from_image_infos()
         test_image_post_without_image_urls_fails_clearly()
         test_analyzer_image_post_payload(tmp)
@@ -2560,6 +2994,7 @@ def main() -> int:
         test_model_health_status_persists(tmp)
         test_codex_handoff_is_marked_archived()
         test_websocket_accepts_task_request(tmp)
+        test_websocket_public_task_status_exposes_derived_candidates(tmp)
         test_websocket_rejects_invalid_ingest_intent(tmp)
     print("P0 static checks passed")
     return 0

@@ -232,12 +232,50 @@ class DouyinImagePostStaticTests(unittest.TestCase):
                 calls.append("estimate_cost")
                 return {"total_tokens": usage["total_tokens"], "cost_rmb_estimate": 0}
 
-            def fake_write(config, meta_arg, media_paths, result, cost, ingest_intent="knowledge_ingest"):
+            image_derived_decision = {
+                "enabled": True,
+                "source": "json",
+                "counts": {"candidate": 1, "rejected": 0, "suppressed": 0},
+                "items": [{
+                    "id": "dt-image",
+                    "name": "Image API",
+                    "target_type": "official_doc",
+                    "target_url": "https://example.com/docs/image-api",
+                    "decision": "candidate",
+                    "execution_status": "candidate",
+                    "score": 81,
+                    "reason": "图文里出现可复用接口，需要核验官方文档。",
+                }],
+            }
+
+            def fake_derive_tasks(text, *, source_id, source_url, source_media, ingest_intent, vault_path,
+                                  task_id=""):
+                calls.append("derive")
+                self.assertEqual(source_id, meta.aweme_id)
+                self.assertEqual(source_url, meta.source_url)
+                self.assertEqual(source_media, "douyin_image_post")
+                self.assertEqual(ingest_intent, "knowledge_ingest")
+                self.assertEqual(vault_path, cfg.vault_path)
+                self.assertEqual(task_id, "image-task")
+                return image_derived_decision
+
+            def fake_write(
+                config,
+                meta_arg,
+                media_paths,
+                result,
+                cost,
+                ingest_intent="knowledge_ingest",
+                derived_decision=None,
+                task_id="",
+            ):
                 calls.append("write")
                 self.assertEqual(meta_arg.media_type, "image_post")
                 self.assertEqual(media_paths, image_paths)
                 self.assertEqual(result.file_id, "inline-images")
                 self.assertEqual(ingest_intent, "knowledge_ingest")
+                self.assertEqual(derived_decision, image_derived_decision)
+                self.assertEqual(task_id, "image-task")
                 md_path = config.vault_path / "知识资产" / "知识入库" / "fake.md"
                 md_path.parent.mkdir(parents=True, exist_ok=True)
                 md_path.write_text("# fake", encoding="utf-8")
@@ -248,7 +286,7 @@ class DouyinImagePostStaticTests(unittest.TestCase):
                 for name in [
                     "download", "analyze_video", "fetch_metadata", "download_images",
                     "analyze_images", "analyze_images_many", "estimate_cost_rmb", "write_to_vault",
-                    "write_image_post_to_vault",
+                    "write_image_post_to_vault", "derive_tasks_from_analysis",
                 ]
             }
             try:
@@ -260,14 +298,16 @@ class DouyinImagePostStaticTests(unittest.TestCase):
                 ingest.estimate_cost_rmb = fake_cost
                 ingest.write_to_vault = fake_write
                 ingest.write_image_post_to_vault = fake_write
+                ingest.derive_tasks_from_analysis = fake_derive_tasks
 
+                status_writer = FakeStatusWriter()
                 summary = asyncio.run(ingest.run_task(
                     task_id="image-task",
                     url=meta.source_url,
                     quality="quality",
                     ingest_intent="knowledge_ingest",
                     config=cfg,
-                    sw=FakeStatusWriter(),
+                    sw=status_writer,
                     cache_dir=cache_dir,
                 ))
             finally:
@@ -285,12 +325,38 @@ class DouyinImagePostStaticTests(unittest.TestCase):
             "download_images",
             "analyze_images",
             "estimate_cost",
+            "derive",
             "write",
         ])
         self.assertTrue(summary["vault_path"].endswith("知识资产/知识入库/fake.md"))
         self.assertEqual(summary["analysis"]["file_id"], "inline-images")
+        expected_derived_tasks = [{
+            "id": "dt-image",
+            "name": "Image API",
+            "targetType": "official_doc",
+            "targetUrl": "https://example.com/docs/image-api",
+            "decision": "candidate",
+            "status": "candidate",
+            "score": 81,
+            "reason": "图文里出现可复用接口，需要核验官方文档。",
+        }]
+        self.assertEqual(len(summary["derived_tasks"]), 1)
+        for key, value in expected_derived_tasks[0].items():
+            self.assertEqual(summary["derived_tasks"][0][key], value)
+        self.assertEqual(summary["derived_summary"], {"candidate": 1, "rejected": 0, "suppressed": 0})
+        for key, value in expected_derived_tasks[0].items():
+            self.assertEqual(summary["assets"][0]["derived_tasks"][0][key], value)
+        derived_updates = [
+            update for update in status_writer.updates
+            if update.get("stage") == "derived_candidates_ready"
+        ]
+        self.assertEqual(len(derived_updates), 1)
+        for key, value in expected_derived_tasks[0].items():
+            self.assertEqual(derived_updates[0]["derived_tasks"][0][key], value)
+        self.assertEqual(derived_updates[0]["derived_summary"], summary["derived_summary"])
 
     def test_image_post_vault_write_uses_image_path_and_index_tags(self) -> None:
+        import json
         import ingest
 
         with tempfile.TemporaryDirectory() as d:
@@ -304,12 +370,29 @@ class DouyinImagePostStaticTests(unittest.TestCase):
             if writer is None:
                 writer = ingest.write_to_vault
 
+            derived_decision = {
+                "enabled": True,
+                "source": "json",
+                "counts": {"candidate": 1, "rejected": 0, "suppressed": 0},
+                "items": [{
+                    "id": "dt-image-write",
+                    "name": "Image Write API",
+                    "target_type": "official_doc",
+                    "target_url": "https://example.com/docs/image-write-api",
+                    "decision": "candidate",
+                    "execution_status": "candidate",
+                    "score": 83,
+                    "reason": "图文写库路径应保留派生候选。",
+                }],
+            }
             md_path, git_status = writer(
                 cfg,
                 self._image_meta(),
                 image_paths,
                 FakeImageResult(),
                 {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7, "cost_rmb_estimate": 0.02},
+                derived_decision=derived_decision,
+                task_id="image-parent",
             )
 
             self.assertTrue(md_path.exists())
@@ -323,6 +406,10 @@ class DouyinImagePostStaticTests(unittest.TestCase):
             self.assertIn("image_count: 2", text)
             self.assertNotIn("video_path:", text)
             self.assertNotIn("fps_used:", text)
+            self.assertIn("derived_candidate_record:", text)
+            self.assertIn('derived_candidate_ids: ["dt-image-write"]', text)
+            self.assertNotIn("target_type:", text.split("---", 2)[1])
+            self.assertIn("[Image Write API](https://example.com/docs/image-write-api)", text)
 
             index_text = (cfg.vault_path / "index.md").read_text(encoding="utf-8")
             self.assertIn("[[", index_text)
@@ -331,6 +418,13 @@ class DouyinImagePostStaticTests(unittest.TestCase):
             self.assertIn("`#image-analysis`", index_text)
             self.assertNotIn("`#video-analysis`", index_text)
             self.assertIn(git_status, {"committed", "no changes to commit"})
+            records = list((cfg.vault_path / "系统记录" / "派生任务候选").glob("*.json"))
+            self.assertEqual(len(records), 1)
+            record = json.loads(records[0].read_text(encoding="utf-8"))
+            item = record["items"][0]
+            self.assertEqual(item["parent_task_id"], "image-parent")
+            self.assertEqual(item["parent_asset_path"], str(md_path.relative_to(cfg.vault_path)))
+            self.assertEqual(item["parent_source_url"], self._image_meta().source_url)
 
 
 if __name__ == "__main__":

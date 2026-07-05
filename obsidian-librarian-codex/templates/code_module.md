@@ -1,6 +1,9 @@
 ---
 id: ""
 type: code_module
+asset_family: code_module
+source_media: github
+ingest_intent: manual
 title: ""
 source_url: ""          # 原始来源URL，无则填 "manual"
 source_path: ""         # 代码在仓库中的路径，如 src/utils/parser.py

@@ -1,6 +1,9 @@
 ---
 id: ""
 type: github_project
+asset_family: github_project
+source_media: github
+ingest_intent: manual
 title: ""               # 项目名称，推荐格式 owner/repo
 source_url: ""          # 原始来源URL，无则填 "manual"
 repo: ""                # 完整仓库地址，如 https://github.com/owner/repo

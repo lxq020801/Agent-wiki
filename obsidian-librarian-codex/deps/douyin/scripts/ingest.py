@@ -49,6 +49,9 @@ from analyzer import (  # noqa: E402
 )
 from config_loader import Config, ConfigError, load_config  # noqa: E402
 from cost_estimator import estimate_cost_rmb  # noqa: E402
+from derive_strategy import (  # noqa: E402
+    derive_tasks_from_analysis, public_derived_tasks,
+)
 from downloader import (  # noqa: E402
     CookieInvalidError, DouyinError, DouyinRateLimitedError,
     NetworkError, VideoMeta, VideoNotFoundError, download_images,
@@ -142,6 +145,130 @@ def _format_tags(tags: tuple[str, ...]) -> str:
     return "[" + ", ".join(tags) + "]"
 
 
+def _visible_derived_items(decision: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not decision or not isinstance(decision.get("items"), list):
+        return []
+    return [
+        item for item in decision["items"]
+        if isinstance(item, dict) and item.get("decision") != "reject"
+    ]
+
+
+def _format_derived_candidate_ids(items: list[dict[str, Any]]) -> str:
+    visible = [
+        item for item in items
+        if isinstance(item, dict) and item.get("decision") != "reject"
+    ]
+    if not visible:
+        return "[]"
+    ids = [str(item.get("id") or "") for item in visible if item.get("id")]
+    return json.dumps(ids, ensure_ascii=False)
+
+
+def _format_derived_tasks_section(
+    decision: dict[str, Any] | None,
+    record_rel_path: str = "",
+) -> str:
+    if not decision or not decision.get("items"):
+        return "- 暂无派生候选。"
+    items = _visible_derived_items(decision)
+    if not items:
+        return "- 暂无达到候选阈值的派生任务。"
+    lines = [
+        "> 默认只生成候选，不自动执行；需要确认后再进入派生任务队列。",
+        "",
+        "| 决策 | 类型 | 名称 | 分数 | 状态 | 原因 |",
+        "|---|---|---|---:|---|---|",
+    ]
+    for item in items:
+        target = item.get("target_url") or item.get("canonical_target") or ""
+        name = str(item.get("name") or "未命名派生线索")
+        if target and str(target).startswith("http"):
+            display_name = f"[{name}]({target})"
+        else:
+            display_name = name
+        reason = re.sub(r"\s+", " ", str(item.get("reason") or "")).strip()
+        if len(reason) > 90:
+            reason = reason[:87] + "..."
+        lines.append(
+            "| {decision} | {target_type} | {name} | {score} | {status} | {reason} |".format(
+                decision=item.get("decision", "candidate"),
+                target_type=item.get("target_type", ""),
+                name=display_name.replace("|", "\\|"),
+                score=int(item.get("score", 0) or 0),
+                status=item.get("execution_status", "candidate"),
+                reason=reason.replace("|", "\\|"),
+            )
+        )
+    rejected = sum(1 for item in decision.get("items", []) if item.get("decision") == "reject")
+    suppressed = int((decision.get("counts") or {}).get("suppressed", 0) or 0)
+    if rejected or suppressed:
+        lines.extend([
+            "",
+            f"- 已过滤低分/重复/超限线索：{rejected + suppressed} 个。完整记录见系统记录。",
+        ])
+    if record_rel_path:
+        lines.extend([
+            "",
+            f"- 完整评分、证据和去重记录：`{record_rel_path}`",
+        ])
+    return "\n".join(lines)
+
+
+def _strip_derived_decision_json_section(text: str) -> str:
+    """Keep machine-readable derivation JSON out of the durable asset body."""
+    source = str(text or "")
+    pattern = re.compile(r"\n?##\s*[九9][、.．]\s*派生决策 JSON\b.*?(?=\n##\s+|\Z)", re.S | re.I)
+    cleaned = pattern.sub("", source).strip()
+    return cleaned or source.strip()
+
+
+def _derived_decision_record_path(
+    vault_path: Path,
+    slug: str,
+    decision: dict[str, Any] | None,
+    *,
+    task_id: str = "",
+    asset_id: str = "",
+) -> Path | None:
+    if not decision or not decision.get("items"):
+        return None
+    out_dir = vault_path / "系统记录" / "派生任务候选"
+    stable = task_id or asset_id or slug
+    stable = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff._-]+", "-", stable).strip("-")
+    if not stable:
+        stable = slug
+    return out_dir / f"{time.strftime('%Y%m%d')}-{stable}-{slug}.json"
+
+
+def _write_derived_decision_record(
+    path: Path | None,
+    decision: dict[str, Any] | None,
+) -> Path | None:
+    if not path or not decision or not decision.get("items"):
+        return None
+    out_dir = path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+    return path
+
+
+def _status_derived_decision(
+    decisions: dict[str, dict[str, Any]],
+    primary_intent: str,
+) -> dict[str, Any]:
+    for intent in (primary_intent, DEFAULT_INGEST_INTENT):
+        decision = decisions.get(intent)
+        if isinstance(decision, dict) and decision.get("items"):
+            return decision
+    for decision in decisions.values():
+        if isinstance(decision, dict) and decision.get("items"):
+            return decision
+    return decisions.get(primary_intent, {})
+
+
 def _prompt_for(source_media: str, ingest_intent: str) -> str:
     suffix = "image_post" if source_media == "douyin_image_post" else "video"
     return f"{suffix}_{normalize_ingest_intent(ingest_intent)}.md"
@@ -200,6 +327,8 @@ confidence: medium
 weight: 100
 status: active
 related: []
+derived_candidate_record: "{derived_candidate_record}"
+derived_candidate_ids: {derived_candidate_ids}
 platform: douyin
 author: "{author_escaped}"
 duration: "{duration_sec_fmt}"
@@ -237,6 +366,9 @@ cost_rmb_estimate: {cost_rmb_estimate}
 - 来源形态：{source_media}
 - 入库意图：{ingest_intent}
 
+## 派生任务候选
+{derived_tasks_section}
+
 ## 拆解正文
 {body}
 
@@ -268,6 +400,8 @@ confidence: medium
 weight: 100
 status: active
 related: []
+derived_candidate_record: "{derived_candidate_record}"
+derived_candidate_ids: {derived_candidate_ids}
 platform: douyin
 author: "{author_escaped}"
 image_count: {image_count}
@@ -302,6 +436,9 @@ cost_rmb_estimate: {cost_rmb_estimate}
 - 资产用途：{asset_family}
 - 来源形态：{source_media}
 - 入库意图：{ingest_intent}
+
+## 派生任务候选
+{derived_tasks_section}
 
 ## 拆解正文
 {body}
@@ -621,6 +758,8 @@ def write_to_vault(
     result,
     cost: dict[str, Any],
     ingest_intent: str = DEFAULT_INGEST_INTENT,
+    derived_decision: dict[str, Any] | None = None,
+    task_id: str = "",
 ) -> tuple[Path, str]:
     """把拆解结果写到 vault。返回 Markdown 路径和 git 状态。"""
     ingest_intent = normalize_ingest_intent(ingest_intent)
@@ -655,6 +794,29 @@ def write_to_vault(
     asset_id = _schema_asset_id(config.vault_path, date, profile["id_kind"])
     asset_title = _asset_title(meta.title)
     summary = _summary_from_text(result.text, asset_title)
+    if derived_decision and isinstance(derived_decision.get("items"), list):
+        rel_parent = str(md_path.relative_to(config.vault_path))
+        for item in derived_decision["items"]:
+            if not isinstance(item, dict):
+                continue
+            item["parent_task_id"] = task_id
+            item["parent_asset_id"] = asset_id
+            item["parent_asset_path"] = rel_parent
+            item["parent_source_url"] = meta.source_url
+            item["parent_aweme_id"] = meta.aweme_id
+    derived_items = _visible_derived_items(derived_decision)
+    decision_path = _derived_decision_record_path(
+        config.vault_path,
+        slug,
+        derived_decision,
+        task_id=task_id,
+        asset_id=asset_id,
+    )
+    decision_rel_path = (
+        str(decision_path.relative_to(config.vault_path))
+        if decision_path is not None
+        else ""
+    )
 
     content = _FM_TPL.format(
         asset_id=asset_id,
@@ -688,11 +850,17 @@ def write_to_vault(
         output_tokens=cost.get("output_tokens", 0),
         total_tokens=cost.get("total_tokens", 0),
         cost_rmb_estimate=cost.get("cost_rmb_estimate", 0),
-        body=result.text,
+        derived_candidate_record=_yaml_escape(decision_rel_path),
+        derived_candidate_ids=_format_derived_candidate_ids(derived_items),
+        derived_tasks_section=_format_derived_tasks_section(derived_decision, decision_rel_path),
+        body=_strip_derived_decision_json_section(result.text),
     )
 
     md_path.write_text(content, encoding="utf-8")
     touched.append(md_path)
+    decision_path = _write_derived_decision_record(decision_path, derived_decision)
+    if decision_path:
+        touched.append(decision_path)
     _update_index(
         config.vault_path,
         md_path,
@@ -718,6 +886,8 @@ def write_image_post_to_vault(
     result,
     cost: dict[str, Any],
     ingest_intent: str = DEFAULT_INGEST_INTENT,
+    derived_decision: dict[str, Any] | None = None,
+    task_id: str = "",
 ) -> tuple[Path, str]:
     """把抖音图文拆解结果写到 vault。"""
     ingest_intent = normalize_ingest_intent(ingest_intent)
@@ -752,6 +922,29 @@ def write_image_post_to_vault(
     asset_title = _asset_title(meta.title)
     summary = _summary_from_text(result.text, asset_title)
     analyzed_at = datetime.now().isoformat(timespec="seconds")
+    if derived_decision and isinstance(derived_decision.get("items"), list):
+        rel_parent = str(md_path.relative_to(config.vault_path))
+        for item in derived_decision["items"]:
+            if not isinstance(item, dict):
+                continue
+            item["parent_task_id"] = task_id
+            item["parent_asset_id"] = asset_id
+            item["parent_asset_path"] = rel_parent
+            item["parent_source_url"] = meta.source_url
+            item["parent_aweme_id"] = meta.aweme_id
+    derived_items = _visible_derived_items(derived_decision)
+    decision_path = _derived_decision_record_path(
+        config.vault_path,
+        slug,
+        derived_decision,
+        task_id=task_id,
+        asset_id=asset_id,
+    )
+    decision_rel_path = (
+        str(decision_path.relative_to(config.vault_path))
+        if decision_path is not None
+        else ""
+    )
 
     content = _IMAGE_FM_TPL.format(
         asset_id=asset_id,
@@ -779,11 +972,17 @@ def write_image_post_to_vault(
         output_tokens=cost.get("output_tokens", 0),
         total_tokens=cost.get("total_tokens", 0),
         cost_rmb_estimate=cost.get("cost_rmb_estimate", 0),
-        body=result.text,
+        derived_candidate_record=_yaml_escape(decision_rel_path),
+        derived_candidate_ids=_format_derived_candidate_ids(derived_items),
+        derived_tasks_section=_format_derived_tasks_section(derived_decision, decision_rel_path),
+        body=_strip_derived_decision_json_section(result.text),
     )
 
     md_path.write_text(content, encoding="utf-8")
     touched.append(md_path)
+    decision_path = _write_derived_decision_record(decision_path, derived_decision)
+    if decision_path:
+        touched.append(decision_path)
     _update_index(
         config.vault_path,
         md_path,
@@ -989,19 +1188,48 @@ async def run_task(
     total_cost = _combine_costs(costs)
     sw.update(cost_estimate=total_cost)
 
-    # ── 阶段 4：写 vault ──
+    # ── 阶段 4：派生候选决策（只生成候选，不默认执行） ──
+    derived_decisions: dict[str, dict[str, Any]] = {}
+    for intent, result in results.items():
+        decision = derive_tasks_from_analysis(
+            result.text,
+            source_id=meta.aweme_id,
+            source_url=meta.source_url,
+            source_media="douyin_video",
+            ingest_intent=intent,
+            vault_path=config.vault_path,
+            task_id=task_id,
+        )
+        derived_decisions[intent] = decision
+    primary_derived = _status_derived_decision(derived_decisions, primary_intent)
+    sw.update(
+        stage="derived_candidates_ready",
+        derived_tasks=public_derived_tasks(primary_derived),
+        derived_summary=primary_derived.get("counts", {}),
+    )
+
+    # ── 阶段 5：写 vault ──
     sw.update(stage="writing_vault")
     assets: list[dict[str, Any]] = []
     try:
         for intent in intents:
             md_path, git_status = write_to_vault(
-                config, meta, video_path, results[intent], costs[intent], intent
+                config,
+                meta,
+                video_path,
+                results[intent],
+                costs[intent],
+                intent,
+                derived_decisions.get(intent),
+                task_id,
             )
             assets.append({
                 "ingest_intent": intent,
                 "asset_family": _intent_profile(intent)["asset_family"],
                 "vault_path": str(md_path),
                 "git_status": git_status,
+                "derived_tasks": public_derived_tasks(derived_decisions.get(intent, {})),
+                "derived_summary": derived_decisions.get(intent, {}).get("counts", {}),
             })
     except Exception as e:
         raise IngestError("vault_write_error", str(e)) from e
@@ -1034,6 +1262,8 @@ async def run_task(
             "chunk_count": primary_chunk_count,
         },
         "cost": total_cost,
+        "derived_tasks": public_derived_tasks(primary_derived),
+        "derived_summary": primary_derived.get("counts", {}),
     }
 
 
@@ -1095,18 +1325,46 @@ async def run_image_post_task(
     total_cost = _combine_costs(costs)
     sw.update(cost_estimate=total_cost)
 
+    derived_decisions: dict[str, dict[str, Any]] = {}
+    for intent, result in results.items():
+        decision = derive_tasks_from_analysis(
+            result.text,
+            source_id=meta.aweme_id,
+            source_url=meta.source_url,
+            source_media="douyin_image_post",
+            ingest_intent=intent,
+            vault_path=config.vault_path,
+            task_id=task_id,
+        )
+        derived_decisions[intent] = decision
+    primary_derived = _status_derived_decision(derived_decisions, primary_intent)
+    sw.update(
+        stage="derived_candidates_ready",
+        derived_tasks=public_derived_tasks(primary_derived),
+        derived_summary=primary_derived.get("counts", {}),
+    )
+
     sw.update(stage="writing_vault")
     assets: list[dict[str, Any]] = []
     try:
         for intent in intents:
             md_path, git_status = write_image_post_to_vault(
-                config, meta, image_paths, results[intent], costs[intent], intent
+                config,
+                meta,
+                image_paths,
+                results[intent],
+                costs[intent],
+                intent,
+                derived_decisions.get(intent),
+                task_id,
             )
             assets.append({
                 "ingest_intent": intent,
                 "asset_family": _intent_profile(intent)["asset_family"],
                 "vault_path": str(md_path),
                 "git_status": git_status,
+                "derived_tasks": public_derived_tasks(derived_decisions.get(intent, {})),
+                "derived_summary": derived_decisions.get(intent, {}).get("counts", {}),
             })
     except Exception as e:
         raise IngestError("vault_write_error", str(e)) from e
@@ -1136,6 +1394,8 @@ async def run_image_post_task(
             "truncated": primary_result.truncated,
         },
         "cost": total_cost,
+        "derived_tasks": public_derived_tasks(primary_derived),
+        "derived_summary": primary_derived.get("counts", {}),
     }
 
 

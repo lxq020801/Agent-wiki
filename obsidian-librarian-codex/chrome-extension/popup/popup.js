@@ -612,6 +612,7 @@ function stageLabel(stage) {
     synthesizing_done: '汇总完成',
     analyzing_done: '分析完成',
     analyzed: '分析完成',
+    derived_candidates_ready: '派生候选已生成',
     writing_vault: '写入知识库',
     done: '成功',
     failed: '失败',

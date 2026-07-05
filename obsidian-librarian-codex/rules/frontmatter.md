@@ -58,6 +58,15 @@ related: []
 | `web_clip` | `domain`, `author`, `publish_date` | 域名、作者、发布日期 |
 | `code_module` | `language`, `dependencies`, `source_path` | 语言、依赖列表、源码路径 |
 
+派生候选只允许轻量引用字段：
+
+| 字段 | 适用类型 | 说明 |
+|------|----------|------|
+| `derived_candidate_record` | `video_analysis` / `image_post_analysis` | 指向 `系统记录/派生任务候选/*.json` 的相对路径 |
+| `derived_candidate_ids` | `video_analysis` / `image_post_analysis` | 候选 ID 列表，只放 `dt-...` 字符串 |
+
+禁止把派生候选完整对象写入资产 frontmatter。以下运行态字段只能存在于系统记录 JSON：`scores`、`evidence`、`reason`、`dedupe`、`parent_task_id`、`execution_status`、`candidate_status`、`target_type`、`derived_kind`、`acceptance_criteria`。
+
 ## 字段约束速查
 
 - **`id`**：永不修改，入库后即为资产永久主键。

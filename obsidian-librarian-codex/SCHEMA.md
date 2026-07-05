@@ -48,7 +48,7 @@ vault/
 │   ├── videos/  images/  web/  github/
 ├── 知识资产/                  ← agent 产出的结构化笔记（正式产出区）
 │   ├── 知识入库/  创作模式/  GitHub项目/  网页剪藏/  代码模块/
-├── 系统记录/                  ← agent 自动生成：维护报告/、回收站/、变更日志/
+├── 系统记录/                  ← agent 自动生成：维护报告/、回收站/、变更日志/、派生任务候选/
 ├── .obsidian/                ← 【红线】agent 严禁读取或修改此目录
 └── .git/
 ```
@@ -96,6 +96,18 @@ vault/
 
 > 目录按 `asset_family` 分区；来源信息写入 frontmatter。缺失必备章节视为不完整资产。
 
+### D. 派生任务候选不是资产
+
+视频/图文知识入库可以生成派生任务候选，例如 GitHub 项目、官方文档、API 文档或网页研究。候选只是运行态决策记录，不是正式知识资产：
+
+- 不参与 `asset_family` / `type` / `source_media` 分类。
+- 不进入 `index.md`。
+- 不写入 `知识资产/`，直到后续被确认并真正执行为 GitHub 项目、网页剪藏等资产。
+- 完整候选记录写入 `系统记录/派生任务候选/*.json`。
+- 父资产 frontmatter 只允许保留 `derived_candidate_record` 和 `derived_candidate_ids` 这种轻量引用。
+
+完整评分、证据、去重状态、执行建议、验收标准、父资产追溯信息必须留在系统记录 JSON，不得塞进资产 frontmatter。
+
 ---
 
 ## 三、通用 Frontmatter 规范
@@ -139,6 +151,13 @@ related: []                 # 关联的 [[笔记名]] 列表
 | `weight` | 是 | 0–100 |
 | `status` | 是 | `active` / `deprecated` / `archived` |
 | `related` | 是 | `[[笔记名]]` 列表，无则 `[]` |
+
+可选派生引用字段：
+
+| 字段 | 必填 | 约束 |
+|------|------|------|
+| `derived_candidate_record` | 否 | 指向 `系统记录/派生任务候选/*.json`，无候选时为空字符串 |
+| `derived_candidate_ids` | 否 | 候选 ID 列表，只放 `dt-...` 字符串，不放完整对象 |
 
 ---
 

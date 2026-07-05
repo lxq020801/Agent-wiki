@@ -21,6 +21,7 @@ download, analysis, vault writes, status, and git commits.
 | `scripts/config_loader.py` | Load `~/.obsidian-librarian/config.toml` |
 | `scripts/status_writer.py` | Write diagnostic status JSON for Agent/debugging |
 | `scripts/cost_estimator.py` | Estimate RMB cost from model usage |
+| `scripts/derive_strategy.py` | Score, dedupe, and record bounded derivation candidates |
 | `vendor/` | Embedded Douyin crawler code; treat as read-only |
 
 ## Runtime Inputs
@@ -53,6 +54,11 @@ The WebSocket control server writes:
    reuse one active `file_id` for both prompt runs; long videos reuse one
    download but create separate overview/chunk `file_id`s for the strategy and
    chunk analysis chain.
+6. For `knowledge_ingest`, `derive_strategy.py` turns model-discovered follow-up
+   leads into bounded candidates. It writes full candidate records under
+   `系统记录/派生任务候选/`; the parent Markdown only stores
+   `derived_candidate_record` and `derived_candidate_ids` plus a readable
+   summary table. Candidates are not executed by default.
 
 `--task` is used by the WebSocket task queue and remains useful for debugging.
 
@@ -119,6 +125,22 @@ status: active
 The note body should include source metadata, one-sentence summary, model output,
 and analysis metadata. API keys and Cookies must never be written to Markdown,
 logs, or final Agent replies.
+
+Derivation candidate contract:
+
+- Only `knowledge_ingest` generates derivation candidates.
+- Allowed target types: `github_project`, `official_doc`, `web_research`.
+- Full candidate fields, scores, evidence, dedupe status, parent lineage, and
+  acceptance criteria live in `系统记录/派生任务候选/*.json`.
+- Frontmatter only stores lightweight references:
+
+```yaml
+derived_candidate_record: "系统记录/派生任务候选/20260705-example.json"
+derived_candidate_ids: ["dt-..."]
+```
+
+- Do not write full candidate objects, `scores`, `evidence`, `dedupe`, or
+  execution status objects into asset frontmatter.
 
 ## Verification
 

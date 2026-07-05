@@ -1,6 +1,9 @@
 ---
 id: ""
 type: web_clip
+asset_family: knowledge_asset
+source_media: webpage
+ingest_intent: manual
 title: ""
 source_url: ""          # 原始来源URL，无则填 "manual"
 author: ""              # 作者/发布机构名称
@@ -13,6 +16,7 @@ summary: ""             # 一句话摘要，≤80字
 confidence: medium      # low | medium | high
 weight: 100             # 100=新，<50=旧，0=归档
 status: active          # active | deprecated | archived
+derived_from: []        # 来源资产列表，如视频分析、图文分析
 related: []             # 关联资产路径列表
 ---
 

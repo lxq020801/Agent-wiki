@@ -158,6 +158,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 - `chunk_done`
 - `synthesizing_chunks`
 - `synthesizing_done`
+- `derived_candidates_ready`
 
 ```json
 {
@@ -239,6 +240,43 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 
 `task_accepted` 表示任务已进入队列；`task_rejected` 表示 URL 或环境不满足；
 `task_status_snapshot` 返回最近任务列表。
+
+任务状态项可包含派生候选公开投影。这里返回的是摘要，不是完整系统记录：
+
+```json
+{
+  "id": "20260705-170000-abcd",
+  "stageLabel": "派生候选已生成",
+  "derivedTasks": [
+    {
+      "id": "dt-xxxx",
+      "name": "LangGraph",
+      "targetType": "github_project",
+      "taskKind": "github_project_ingest",
+      "targetUrl": "https://github.com/langchain-ai/langgraph",
+      "searchQuery": "LangGraph GitHub repository",
+      "decision": "candidate",
+      "status": "candidate",
+      "candidateStatus": "candidate",
+      "score": 88,
+      "reason": "父视频用它解释 Agent Harness 状态图。"
+    }
+  ],
+  "derivedSummary": {
+    "candidate": 1,
+    "rejected": 0,
+    "existing_related": 0,
+    "needs_target": 0,
+    "suppressed": 0,
+    "raw": 1,
+    "unique": 1,
+    "duplicate": 0,
+    "retained": 1
+  }
+}
+```
+
+完整评分、证据、验收标准、去重信息和父资产追溯信息不通过 WebSocket 全量返回；它们写入 vault 的 `系统记录/派生任务候选/*.json`。
 
 ### `vault_status` / `model_status` / `config_synced` / `cookie_synced`
 

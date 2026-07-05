@@ -21,8 +21,20 @@
 ## 模型分工
 
 - Agent 模型：不在本工具内部配置。它读取 Harness/Skill，决定何时调用工具、如何维护知识库、是否做旧笔记去重或相似判断。
-- 主分析模型：默认 `doubao-seed-2-0-lite-260428`，负责正式视频精拆、最终汇总、标题/摘要/标签候选和派生任务线索。
+- 主分析模型：默认 `doubao-seed-2-0-lite-260428`，负责正式视频精拆、最终汇总、标题/摘要/标签候选和派生候选 JSON。
 - 策略模型：默认 `doubao-seed-2-0-mini-260428`，只负责长视频 `1fps` 全片/分片概览、分段 fps 决策和策略 JSON 修复。
+
+## 派生候选边界
+
+Ark 视频理解只负责从 `knowledge_ingest` 输出中给出结构化派生候选。执行层会二次解析、评分、去重、限制数量，并默认把所有候选保持为人工确认状态。
+
+当前允许的候选目标类型：
+
+- `github_project`：明确 GitHub 仓库或开源库。
+- `official_doc`：官方文档、API 文档、官方报告、官方博客。
+- `web_research`：需要多源核验的事实、案例或趋势。
+
+候选不是正式资产。完整记录写入 `系统记录/派生任务候选/*.json`；父资产只写轻量 `derived_candidate_record` 和 `derived_candidate_ids`。派生记录不得包含 API Key、Cookie、Bearer token、`response_id`。
 
 ## fps 和帧数
 
