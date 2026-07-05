@@ -96,6 +96,7 @@ class AnalyzeResult:
     chunked: bool = False
     chunk_count: int = 1
     chunks: list[dict[str, Any]] = field(default_factory=list)
+    audit_artifacts: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -284,6 +285,7 @@ _LONG_STRATEGY_CONFIDENCE_MIN = 0.65
 _LONG_STRATEGY_LOW_FPS_CONFIDENCE_MIN = 0.78
 _RESPONSE_MEMORY_TTL_SEC = 3 * 24 * 60 * 60
 _STRATEGY_LOG_NAME = "video-strategy-events.jsonl"
+_AUDIT_ROOT_NAME = "run-artifacts"
 _STRATEGY_SEGMENT_REQUIRED_FIELDS = (
     "part_index",
     "start_sec",
@@ -291,19 +293,7 @@ _STRATEGY_SEGMENT_REQUIRED_FIELDS = (
     "rough_summary",
     "recommended_fps",
     "confidence",
-    "scores",
-    "evidence",
-    "focus",
-    "risk_flags",
-    "why_not_lower_fps",
-)
-_STRATEGY_SCORE_REQUIRED_FIELDS = (
-    "visual_change",
-    "ocr_subtitle_density",
-    "operation_density",
-    "motion_detail",
-    "concept_density",
-    "risk_if_low_fps",
+    "lite_brief",
 )
 
 
@@ -322,6 +312,56 @@ def _runtime_root() -> Path:
     if raw:
         return Path(raw).expanduser()
     return Path.home() / ".obsidian-librarian"
+
+
+def _safe_artifact_name(value: Any, *, default: str = "run") -> str:
+    text = str(value or "").strip()
+    if not text:
+        text = default
+    text = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip(".-")
+    return text[:120] or default
+
+
+def _audit_dir(audit_id: Optional[str], source_id: str) -> Optional[Path]:
+    if not audit_id:
+        return None
+    name = _safe_artifact_name(audit_id, default=source_id or "run")
+    path = _runtime_root() / _AUDIT_ROOT_NAME / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _audit_rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(_runtime_root()))
+    except ValueError:
+        return str(path)
+
+
+def _write_audit_text(audit_dir: Optional[Path], rel_path: str, text: str) -> str:
+    if audit_dir is None:
+        return ""
+    target = audit_dir / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(_redact_sensitive_text(str(text or "")), encoding="utf-8")
+    return _audit_rel(target)
+
+
+def _write_audit_json(audit_dir: Optional[Path], rel_path: str, payload: Any) -> str:
+    if audit_dir is None:
+        return ""
+    target = audit_dir / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(_redact_sensitive_payload(payload), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return _audit_rel(target)
+
+
+def _add_artifact(artifacts: dict[str, Any], key: str, path: str) -> None:
+    if path:
+        artifacts[key] = path
 
 
 def _response_memory_dir() -> Path:
@@ -549,9 +589,10 @@ def _build_overview_chunk_prompt(
         "请输出简洁文本，不要输出最终 JSON。必须包含：\n"
         "- 本段大概讲了什么。\n"
         "- 本段粗时间线。\n"
-        "- 可见的字幕/OCR、界面操作、镜头变化、动作细节、概念密度。\n"
-        "- 低 fps 精拆可能漏掉什么。\n"
-        "- 后续精拆本段建议重点关注什么。\n"
+        "- 本段信息主要由什么承载：口播/字幕/OCR/画面变化/界面操作/图表/动作/结构关系。\n"
+        "- 画面是否重复；低 fps 会不会漏视觉、OCR、操作或动作证据。\n"
+        "- 后续精拆本段建议重点关注什么，写成给下一个模型的人话说明。\n"
+        "- 不确定点：看不清、听不清、实体名不确定或需要后续验证的内容。\n"
     )
 
 
@@ -595,9 +636,10 @@ def _build_strategy_repair_prompt(
         "必须覆盖这些固定切片：\n"
         f"{json.dumps(chunk_plan, ensure_ascii=False, indent=2)}\n\n"
         "每个 segment 必须包含：part_index, start_sec, end_sec, rough_summary, "
-        "recommended_fps, confidence, scores, evidence, focus, risk_flags, "
-        "why_not_lower_fps。\n"
-        "recommended_fps 只能是 2、3、4、5；confidence 是 0-1；scores 内各项是 0-5 整数。\n\n"
+        "recommended_fps, confidence, lite_brief。\n"
+        "recommended_fps 只能是 2、3、4、5；confidence 是 0-1。\n"
+        "可以保留 information_carriers, evidence, risk_flags, why_not_lower_fps；"
+        "lite_brief 必须是给下一个模型的人话精拆说明。\n\n"
         "原始输出如下：\n"
         f"{raw_text[:8000]}"
     )
@@ -652,6 +694,28 @@ def _string_list(value: Any, *, limit: int = 8) -> list[str]:
         if len(out) >= limit:
             break
     return out
+
+
+def _score_dict(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): _score(child) for key, child in value.items()}
+
+
+def _has_visual_or_ocr_evidence(*values: Any) -> bool:
+    text = " ".join(
+        item
+        for value in values
+        for item in _string_list(value, limit=12)
+    )
+    if not text:
+        return False
+    return bool(re.search(
+        r"(画面变化|场景变化|镜头切换|快速切换|字幕|OCR|文字|界面|操作|点击|"
+        r"拖拽|菜单|按钮|代码|表格|图表|PPT|截图|屏幕|产品展示|运动|动作|看不清|快速)",
+        text,
+        re.IGNORECASE,
+    ))
 
 
 def _redact_sensitive_text(text: str) -> str:
@@ -710,17 +774,10 @@ def _redact_sensitive_payload(value: Any) -> Any:
 
 
 def _missing_strategy_segment_fields(segment: dict[str, Any]) -> list[str]:
-    missing: list[str] = [
+    return [
         field for field in _STRATEGY_SEGMENT_REQUIRED_FIELDS
         if field not in segment
     ]
-    scores = segment.get("scores")
-    if isinstance(scores, dict):
-        missing.extend(
-            f"scores.{field}" for field in _STRATEGY_SCORE_REQUIRED_FIELDS
-            if field not in scores
-        )
-    return missing
 
 
 def _strategy_fallback(
@@ -736,6 +793,7 @@ def _strategy_fallback(
             **item,
             "recommended_fps": _LONG_CHUNK_FPS_MAX,
             "confidence": 0.0,
+            "information_carriers": {},
             "scores": {
                 "visual_change": 0,
                 "ocr_subtitle_density": 0,
@@ -747,10 +805,15 @@ def _strategy_fallback(
             "rough_summary": "",
             "evidence": [],
             "focus": ["概览策略不可用，按最高精拆 fps 保守处理"],
+            "lite_brief": "概览策略不可用。请按最高视觉采样保守精拆，并明确标记不确定点。",
             "risk_flags": [reason],
             "why_not_lower_fps": reason,
             "fallback_applied": True,
             "fallback_reason": reason,
+            "fallback_type": "validation_fallback",
+            "validation_fallback": True,
+            "fps_adjusted": True,
+            "fps_adjust_reason": reason,
         })
     return {
         "ok": False,
@@ -908,6 +971,7 @@ def _normalize_long_video_strategy(
         # Keep upload values simple and stable; Ark accepts floats, but these are
         # strategy levels rather than exact mathematical results.
         fps = float(math.ceil(fps))
+        information_carriers = _score_dict(segment.get("information_carriers"))
         scores_raw = segment.get("scores") if isinstance(segment.get("scores"), dict) else {}
         scores = {
             "visual_change": _score(scores_raw.get("visual_change")),
@@ -917,62 +981,102 @@ def _normalize_long_video_strategy(
             "concept_density": _score(scores_raw.get("concept_density")),
             "risk_if_low_fps": _score(scores_raw.get("risk_if_low_fps")),
         }
+        visual_need_score = max(
+            scores["visual_change"],
+            scores["ocr_subtitle_density"],
+            scores["operation_density"],
+            scores["motion_detail"],
+            information_carriers.get("visual_scene", 0),
+            information_carriers.get("subtitle_ocr", 0),
+            information_carriers.get("operation_steps", 0),
+            information_carriers.get("motion_detail", 0),
+        )
         evidence = _string_list(_segment_value(segment, "evidence", "fps_evidence", "reason"))
-        focus = _string_list(_segment_value(segment, "focus", "focus_points", "analysis_focus"))
+        focus = _string_list(_segment_value(segment, "focus", "focus_points", "analysis_focus", "lite_focus"))
         risk_flags = _string_list(_segment_value(segment, "risk_flags", "risks", "risk"))
+        lite_brief = str(_segment_value(
+            segment,
+            "lite_brief",
+            "analysis_brief",
+            "next_model_brief",
+            "precision_brief",
+            default="",
+        ) or "").strip()[:1600]
         fallback_reasons: list[str] = []
+        validation_reasons: list[str] = []
+        fps_adjust_reasons: list[str] = []
 
         if missing_fields:
-            fallback_reasons.append(
+            validation_reasons.append(
                 "概览策略缺少必填字段: "
                 + ", ".join(missing_fields[:12])
             )
             fps = _LONG_CHUNK_FPS_MAX
 
         if confidence < _LONG_STRATEGY_CONFIDENCE_MIN:
-            fallback_reasons.append(
+            fps_adjust_reasons.append(
                 f"策略置信度 {confidence:.2f} 低于 {_LONG_STRATEGY_CONFIDENCE_MIN:.2f}"
             )
             fps = _LONG_CHUNK_FPS_MAX
         elif confidence < _LONG_STRATEGY_LOW_FPS_CONFIDENCE_MIN and fps <= 3:
-            fallback_reasons.append(
+            fps_adjust_reasons.append(
                 f"低 fps 建议置信度 {confidence:.2f} 不足，向上保守"
             )
             fps = 4.0
 
-        if not evidence and fps < _LONG_CHUNK_FPS_MAX:
-            fallback_reasons.append("缺少支持 fps 判断的证据")
+        has_visual_evidence = visual_need_score >= 4 or _has_visual_or_ocr_evidence(
+            evidence, focus, risk_flags, lite_brief
+        )
+        if scores["risk_if_low_fps"] >= 5 and fps < _LONG_CHUNK_FPS_MAX and has_visual_evidence:
+            fps_adjust_reasons.append("低 fps 漏视觉/OCR/操作细节风险评分为 5")
             fps = _LONG_CHUNK_FPS_MAX
-
-        if scores["risk_if_low_fps"] >= 5 and fps < _LONG_CHUNK_FPS_MAX:
-            fallback_reasons.append("低 fps 漏细节风险评分为 5")
-            fps = _LONG_CHUNK_FPS_MAX
-        elif scores["risk_if_low_fps"] >= 4 and fps < 4:
-            fallback_reasons.append("低 fps 漏细节风险较高")
+        elif scores["risk_if_low_fps"] >= 4 and fps < 4 and has_visual_evidence:
+            fps_adjust_reasons.append("低 fps 漏视觉/OCR/操作细节风险较高")
             fps = 4.0
+        if (
+            fps >= 4
+            and not has_visual_evidence
+            and not validation_reasons
+            and confidence >= _LONG_STRATEGY_CONFIDENCE_MIN
+        ):
+            fps_adjust_reasons.append(
+                "缺少明确视觉/OCR/操作证据，不因概念密度单独使用 4/5fps"
+            )
+            fps = 3.0
 
         chunk_duration = float(item["end_sec"]) - float(item["start_sec"])
         if int(chunk_duration * fps) > _FRAMES_SAFE_TARGET:
             safe_fps = math.floor((_FRAMES_SAFE_TARGET / chunk_duration) * 100) / 100.0
             safe_fps = max(_LONG_CHUNK_FPS_MIN, min(_LONG_CHUNK_FPS_MAX, safe_fps))
             if safe_fps < fps:
-                fallback_reasons.append(
+                fps_adjust_reasons.append(
                     f"按 {fps:g}fps 会超过安全帧数，降到 {safe_fps:g}fps"
                 )
                 fps = safe_fps
+        fallback_reasons = validation_reasons + fps_adjust_reasons
 
         normalized.append({
             **item,
             "recommended_fps": fps,
             "confidence": confidence,
+            "information_carriers": information_carriers,
             "scores": scores,
             "rough_summary": str(_segment_value(segment, "rough_summary", "summary", "rough_content", default="") or "").strip()[:800],
             "evidence": evidence,
             "focus": focus,
+            "lite_brief": lite_brief,
             "risk_flags": risk_flags,
             "why_not_lower_fps": str(_segment_value(segment, "why_not_lower_fps", "why_not_lower", "lower_fps_risk", default="") or "").strip()[:800],
             "fallback_applied": bool(fallback_reasons),
             "fallback_reason": "; ".join(fallback_reasons),
+            "fallback_type": (
+                "validation_fallback" if validation_reasons
+                else "fps_adjustment" if fps_adjust_reasons
+                else ""
+            ),
+            "validation_fallback": bool(validation_reasons),
+            "fps_adjusted": bool(fps_adjust_reasons),
+            "fps_adjust_reason": "; ".join(fps_adjust_reasons),
         })
 
     return {
@@ -1035,12 +1139,15 @@ def _chunk_strategy_context(strategy: Optional[dict[str, Any]], part_index: int)
     rough = str(item.get("rough_summary") or "").strip()
     if rough:
         lines.append(f"- 粗摘要：{rough}")
-    scores = item.get("scores")
-    if isinstance(scores, dict):
+    carriers = item.get("information_carriers")
+    if isinstance(carriers, dict) and carriers:
         lines.append(
-            "- 评分："
-            + json.dumps(scores, ensure_ascii=False, sort_keys=True)
+            "- 信息承载判断："
+            + json.dumps(carriers, ensure_ascii=False, sort_keys=True)
         )
+    lite_brief = str(item.get("lite_brief") or "").strip()
+    if lite_brief:
+        lines.append(f"- 给本段精拆模型的说明：{lite_brief}")
     for key, label in (
         ("evidence", "证据"),
         ("focus", "精拆重点"),
@@ -1052,8 +1159,10 @@ def _chunk_strategy_context(strategy: Optional[dict[str, Any]], part_index: int)
     why = str(item.get("why_not_lower_fps") or "").strip()
     if why:
         lines.append(f"- 不用更低 fps 的理由：{why}")
-    if item.get("fallback_applied"):
-        lines.append(f"- 程序保守回退：{item.get('fallback_reason')}")
+    if item.get("validation_fallback"):
+        lines.append(f"- 策略结构兜底：{item.get('fallback_reason')}")
+    elif item.get("fps_adjusted"):
+        lines.append(f"- 程序 fps 调整：{item.get('fps_adjust_reason')}")
     return "\n".join(lines)
 
 
@@ -1537,6 +1646,7 @@ async def analyze_video(
     quality: str = "quality",
     quality_params: Optional[dict] = None,
     source_id: Optional[str] = None,
+    audit_id: Optional[str] = None,
     file_active_timeout_sec: int = 120,
     response_timeout_sec: int = 900,
     chunk_concurrency: int = _CHUNK_ANALYSIS_CONCURRENCY,
@@ -1571,6 +1681,7 @@ async def analyze_video(
         quality=quality,
         quality_params=quality_params,
         source_id=source_id,
+        audit_id=audit_id,
         file_active_timeout_sec=file_active_timeout_sec,
         response_timeout_sec=response_timeout_sec,
         chunk_concurrency=chunk_concurrency,
@@ -1592,6 +1703,7 @@ async def analyze_video_many(
     quality: str = "quality",
     quality_params: Optional[dict] = None,
     source_id: Optional[str] = None,
+    audit_id: Optional[str] = None,
     file_active_timeout_sec: int = 120,
     response_timeout_sec: int = 900,
     chunk_concurrency: int = _CHUNK_ANALYSIS_CONCURRENCY,
@@ -1611,6 +1723,25 @@ async def analyze_video_many(
     if not video_path.exists():
         raise AnalyzerError(f"视频文件不存在: {video_path}")
     memory_source_id = str(source_id or video_path.stem)
+    audit_root = _audit_dir(audit_id, memory_source_id)
+    audit_files: dict[str, Any] = {}
+    if audit_root is not None:
+        _add_artifact(audit_files, "run_manifest", _write_audit_json(audit_root, "00-run-manifest.json", {
+            "audit_id": audit_id,
+            "source_id": memory_source_id,
+            "video_path": str(video_path),
+            "intents": list(prompts),
+            "analysis_model": model,
+            "strategy_model": strategy_model or model,
+            "quality": quality,
+            "created_at": time.time(),
+        }))
+        for intent, prompt in prompts.items():
+            _add_artifact(
+                audit_files,
+                f"prompt.{intent}",
+                _write_audit_text(audit_root, f"01-prompts/{intent}.md", prompt),
+            )
     strategy_model = strategy_model or model
     chunk_concurrency = max(1, min(4, int(chunk_concurrency or _CHUNK_ANALYSIS_CONCURRENCY)))
 
@@ -1677,6 +1808,8 @@ async def analyze_video_many(
                 file_active_timeout_sec=file_active_timeout_sec,
                 response_timeout_sec=response_timeout_sec,
                 source_id=memory_source_id,
+                audit_dir=audit_root,
+                audit_files=audit_files,
                 chunk_paths=chunk_paths,
                 chunk_concurrency=chunk_concurrency,
                 on_progress=on_progress,
@@ -1692,6 +1825,8 @@ async def analyze_video_many(
                 full_duration=duration,
                 source_id=memory_source_id,
                 strategy=strategy,
+                audit_dir=audit_root,
+                audit_files=audit_files,
                 file_active_timeout_sec=file_active_timeout_sec,
                 response_timeout_sec=response_timeout_sec,
                 chunk_concurrency=chunk_concurrency,
@@ -1772,6 +1907,7 @@ async def analyze_video_many(
             usage=usage,
             truncated=will_truncate,
             response_id=call.response_id,
+            audit_artifacts={"dir": _audit_rel(audit_root) if audit_root else "", "files": audit_files},
         )
     return results
 
@@ -1790,10 +1926,13 @@ async def _prepare_long_video_strategy(
     response_timeout_sec: int,
     chunk_paths: Optional[list[Path]] = None,
     chunk_concurrency: int = _CHUNK_ANALYSIS_CONCURRENCY,
+    audit_dir: Optional[Path] = None,
+    audit_files: Optional[dict[str, Any]] = None,
     on_progress: ProgressCb,
 ) -> dict[str, Any]:
     """Run a 1fps full-video overview or chunked overview and return a per-chunk strategy."""
     overview_duration = float(chunk_plan[-1]["end_sec"]) if chunk_plan else 0.0
+    audit_files = audit_files if audit_files is not None else {}
     try:
         if _is_ultra_long_video(overview_duration):
             call = await _prepare_chunked_overview_strategy(
@@ -1804,6 +1943,8 @@ async def _prepare_long_video_strategy(
                 responses_client=responses_client,
                 strategy_model=strategy_model,
                 duration_sec=overview_duration,
+                audit_dir=audit_dir,
+                audit_files=audit_files,
                 file_active_timeout_sec=file_active_timeout_sec,
                 response_timeout_sec=response_timeout_sec,
                 chunk_concurrency=chunk_concurrency,
@@ -1837,6 +1978,11 @@ async def _prepare_long_video_strategy(
                 chunk_plan=chunk_plan,
                 intents=intents,
             )
+            _add_artifact(
+                audit_files,
+                "mini.overview_strategy_prompt",
+                _write_audit_text(audit_dir, "02-mini/overview-strategy-prompt.md", overview_prompt),
+            )
             await _call_progress(on_progress, "analyzing_overview", {
                 "file_id": file_id,
                 "model": strategy_model,
@@ -1852,7 +1998,17 @@ async def _prepare_long_video_strategy(
             ))
         if not call.text.strip():
             raise APIError("Responses API 未返回长视频概览策略文本")
+        _add_artifact(
+            audit_files,
+            "mini.overview_strategy_raw",
+            _write_audit_text(audit_dir, "02-mini/overview-strategy-raw.md", call.text),
+        )
         strategy = _normalize_long_video_strategy(call.text, chunk_plan)
+        _add_artifact(
+            audit_files,
+            "mini.overview_strategy_normalized_initial",
+            _write_audit_json(audit_dir, "02-mini/overview-strategy-normalized-initial.json", strategy),
+        )
         if _strategy_needs_json_repair(strategy):
             original_strategy = strategy
             repair_reason = str(strategy.get("fallback_reason") or "策略字段缺失")
@@ -1873,6 +2029,11 @@ async def _prepare_long_video_strategy(
                 chunk_plan=chunk_plan,
                 raw_text=call.text,
             )
+            _add_artifact(
+                audit_files,
+                "mini.strategy_repair_prompt",
+                _write_audit_text(audit_dir, "02-mini/strategy-repair-prompt.md", repair_prompt),
+            )
             repair = await _call_text_responses(
                 responses_client,
                 model=strategy_model,
@@ -1881,7 +2042,17 @@ async def _prepare_long_video_strategy(
                 previous_response_id=call.response_id,
                 timeout_sec=response_timeout_sec,
             )
+            _add_artifact(
+                audit_files,
+                "mini.strategy_repair_raw",
+                _write_audit_text(audit_dir, "02-mini/strategy-repair-raw.md", repair.text),
+            )
             repaired_strategy = _normalize_long_video_strategy(repair.text, chunk_plan)
+            _add_artifact(
+                audit_files,
+                "mini.strategy_repair_normalized",
+                _write_audit_json(audit_dir, "02-mini/strategy-repair-normalized.json", repaired_strategy),
+            )
             if not _strategy_needs_json_repair(repaired_strategy):
                 strategy = repaired_strategy
                 _write_strategy_log("overview_strategy_repaired", {
@@ -1920,9 +2091,17 @@ async def _prepare_long_video_strategy(
                     "fps": item.get("recommended_fps"),
                     "confidence": item.get("confidence"),
                     "fallback_applied": item.get("fallback_applied"),
+                    "validation_fallback": item.get("validation_fallback"),
+                    "fps_adjusted": item.get("fps_adjusted"),
+                    "fps_adjust_reason": item.get("fps_adjust_reason"),
+                    "lite_brief": str(item.get("lite_brief") or "")[:300],
                 }
                 for item in strategy.get("chunks", [])
             ],
+            "audit_artifacts": {
+                "dir": _audit_rel(audit_dir) if audit_dir else "",
+                "files": audit_files,
+            },
         })
         fallback_chunks = [
             {
@@ -1930,6 +2109,7 @@ async def _prepare_long_video_strategy(
                 "fps": item.get("recommended_fps"),
                 "confidence": item.get("confidence"),
                 "reason": item.get("fallback_reason"),
+                "fallback_type": item.get("fallback_type"),
             }
             for item in strategy.get("chunks", [])
             if isinstance(item, dict) and item.get("fallback_applied")
@@ -1952,6 +2132,11 @@ async def _prepare_long_video_strategy(
                     if isinstance(item, dict)
                 ],
             })
+        _add_artifact(
+            audit_files,
+            "mini.overview_strategy_final",
+            _write_audit_json(audit_dir, "02-mini/overview-strategy-final.json", strategy),
+        )
         return strategy
     except Exception as e:
         reason = f"长视频概览策略失败，按 5fps 分片兜底: {e}"
@@ -1985,6 +2170,8 @@ async def _prepare_chunked_overview_strategy(
     responses_client: Any,
     strategy_model: str,
     duration_sec: float,
+    audit_dir: Optional[Path] = None,
+    audit_files: Optional[dict[str, Any]] = None,
     file_active_timeout_sec: int,
     response_timeout_sec: int,
     chunk_concurrency: int,
@@ -1993,6 +2180,7 @@ async def _prepare_chunked_overview_strategy(
     """Build ultra-long-video strategy from 1fps overview chunks."""
     if len(chunk_paths) != len(chunk_plan):
         raise AnalyzerError("超长视频概览切片数量与计划不一致")
+    audit_files = audit_files if audit_files is not None else {}
 
     full_overview_frames = int(math.ceil(duration_sec * _LONG_OVERVIEW_FPS))
     chunk_concurrency = max(1, min(4, int(chunk_concurrency or _CHUNK_ANALYSIS_CONCURRENCY)))
@@ -2062,6 +2250,15 @@ async def _prepare_chunked_overview_strategy(
             plan_item=plan_item,
             intents=intents,
         )
+        _add_artifact(
+            audit_files,
+            f"mini.overview_chunk.{part_index}.prompt",
+            _write_audit_text(
+                audit_dir,
+                f"02-mini/overview-chunks/part-{part_index:03d}-prompt.md",
+                prompt,
+            ),
+        )
         await _call_progress(on_progress, "analyzing_overview_chunk", {
             "part_index": part_index,
             "chunk_count": total,
@@ -2082,10 +2279,20 @@ async def _prepare_chunked_overview_strategy(
         async with lock:
             pieces.append((part_index, call.text.strip()))
             usages.append(call.usage)
+            _add_artifact(
+                audit_files,
+                f"mini.overview_chunk.{part_index}.output",
+                _write_audit_text(
+                    audit_dir,
+                    f"02-mini/overview-chunks/part-{part_index:03d}-output.md",
+                    call.text.strip(),
+                ),
+            )
         await _call_progress(on_progress, "overview_chunk_done", {
             "part_index": part_index,
             "chunk_count": total,
             "text_length": len(call.text),
+            "artifact": audit_files.get(f"mini.overview_chunk.{part_index}.output", ""),
         })
 
     async def process_overview_chunk_guarded(
@@ -2106,6 +2313,23 @@ async def _prepare_chunked_overview_strategy(
         intents=intents,
         overview_pieces=pieces,
     )
+    _add_artifact(
+        audit_files,
+        "mini.chunked_strategy_prompt",
+        _write_audit_text(audit_dir, "02-mini/chunked-strategy-prompt.md", synth_prompt),
+    )
+    _add_artifact(
+        audit_files,
+        "mini.overview_pieces",
+        _write_audit_text(
+            audit_dir,
+            "02-mini/overview-pieces.md",
+            "\n\n".join(
+                f"## part {part_index}\n\n{text}"
+                for part_index, text in sorted(pieces, key=lambda item: item[0])
+            ),
+        ),
+    )
     await _call_progress(on_progress, "synthesizing_overview_strategy", {
         "chunk_count": total,
         "model": strategy_model,
@@ -2116,6 +2340,11 @@ async def _prepare_chunked_overview_strategy(
         prompt=synth_prompt,
         on_progress=on_progress,
         timeout_sec=response_timeout_sec,
+    )
+    _add_artifact(
+        audit_files,
+        "mini.chunked_strategy_raw",
+        _write_audit_text(audit_dir, "02-mini/chunked-strategy-raw.md", synth.text),
     )
     _write_strategy_log("overview_strategy_chunked_synthesized", {
         "chunk_count": total,
@@ -2141,12 +2370,15 @@ async def _analyze_video_chunks(
     full_duration: float,
     source_id: str,
     strategy: Optional[dict[str, Any]],
+    audit_dir: Optional[Path] = None,
+    audit_files: Optional[dict[str, Any]] = None,
     file_active_timeout_sec: int,
     response_timeout_sec: int,
     chunk_concurrency: int = _CHUNK_ANALYSIS_CONCURRENCY,
     on_progress: ProgressCb,
 ) -> dict[str, AnalyzeResult]:
     """Analyze fixed video chunks and return one aggregated result per intent."""
+    audit_files = audit_files if audit_files is not None else {}
     per_intent_texts: dict[str, list[tuple[int, str]]] = {intent: [] for intent in prompts}
     per_intent_usages: dict[str, list[dict[str, Any]]] = {intent: [] for intent in prompts}
     previous_memory_response: dict[str, Optional[str]] = {}
@@ -2185,6 +2417,10 @@ async def _analyze_video_chunks(
             "fps": fps,
             "strategy_confidence": strategy_item.get("confidence"),
             "strategy_fallback": strategy_item.get("fallback_applied"),
+            "strategy_validation_fallback": strategy_item.get("validation_fallback"),
+            "strategy_fps_adjusted": strategy_item.get("fps_adjusted"),
+            "strategy_fps_adjust_reason": strategy_item.get("fps_adjust_reason"),
+            "strategy_lite_brief": str(strategy_item.get("lite_brief") or "")[:300],
         })
         try:
             file_obj = await _upload_with_preprocess(files_client, chunk_path, fps=fps, model=model)
@@ -2220,6 +2456,15 @@ async def _analyze_video_chunks(
                 f"与上一段约重叠 {float(plan_item['overlap_sec']):.1f}s。"
                 "请只分析当前片段，并保留可用于最终合并的结构化要点。"
             )
+            _add_artifact(
+                audit_files,
+                f"lite.{intent}.chunk.{part_index}.prompt",
+                _write_audit_text(
+                    audit_dir,
+                    f"03-lite/{intent}/part-{part_index:03d}-prompt.md",
+                    chunk_prompt,
+                ),
+            )
             await _call_progress(on_progress, "analyzing_chunk", {
                 "part_index": part_index,
                 "chunk_count": total,
@@ -2244,6 +2489,16 @@ async def _analyze_video_chunks(
                 f"({float(plan_item['start_sec']):.1f}s - {float(plan_item['end_sec']):.1f}s)\n\n"
                 f"{call.text.strip()}"
             )
+            output_artifact = _write_audit_text(
+                audit_dir,
+                f"03-lite/{intent}/part-{part_index:03d}-output.md",
+                text_piece,
+            )
+            _add_artifact(
+                audit_files,
+                f"lite.{intent}.chunk.{part_index}.output",
+                output_artifact,
+            )
             chunk_meta = {
                 "part_index": part_index,
                 "start_sec": plan_item["start_sec"],
@@ -2258,7 +2513,12 @@ async def _analyze_video_chunks(
                 "strategy_scores": strategy_item.get("scores"),
                 "strategy_fallback_applied": strategy_item.get("fallback_applied"),
                 "strategy_fallback_reason": strategy_item.get("fallback_reason"),
+                "strategy_validation_fallback": strategy_item.get("validation_fallback"),
+                "strategy_fps_adjusted": strategy_item.get("fps_adjusted"),
+                "strategy_fps_adjust_reason": strategy_item.get("fps_adjust_reason"),
+                "strategy_lite_brief": strategy_item.get("lite_brief"),
                 "strategy_focus": strategy_item.get("focus"),
+                "audit_artifact": output_artifact,
                 "usage": call.usage,
             }
             async with lock:
@@ -2270,6 +2530,7 @@ async def _analyze_video_chunks(
                 "chunk_count": total,
                 "intent": intent,
                 "text_length": len(call.text),
+                "artifact": output_artifact,
             })
 
     async def process_chunk_guarded(chunk_path: Path, plan_item: dict[str, float | int]) -> None:
@@ -2314,6 +2575,15 @@ async def _analyze_video_chunks(
             f"原始分析指令：\n{prompts[intent]}\n\n"
             f"分片结果：\n{body}"
         )
+        _add_artifact(
+            audit_files,
+            f"lite.{intent}.synthesis_prompt",
+            _write_audit_text(
+                audit_dir,
+                f"04-synthesis/{intent}-synthesis-prompt.md",
+                synth_prompt,
+            ),
+        )
         await _call_progress(on_progress, "synthesizing_chunks", {
             "chunk_count": total,
             "intent": intent,
@@ -2328,6 +2598,15 @@ async def _analyze_video_chunks(
         )
         final_response_id = synth.response_id or previous_memory_response.get(intent)
         final_usage = _combine_usage(per_intent_usages[intent] + [synth.usage])
+        _add_artifact(
+            audit_files,
+            f"lite.{intent}.synthesis_output",
+            _write_audit_text(
+                audit_dir,
+                f"04-synthesis/{intent}-synthesis-output.md",
+                synth.text.strip() or body,
+            ),
+        )
         save_response_memory(
             media_type="douyin_video",
             source_id=source_id,
@@ -2361,6 +2640,7 @@ async def _analyze_video_chunks(
             chunked=True,
             chunk_count=total,
             chunks=ordered_chunks,
+            audit_artifacts={"dir": _audit_rel(audit_dir) if audit_dir else "", "files": audit_files},
         )
     return results
 

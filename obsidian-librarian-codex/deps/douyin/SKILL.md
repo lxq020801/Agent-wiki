@@ -96,15 +96,20 @@ The WebSocket control server writes:
   overviews into the same global strategy JSON, then continue through the normal
   long-video precision pass. This means duration scales by chunk count; the
   practical limits are still file size, download time, task timeout, and model
-  context windows. The overview extracts rough content and a per-chunk strategy,
-  then
+  context windows. The overview extracts rough content, information carriers,
+  and a `lite_brief` for the main analyzer model; fps is for visual/OCR/action
+  risk, while high concept density should be handled in the Lite prompt rather
+  than automatically raising fps. Then
   240s chunks with 10s overlap are uploaded/analyzed independently at `2-5fps`
   by the main analyzer model with default 2-way concurrency, configurable from
   1 to 4. Invalid JSON, missing segments, or missing required fields may be
-  repaired once by the same strategy model via `previous_response_id`; missing
-  evidence, low confidence, or high low-fps risk must fall back conservatively
-  toward `5fps`. Text-only Responses then synthesizes the final asset body from
-  the overview and chunk results.
+  repaired once by the same strategy model via `previous_response_id`; structural
+  fallback and fps adjustment are tracked separately. Text-only Responses then
+  synthesizes the final asset body from the overview and chunk results.
+- Video ingest writes inspectable intermediate artifacts under
+  `~/.obsidian-librarian/run-artifacts/{task_id}/`: mini chunk overview
+  prompts/outputs, strategy synthesis and repair artifacts, Lite chunk
+  prompts/outputs, and final synthesis prompt/output.
 - Strategy fallbacks and JSON repair results are logged to
   `~/.obsidian-librarian/logs/video-strategy-events.jsonl` without API keys,
   Cookies, Bearer tokens, or `response_id`.

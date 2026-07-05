@@ -160,6 +160,14 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 - `synthesizing_done`
 - `derived_candidates_ready`
 
+长视频状态会额外带：
+
+- `audit_artifacts`：本次任务的审计产物目录和文件索引，实际文件位于 `~/.obsidian-librarian/run-artifacts/{task_id}/`
+- `overview_strategy_decided.fps_plan[].validation_fallback`：JSON/结构问题导致的兜底
+- `overview_strategy_decided.fps_plan[].fps_adjusted`：程序根据置信度、安全帧数或视觉证据规则调整 fps
+- `overview_strategy_decided.fps_plan[].lite_brief`：mini 给 Lite 的本段精拆说明摘要
+- `chunk_progress[*].chunk_done.artifact`：Lite 分片输出文件
+
 ```json
 {
   "type": "task_request",

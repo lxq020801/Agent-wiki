@@ -1668,6 +1668,7 @@ def test_long_video_strategy_accepts_top_level_segments_and_partial_fallback() -
                 "risk_if_low_fps": 2,
             },
             "focus": ["结论"],
+            "lite_brief": "重点提取口播结论，画面稳定，不要把重复画面当作新信息。",
             "risk_flags": [],
             "why_not_lower_fps": "需要保留字幕细节",
         }
@@ -1693,7 +1694,7 @@ def test_long_video_strategy_accepts_top_level_segments_and_partial_fallback() -
             "overview": {"summary": "部分策略字段坏。", "timeline": []},
             "segments": [
                 segment(plan[0]),
-                segment(plan[1], evidence=False),
+                {k: v for k, v in segment(plan[1]).items() if k != "lite_brief"},
                 segment(plan[2]),
             ],
         }, ensure_ascii=False),
@@ -1704,6 +1705,7 @@ def test_long_video_strategy_accepts_top_level_segments_and_partial_fallback() -
     assert partial["chunks"][0]["fallback_applied"] is False
     assert partial["chunks"][1]["recommended_fps"] == 5.0
     assert partial["chunks"][1]["fallback_applied"] is True
+    assert partial["chunks"][1]["validation_fallback"] is True
     assert "必填字段" in partial["chunks"][1]["fallback_reason"]
     assert partial["chunks"][2]["recommended_fps"] == 3.0
 
@@ -1751,6 +1753,7 @@ def test_long_video_strategy_validation_falls_back_to_5fps() -> None:
                         },
                         "evidence": ["固定机位，画面变化低"],
                         "focus": ["核心结论"],
+                        "lite_brief": "重点理解口播观点和结论，画面只是低变化背景。",
                         "risk_flags": [],
                         "why_not_lower_fps": "2fps 已能覆盖慢变化画面",
                     },
@@ -1771,6 +1774,7 @@ def test_long_video_strategy_validation_falls_back_to_5fps() -> None:
                         },
                         "evidence": ["多处界面操作"],
                         "focus": ["菜单和按钮"],
+                        "lite_brief": "重点捕捉界面菜单、按钮和操作顺序，避免漏掉短暂视觉步骤。",
                         "risk_flags": ["低 fps 可能漏步骤"],
                         "why_not_lower_fps": "操作密集",
                     },
@@ -1791,6 +1795,7 @@ def test_long_video_strategy_validation_falls_back_to_5fps() -> None:
                         },
                         "evidence": ["字幕较清楚"],
                         "focus": ["结论"],
+                        "lite_brief": "重点提取收尾结论和字幕里的关键词。",
                         "risk_flags": [],
                         "why_not_lower_fps": "需要确认字幕",
                     },
@@ -1805,6 +1810,60 @@ def test_long_video_strategy_validation_falls_back_to_5fps() -> None:
     assert valid["chunks"][1]["recommended_fps"] == 5.0
     assert valid["chunks"][1]["fallback_applied"] is True
     assert valid["chunks"][2]["recommended_fps"] == 4.0
+
+
+def test_long_video_strategy_does_not_raise_fps_for_concepts_only() -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    plan = analyzer._chunk_plan(601)
+    strategy = analyzer._normalize_long_video_strategy(
+        json.dumps({
+            "overview": {"summary": "静态长访谈，观点密度高。", "timeline": []},
+            "strategy": {
+                "global_notes": "全程固定机位，主要靠口播承载信息。",
+                "segments": [
+                    {
+                        "part_index": item["part_index"],
+                        "start_sec": item["start_sec"],
+                        "end_sec": item["end_sec"],
+                        "rough_summary": "嘉宾密集输出产业观点。",
+                        "recommended_fps": 5,
+                        "confidence": 0.92,
+                        "information_carriers": {
+                            "audio_argument": 5,
+                            "subtitle_ocr": 1,
+                            "visual_scene": 1,
+                            "operation_steps": 0,
+                            "motion_detail": 0,
+                            "structure_context": 5,
+                        },
+                        "scores": {
+                            "visual_change": 1,
+                            "ocr_subtitle_density": 1,
+                            "operation_density": 0,
+                            "motion_detail": 0,
+                            "concept_density": 5,
+                            "risk_if_low_fps": 5,
+                        },
+                        "lite_brief": "画面重复，核心信息来自口播论证。Lite 应重点提取观点链、数字和待验证事实。",
+                        "evidence": ["固定机位坐着说话"],
+                        "risk_flags": [],
+                        "why_not_lower_fps": "观点很密，但视觉风险低。",
+                    }
+                    for item in plan
+                ],
+            },
+        }, ensure_ascii=False),
+        plan,
+    )
+
+    assert strategy["ok"] is True
+    assert all(item["recommended_fps"] == 3.0 for item in strategy["chunks"])
+    assert all(item["fps_adjusted"] is True for item in strategy["chunks"])
+    assert all("概念密度" in item["fps_adjust_reason"] for item in strategy["chunks"])
 
 
 def test_long_video_strategy_missing_required_fields_requests_repair() -> None:
@@ -1899,6 +1958,7 @@ def test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp: Path)
                         },
                         "evidence": ["画面稳定"],
                         "focus": ["结论"],
+                        "lite_brief": "画面稳定，重点提取口播结论和关键事实。",
                         "risk_flags": [],
                         "why_not_lower_fps": "低风险",
                     }
@@ -2024,6 +2084,7 @@ def test_prepare_long_video_strategy_chunks_unsafe_full_overview(tmp: Path) -> N
                         },
                         "evidence": ["粗概览显示画面稳定"],
                         "focus": ["口播结论"],
+                        "lite_brief": "画面稳定，核心信息来自口播和字幕，重点提取观点链和关键事实。",
                         "risk_flags": [],
                         "why_not_lower_fps": "低风险",
                     }
@@ -2173,6 +2234,7 @@ def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
                 "rough_summary": "背景说明",
                 "evidence": ["固定画面"],
                 "focus": ["结论"],
+                "lite_brief": "重点理解背景结论，画面稳定。",
                 "risk_flags": [],
                 "why_not_lower_fps": "2fps 足够",
                 "fallback_applied": False,
@@ -2186,6 +2248,7 @@ def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
                 "rough_summary": "密集操作",
                 "evidence": ["多处点击"],
                 "focus": ["按钮和菜单"],
+                "lite_brief": "重点捕捉界面菜单、按钮和操作顺序，避免漏掉短暂视觉步骤。",
                 "risk_flags": ["可能漏步骤"],
                 "why_not_lower_fps": "操作密集",
                 "fallback_applied": False,
@@ -2195,6 +2258,8 @@ def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
     }
     uploads = []
     prompts = []
+    audit_dir = tmp / "audit"
+    audit_files = {}
 
     async def fake_upload(client, path, *, fps, model):
         if Path(path).name == "part-001.mp4":
@@ -2241,6 +2306,8 @@ def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
             full_duration=470.0,
             source_id="aweme-strategy",
             strategy=strategy,
+            audit_dir=audit_dir,
+            audit_files=audit_files,
             file_active_timeout_sec=120,
             response_timeout_sec=900,
             on_progress=None,
@@ -2262,6 +2329,12 @@ def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
     assert result.actual_frames_estimate == 1680
     assert [item["fps"] for item in result.chunks] == [2.0, 5.0]
     assert result.chunks[1]["strategy_focus"] == ["按钮和菜单"]
+    assert result.chunks[1]["strategy_lite_brief"] == "重点捕捉界面菜单、按钮和操作顺序，避免漏掉短暂视觉步骤。"
+    assert result.audit_artifacts["dir"].endswith("audit")
+    assert (audit_dir / "03-lite/knowledge_ingest/part-001-prompt.md").exists()
+    assert (audit_dir / "03-lite/knowledge_ingest/part-001-output.md").exists()
+    assert (audit_dir / "04-synthesis/knowledge_ingest-synthesis-prompt.md").exists()
+    assert (audit_dir / "04-synthesis/knowledge_ingest-synthesis-output.md").exists()
     assert all("response_id" not in item for item in result.chunks)
 
 
@@ -3794,6 +3867,7 @@ def main() -> int:
         test_status_writer_redacts_sensitive_fields(tmp)
         test_long_video_strategy_accepts_top_level_segments_and_partial_fallback()
         test_long_video_strategy_validation_falls_back_to_5fps()
+        test_long_video_strategy_does_not_raise_fps_for_concepts_only()
         test_long_video_strategy_missing_required_fields_requests_repair()
         test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp)
         test_prepare_long_video_strategy_chunks_unsafe_full_overview(tmp)

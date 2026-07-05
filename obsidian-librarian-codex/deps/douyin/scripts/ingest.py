@@ -337,6 +337,9 @@ video_path: "{video_path}"
 analyzed_at: "{analyzed_at}"
 file_id: "{file_id}"
 fps_used: {fps_used}
+chunked: {chunked}
+chunk_count: {chunk_count}
+audit_artifacts_dir: "{audit_artifacts_dir}"
 quality: "{quality}"
 model: "{model}"
 target_frames: {target_frames}
@@ -375,8 +378,11 @@ cost_rmb_estimate: {cost_rmb_estimate}
 ## 分析元数据
 - 模型：{model}
 - 质量档：{quality}
-- fps：{fps_used}
+- 最高精拆 fps：{fps_used}
+- 分片：{chunked_text}
+- 分片策略：{chunk_strategy_summary}
 - 估算帧数：{actual_frames_estimate}
+- 审计产物目录：`{audit_artifacts_dir}`
 - 成本估算：{cost_rmb_estimate} RMB
 
 ## 不确定/待验证
@@ -531,6 +537,42 @@ def _summary_from_text(text: str, title: str) -> str:
             return line[:77] + "..."
         return line
     return (title[:77] + "...") if len(title) > 80 else title
+
+
+def _audit_artifacts_dir(result: Any) -> str:
+    artifacts = getattr(result, "audit_artifacts", {}) or {}
+    if isinstance(artifacts, dict):
+        return str(artifacts.get("dir") or "")
+    return ""
+
+
+def _chunk_strategy_summary(result: Any) -> str:
+    chunks = getattr(result, "chunks", []) or []
+    if not chunks:
+        fps = getattr(result, "fps_used", "")
+        return f"单文件分析，fps={fps}" if fps != "" else "单文件分析"
+    pieces: list[str] = []
+    for item in chunks:
+        if not isinstance(item, dict):
+            continue
+        part = item.get("part_index")
+        fps = item.get("fps")
+        start = item.get("start_sec")
+        end = item.get("end_sec")
+        adjusted = item.get("strategy_fps_adjusted")
+        validation = item.get("strategy_validation_fallback")
+        flags = []
+        if validation:
+            flags.append("结构兜底")
+        elif adjusted:
+            flags.append("fps调整")
+        suffix = f"（{'，'.join(flags)}）" if flags else ""
+        try:
+            time_range = f"{float(start):.0f}-{float(end):.0f}s"
+        except (TypeError, ValueError):
+            time_range = "?s"
+        pieces.append(f"part {part}: {time_range}, {fps}fps{suffix}")
+    return "；".join(pieces)
 
 
 def _combine_costs(costs: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -841,6 +883,15 @@ def write_to_vault(
         analyzed_at=datetime.now().isoformat(timespec="seconds"),
         file_id=result.file_id,
         fps_used=result.fps_used,
+        chunked="true" if getattr(result, "chunked", False) else "false",
+        chunk_count=getattr(result, "chunk_count", 1) or 1,
+        chunked_text=(
+            f"是，{getattr(result, 'chunk_count', 1) or 1} 段"
+            if getattr(result, "chunked", False)
+            else "否"
+        ),
+        chunk_strategy_summary=_chunk_strategy_summary(result),
+        audit_artifacts_dir=_yaml_escape(_audit_artifacts_dir(result)),
         quality=result.quality,
         model=result.model,
         target_frames=result.target_frames,
@@ -1148,6 +1199,7 @@ async def run_task(
                 ),
             },
             source_id=meta.aweme_id,
+            audit_id=task_id,
             file_active_timeout_sec=config.file_active_timeout_sec,
             response_timeout_sec=config.response_timeout_sec,
             chunk_concurrency=config.chunk_concurrency,
@@ -1178,6 +1230,7 @@ async def run_task(
         chunked=primary_chunked,
         chunk_count=primary_chunk_count,
         ingest_intents=list(intents),
+        audit_artifacts=getattr(primary_result, "audit_artifacts", {}),
     )
 
     # ── 阶段 3：成本估算 ──
@@ -1231,6 +1284,7 @@ async def run_task(
                 "git_status": git_status,
                 "derived_tasks": public_derived_tasks(derived_decisions.get(intent, {})),
                 "derived_summary": derived_decisions.get(intent, {}).get("counts", {}),
+                "audit_artifacts": getattr(results[intent], "audit_artifacts", {}),
             })
     except Exception as e:
         raise IngestError("vault_write_error", str(e)) from e
@@ -1261,6 +1315,8 @@ async def run_task(
             "truncated": primary_result.truncated,
             "chunked": primary_chunked,
             "chunk_count": primary_chunk_count,
+            "chunks": getattr(primary_result, "chunks", []),
+            "audit_artifacts": getattr(primary_result, "audit_artifacts", {}),
         },
         "cost": total_cost,
         "derived_tasks": public_derived_tasks(primary_derived),
