@@ -159,6 +159,102 @@ def test_douyin_share_text_url_extraction() -> None:
     ) == "https://www.douyin.com/share/note/7654771261239701883/?foo=bar"
 
 
+def test_download_video_resumes_partial_file(tmp_path: Path) -> None:
+    import asyncio
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import downloader
+
+    requests: list[dict[str, str]] = []
+
+    class FakeHTTPError(Exception):
+        pass
+
+    class FakeStream:
+        def __init__(
+            self,
+            status_code: int,
+            headers: dict[str, str],
+            chunks: list[bytes],
+            *,
+            fail_after_chunks: bool = False,
+        ) -> None:
+            self.status_code = status_code
+            self.headers = headers
+            self.chunks = chunks
+            self.fail_after_chunks = fail_after_chunks
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_bytes(self, chunk_size: int):
+            for chunk in self.chunks:
+                yield chunk
+            if self.fail_after_chunks:
+                raise FakeHTTPError("peer closed connection without sending complete message body")
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method: str, url: str, headers: dict[str, str]):
+            requests.append(dict(headers))
+            if len(requests) == 1:
+                return FakeStream(
+                    200,
+                    {"content-length": "6"},
+                    [b"abc"],
+                    fail_after_chunks=True,
+                )
+            return FakeStream(
+                206,
+                {"content-length": "3", "content-range": "bytes 3-5/6"},
+                [b"def"],
+            )
+
+    fake_httpx = SimpleNamespace(
+        AsyncClient=FakeAsyncClient,
+        Timeout=lambda *args, **kwargs: object(),
+        HTTPError=FakeHTTPError,
+    )
+    missing = object()
+    old_httpx = sys.modules.get("httpx", missing)
+    sys.modules["httpx"] = fake_httpx
+    try:
+        meta = downloader.VideoMeta(
+            aweme_id="1234567890123456789",
+            title="续传测试",
+            author="author",
+            author_sec_uid="sec",
+            duration_sec=1,
+            cover_url="",
+            play_url="https://example.test/video.mp4",
+            source_url="https://example.test/share",
+            raw={},
+        )
+
+        out = asyncio.run(downloader.download_video(meta, tmp_path, timeout=1))
+    finally:
+        if old_httpx is missing:
+            sys.modules.pop("httpx", None)
+        else:
+            sys.modules["httpx"] = old_httpx
+
+    assert out.read_bytes() == b"abcdef"
+    assert not out.with_suffix(".mp4.part").exists()
+    assert requests[1]["Range"] == "bytes=3-"
+
+
 def test_ingest_url_preserves_share_text_argument() -> None:
     import importlib.util
     import subprocess
@@ -2428,6 +2524,7 @@ def main() -> int:
         test_config_loader_rejects_invalid_ark_endpoints(tmp)
         test_netscape_cookie_conversion(tmp)
         test_douyin_share_text_url_extraction()
+        test_download_video_resumes_partial_file(tmp)
         test_ingest_url_preserves_share_text_argument()
         test_vault_write_schema(tmp)
         test_image_post_metadata_detection_from_image_infos()

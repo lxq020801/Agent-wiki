@@ -359,6 +359,25 @@ def _slugify(text: str, max_len: int = 60) -> str:
     return t or "untitled"
 
 
+def _content_length(headers) -> int:
+    try:
+        return int(headers.get("content-length", "0") or 0)
+    except Exception:
+        return 0
+
+
+def _content_range_total(value: str | None) -> int:
+    if not value:
+        return 0
+    match = re.search(r"/(\d+)\s*$", value)
+    if not match:
+        return 0
+    try:
+        return int(match.group(1))
+    except Exception:
+        return 0
+
+
 async def download_video(
     meta: VideoMeta,
     out_dir: Path,
@@ -393,35 +412,80 @@ async def download_video(
     import httpx
 
     tmp_path = out_path.with_suffix(".mp4.part")
+    max_attempts = 4
+    completed = False
+    last_error = ""
+
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(timeout, read=timeout),
         follow_redirects=True,
     ) as client:
-        try:
-            async with client.stream("GET", meta.play_url, headers=headers) as resp:
-                if resp.status_code == 404:
-                    raise VideoNotFoundError(f"CDN 返回 404：{meta.play_url}")
-                if resp.status_code >= 400:
-                    raise NetworkError(
-                        f"CDN HTTP {resp.status_code}：{meta.play_url}"
-                    )
+        for attempt in range(1, max_attempts + 1):
+            resume_from = tmp_path.stat().st_size if tmp_path.exists() else 0
+            request_headers = dict(headers)
+            if resume_from > 0:
+                request_headers["Range"] = f"bytes={resume_from}-"
 
-                total = int(resp.headers.get("content-length", "0"))
-                got = 0
-                with tmp_path.open("wb") as f:
-                    async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
-                        f.write(chunk)
-                        got += len(chunk)
-                        if progress_cb:
-                            try:
-                                ret = progress_cb(got, total)
-                                if asyncio.iscoroutine(ret):
-                                    await ret
-                            except Exception:
-                                pass
-        except httpx.HTTPError as e:
-            tmp_path.unlink(missing_ok=True)
-            raise NetworkError(f"下载失败：{e}") from e
+            try:
+                async with client.stream("GET", meta.play_url, headers=request_headers) as resp:
+                    if resp.status_code == 404:
+                        tmp_path.unlink(missing_ok=True)
+                        raise VideoNotFoundError(f"CDN 返回 404：{meta.play_url}")
+                    if resp.status_code == 416 and resume_from > 0:
+                        total = _content_range_total(resp.headers.get("content-range"))
+                        if total and resume_from >= total:
+                            completed = True
+                            break
+                        tmp_path.unlink(missing_ok=True)
+                        last_error = f"CDN 拒绝续传，已清理不完整临时文件：HTTP 416"
+                        continue
+                    if resp.status_code >= 400:
+                        raise NetworkError(
+                            f"CDN HTTP {resp.status_code}：{meta.play_url}"
+                        )
+
+                    if resume_from > 0 and resp.status_code == 206:
+                        mode = "ab"
+                        got = resume_from
+                        total = _content_range_total(resp.headers.get("content-range"))
+                        if not total:
+                            total = resume_from + _content_length(resp.headers)
+                    else:
+                        # CDN 忽略 Range 时必须重下，避免把完整响应追加到旧 .part 后面。
+                        mode = "wb"
+                        got = 0
+                        total = _content_length(resp.headers)
+
+                    with tmp_path.open(mode) as f:
+                        async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
+                            f.write(chunk)
+                            got += len(chunk)
+                            if progress_cb:
+                                try:
+                                    ret = progress_cb(got, total)
+                                    if asyncio.iscoroutine(ret):
+                                        await ret
+                                except Exception:
+                                    pass
+
+                    size = tmp_path.stat().st_size if tmp_path.exists() else 0
+                    if total and size < total:
+                        last_error = f"下载不完整：已下载 {size}/{total} bytes"
+                        if attempt < max_attempts:
+                            await asyncio.sleep(min(2 ** (attempt - 1), 4))
+                            continue
+                        raise NetworkError(last_error)
+
+                    completed = True
+                    break
+            except httpx.HTTPError as e:
+                last_error = str(e)
+                if attempt >= max_attempts:
+                    raise NetworkError(f"下载失败：{e}") from e
+                await asyncio.sleep(min(2 ** (attempt - 1), 4))
+
+    if not completed:
+        raise NetworkError(f"下载失败：{last_error or '超过最大重试次数'}")
 
     if not tmp_path.exists() or tmp_path.stat().st_size == 0:
         tmp_path.unlink(missing_ok=True)
