@@ -2370,6 +2370,201 @@ def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
     assert all("response_id" not in item for item in result.chunks)
 
 
+def test_chunk_analysis_retries_transient_stream_failure(tmp: Path) -> None:
+    import asyncio
+    import sys
+
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "chunk-retry-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    chunk_paths = [tmp / "part-001.mp4", tmp / "part-002.mp4"]
+    for path in chunk_paths:
+        path.write_bytes(b"fake")
+    plan = [
+        {"part_index": 1, "start_sec": 0.0, "end_sec": 240.0, "overlap_sec": 0.0},
+        {"part_index": 2, "start_sec": 230.0, "end_sec": 470.0, "overlap_sec": 10.0},
+    ]
+    audit_dir = tmp / "retry-audit"
+    progress_events = []
+    attempts: dict[int, int] = {}
+
+    async def fake_upload(client, path, *, fps, model):
+        return SimpleNamespace(id=f"file-{Path(path).stem}")
+
+    async def fake_wait(*args, **kwargs):
+        return SimpleNamespace(status="active")
+
+    async def fake_stream(client, *, model, file_id, prompt, on_progress, previous_response_id=None, timeout_sec=None):
+        part = 1 if "第 1/2" in prompt else 2
+        attempts[part] = attempts.get(part, 0) + 1
+        if part == 1 and attempts[part] == 1:
+            raise analyzer.APIError(
+                "Responses API 调用失败: peer closed connection without sending complete message body "
+                "(incomplete chunked read)"
+            )
+        return analyzer.ResponseCallResult(
+            text=f"分片 {part} 分析结果",
+            usage={"total_tokens": part},
+            response_id=f"resp-{part}",
+        )
+
+    async def fake_text(client, *, model, prompt, on_progress, previous_response_id=None, timeout_sec=None):
+        return analyzer.ResponseCallResult(
+            text="最终汇总",
+            usage={"total_tokens": 10},
+            response_id="resp-final",
+        )
+
+    async def fake_progress(stage: str, info: dict) -> None:
+        progress_events.append((stage, dict(info)))
+
+    old_upload = analyzer._upload_with_preprocess
+    old_wait = analyzer._wait_for_active
+    old_stream = analyzer._stream_responses
+    old_text = analyzer._call_text_responses
+    old_delay = analyzer._RESPONSE_RETRY_BASE_DELAY_SEC
+    try:
+        analyzer._upload_with_preprocess = fake_upload
+        analyzer._wait_for_active = fake_wait
+        analyzer._stream_responses = fake_stream
+        analyzer._call_text_responses = fake_text
+        analyzer._RESPONSE_RETRY_BASE_DELAY_SEC = 0
+        results = asyncio.run(analyzer._analyze_video_chunks(
+            chunk_paths,
+            plan,
+            {"knowledge_ingest": "基础拆解 prompt"},
+            files_client=SimpleNamespace(),
+            responses_client=SimpleNamespace(),
+            model="doubao-seed-2-0-lite-260428",
+            quality="quality",
+            full_duration=470.0,
+            source_id="aweme-retry",
+            strategy={"ok": True, "chunks": []},
+            audit_dir=audit_dir,
+            audit_files={},
+            file_active_timeout_sec=120,
+            response_timeout_sec=900,
+            chunk_concurrency=1,
+            on_progress=fake_progress,
+        ))
+    finally:
+        analyzer._upload_with_preprocess = old_upload
+        analyzer._wait_for_active = old_wait
+        analyzer._stream_responses = old_stream
+        analyzer._call_text_responses = old_text
+        analyzer._RESPONSE_RETRY_BASE_DELAY_SEC = old_delay
+
+    assert attempts == {1: 2, 2: 1}
+    assert any(stage == "chunk_retrying" and info["part_index"] == 1 for stage, info in progress_events)
+    assert (audit_dir / "03-lite/knowledge_ingest/part-001-output.md").exists()
+    assert (audit_dir / "03-lite/knowledge_ingest/part-001-meta.json").exists()
+    result = results["knowledge_ingest"]
+    assert result.text == "最终汇总"
+    assert [item["reused_from_artifact"] for item in result.chunks] == [False, False]
+
+
+def test_chunk_analysis_reuses_existing_chunk_artifact_on_rerun(tmp: Path) -> None:
+    import asyncio
+    import sys
+
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "chunk-resume-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    chunk_paths = [tmp / "part-001.mp4", tmp / "part-002.mp4"]
+    for path in chunk_paths:
+        path.write_bytes(b"fake")
+    plan = [
+        {"part_index": 1, "start_sec": 0.0, "end_sec": 240.0, "overlap_sec": 0.0},
+        {"part_index": 2, "start_sec": 230.0, "end_sec": 470.0, "overlap_sec": 10.0},
+    ]
+    audit_dir = tmp / "resume-audit"
+    cached_output = audit_dir / "03-lite" / "knowledge_ingest" / "part-001-output.md"
+    cached_output.parent.mkdir(parents=True)
+    cached_output.write_text(
+        "## 分片 1/2 (0.0s - 240.0s)\n\n"
+        "这是第一次运行已经完成的分片分析结果，长度足够用于断点续跑复用。"
+        "这里补充更多正文内容，模拟真实 Lite 分片输出里的摘要、核心知识、证据和待验证点，"
+        "避免把测试缓存误判为一次中断后的残缺文件。",
+        encoding="utf-8",
+    )
+    uploads = []
+    stream_prompts = []
+    synthesis_prompts = []
+    progress_events = []
+
+    async def fake_upload(client, path, *, fps, model):
+        uploads.append(Path(path).name)
+        return SimpleNamespace(id=f"file-{Path(path).stem}")
+
+    async def fake_wait(*args, **kwargs):
+        return SimpleNamespace(status="active")
+
+    async def fake_stream(client, *, model, file_id, prompt, on_progress, previous_response_id=None, timeout_sec=None):
+        stream_prompts.append(prompt)
+        if "第 1/2" in prompt:
+            raise AssertionError("cached part 1 must not be analyzed again")
+        return analyzer.ResponseCallResult(
+            text="分片 2 新分析结果",
+            usage={"total_tokens": 2},
+            response_id="resp-2",
+        )
+
+    async def fake_text(client, *, model, prompt, on_progress, previous_response_id=None, timeout_sec=None):
+        synthesis_prompts.append(prompt)
+        return analyzer.ResponseCallResult(
+            text="最终汇总",
+            usage={"total_tokens": 10},
+            response_id="resp-final",
+        )
+
+    async def fake_progress(stage: str, info: dict) -> None:
+        progress_events.append((stage, dict(info)))
+
+    old_upload = analyzer._upload_with_preprocess
+    old_wait = analyzer._wait_for_active
+    old_stream = analyzer._stream_responses
+    old_text = analyzer._call_text_responses
+    try:
+        analyzer._upload_with_preprocess = fake_upload
+        analyzer._wait_for_active = fake_wait
+        analyzer._stream_responses = fake_stream
+        analyzer._call_text_responses = fake_text
+        results = asyncio.run(analyzer._analyze_video_chunks(
+            chunk_paths,
+            plan,
+            {"knowledge_ingest": "基础拆解 prompt"},
+            files_client=SimpleNamespace(),
+            responses_client=SimpleNamespace(),
+            model="doubao-seed-2-0-lite-260428",
+            quality="quality",
+            full_duration=470.0,
+            source_id="aweme-resume",
+            strategy={"ok": True, "chunks": []},
+            audit_dir=audit_dir,
+            audit_files={},
+            file_active_timeout_sec=120,
+            response_timeout_sec=900,
+            chunk_concurrency=1,
+            on_progress=fake_progress,
+        ))
+    finally:
+        analyzer._upload_with_preprocess = old_upload
+        analyzer._wait_for_active = old_wait
+        analyzer._stream_responses = old_stream
+        analyzer._call_text_responses = old_text
+
+    assert uploads == ["part-002.mp4"]
+    assert len(stream_prompts) == 1
+    assert "第 2/2" in stream_prompts[0]
+    assert "第一次运行已经完成的分片分析结果" in synthesis_prompts[0]
+    assert any(stage == "chunk_reused" and info["part_index"] == 1 for stage, info in progress_events)
+    result = results["knowledge_ingest"]
+    assert [item["reused_from_artifact"] for item in result.chunks] == [True, False]
+    assert result.chunks[0]["file_id"] == "reused-from-artifact"
+
+
 def test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp: Path) -> None:
     import asyncio
     import sys
@@ -3936,6 +4131,8 @@ def main() -> int:
         test_prepare_long_video_strategy_chunks_unsafe_full_overview(tmp)
         test_strategy_log_redacts_sensitive_values(tmp)
         test_chunk_analysis_uses_strategy_fps_and_context(tmp)
+        test_chunk_analysis_retries_transient_stream_failure(tmp)
+        test_chunk_analysis_reuses_existing_chunk_artifact_on_rerun(tmp)
         test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp)
         test_websocket_config_writer_rejects_agent_plan_payload_key(tmp)
         test_websocket_config_writer_rejects_invalid_explicit_endpoints(tmp)

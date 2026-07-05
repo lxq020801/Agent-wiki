@@ -216,6 +216,8 @@ _FRAMES_SAFE_TARGET = 1250
 _FPS_MIN = 0.2
 _FPS_MAX = 5.0
 _TRUSTED_ARK_HOSTS = {"ark.cn-beijing.volces.com"}
+_RESPONSE_RETRY_MAX_ATTEMPTS = 3
+_RESPONSE_RETRY_BASE_DELAY_SEC = 1.2
 
 
 def calc_fps(
@@ -364,6 +366,43 @@ def _add_artifact(artifacts: dict[str, Any], key: str, path: str) -> None:
         artifacts[key] = path
 
 
+def _chunk_output_rel_path(intent: str, part_index: int) -> str:
+    return f"03-lite/{intent}/part-{part_index:03d}-output.md"
+
+
+def _chunk_meta_rel_path(intent: str, part_index: int) -> str:
+    return f"03-lite/{intent}/part-{part_index:03d}-meta.json"
+
+
+def _cached_chunk_output(
+    audit_dir: Optional[Path],
+    *,
+    intent: str,
+    part_index: int,
+    prompt_hash: str,
+) -> tuple[str, str] | None:
+    if audit_dir is None:
+        return None
+    output_path = audit_dir / _chunk_output_rel_path(intent, part_index)
+    if not output_path.exists():
+        return None
+    meta_path = audit_dir / _chunk_meta_rel_path(intent, part_index)
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+        if meta.get("prompt_hash") and meta.get("prompt_hash") != prompt_hash:
+            return None
+    try:
+        text = output_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if len(text) < 80 or not text.startswith("## 分片"):
+        return None
+    return text, _audit_rel(output_path)
+
+
 def _response_memory_dir() -> Path:
     return _runtime_root() / "responses-memory"
 
@@ -496,6 +535,80 @@ def _as_response_call_result(value: Any) -> ResponseCallResult:
         response_id = value[2] if len(value) > 2 and isinstance(value[2], str) else None
         return ResponseCallResult(text=str(text or ""), usage=usage, response_id=response_id)
     return ResponseCallResult(text=str(value or ""))
+
+
+def _is_retryable_response_error(exc: BaseException) -> bool:
+    if isinstance(exc, ResponseTimeoutError):
+        return True
+    if not isinstance(exc, APIError):
+        return False
+    msg = str(exc).lower()
+    non_retry_markers = (
+        "invalidparameter",
+        "badrequest",
+        "error code: 400",
+        "type is not video",
+        "unsupported",
+        "permission",
+        "unauthorized",
+        "401",
+        "403",
+    )
+    if any(marker in msg for marker in non_retry_markers):
+        return False
+    retry_markers = (
+        "incomplete chunked read",
+        "peer closed connection",
+        "remoteprotocolerror",
+        "connection reset",
+        "connection aborted",
+        "server disconnected",
+        "readerror",
+        "timeout",
+        "timed out",
+        "temporarily",
+        "rate limit",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+    )
+    return any(marker in msg for marker in retry_markers)
+
+
+async def _retry_response_call(
+    call_factory: Callable[[], Awaitable[Any]],
+    *,
+    label: str,
+    progress_stage: str,
+    on_progress: ProgressCb,
+    context: dict[str, Any],
+    max_attempts: int = _RESPONSE_RETRY_MAX_ATTEMPTS,
+) -> ResponseCallResult:
+    attempts = max(1, int(max_attempts or 1))
+    for attempt in range(1, attempts + 1):
+        try:
+            return _as_response_call_result(await call_factory())
+        except (APIError, ResponseTimeoutError) as exc:
+            if attempt >= attempts or not _is_retryable_response_error(exc):
+                raise
+            delay = min(
+                _RESPONSE_RETRY_BASE_DELAY_SEC * (2 ** (attempt - 1)),
+                8.0,
+            )
+            payload = {
+                **context,
+                "attempt": attempt,
+                "next_attempt": attempt + 1,
+                "max_attempts": attempts,
+                "delay_sec": round(delay, 2),
+                "error": str(exc)[:600],
+            }
+            _write_strategy_log(f"{label}_retrying", payload)
+            await _call_progress(on_progress, progress_stage, payload)
+            await asyncio.sleep(delay)
+    raise APIError(f"{label} failed without captured exception")
 
 
 def _chunk_plan(duration_sec: float) -> list[dict[str, float | int]]:
@@ -1874,12 +1987,26 @@ async def analyze_video_many(
             "intent": intent,
             "has_previous_response": bool(previous_response_id),
         })
-        call = _as_response_call_result(await _stream_responses(
-            responses_client, model=model, file_id=file_id, prompt=prompt,
+        call = await _retry_response_call(
+            lambda: _stream_responses(
+                responses_client,
+                model=model,
+                file_id=file_id,
+                prompt=prompt,
+                on_progress=on_progress,
+                timeout_sec=response_timeout_sec,
+                previous_response_id=previous_response_id,
+            ),
+            label="single_video_analysis",
+            progress_stage="analysis_retrying",
             on_progress=on_progress,
-            timeout_sec=response_timeout_sec,
-            previous_response_id=previous_response_id,
-        ))
+            context={
+                "source_id": memory_source_id,
+                "file_id": file_id,
+                "model": model,
+                "intent": intent,
+            },
+        )
         text, usage = call.text, call.usage
         if not text.strip():
             raise APIError(f"Responses API 未返回可写入的分析文本: {intent}")
@@ -1988,14 +2115,24 @@ async def _prepare_long_video_strategy(
                 "model": strategy_model,
                 "fps": overview_fps,
             })
-            call = _as_response_call_result(await _stream_responses(
-                responses_client,
-                model=strategy_model,
-                file_id=file_id,
-                prompt=overview_prompt,
+            call = await _retry_response_call(
+                lambda: _stream_responses(
+                    responses_client,
+                    model=strategy_model,
+                    file_id=file_id,
+                    prompt=overview_prompt,
+                    on_progress=on_progress,
+                    timeout_sec=response_timeout_sec,
+                ),
+                label="overview_strategy",
+                progress_stage="overview_strategy_retrying",
                 on_progress=on_progress,
-                timeout_sec=response_timeout_sec,
-            ))
+                context={
+                    "source_id": source_id,
+                    "model": strategy_model,
+                    "fps": overview_fps,
+                },
+            )
         if not call.text.strip():
             raise APIError("Responses API 未返回长视频概览策略文本")
         _add_artifact(
@@ -2034,13 +2171,23 @@ async def _prepare_long_video_strategy(
                 "mini.strategy_repair_prompt",
                 _write_audit_text(audit_dir, "02-mini/strategy-repair-prompt.md", repair_prompt),
             )
-            repair = await _call_text_responses(
-                responses_client,
-                model=strategy_model,
-                prompt=repair_prompt,
+            repair = await _retry_response_call(
+                lambda: _call_text_responses(
+                    responses_client,
+                    model=strategy_model,
+                    prompt=repair_prompt,
+                    on_progress=on_progress,
+                    previous_response_id=call.response_id,
+                    timeout_sec=response_timeout_sec,
+                ),
+                label="overview_strategy_repair",
+                progress_stage="overview_strategy_repair_retrying",
                 on_progress=on_progress,
-                previous_response_id=call.response_id,
-                timeout_sec=response_timeout_sec,
+                context={
+                    "source_id": source_id,
+                    "model": strategy_model,
+                    "reason": repair_reason,
+                },
             )
             _add_artifact(
                 audit_files,
@@ -2266,14 +2413,25 @@ async def _prepare_chunked_overview_strategy(
             "model": strategy_model,
             "fps": _LONG_OVERVIEW_FPS,
         })
-        call = _as_response_call_result(await _stream_responses(
-            responses_client,
-            model=strategy_model,
-            file_id=file_id,
-            prompt=prompt,
+        call = await _retry_response_call(
+            lambda: _stream_responses(
+                responses_client,
+                model=strategy_model,
+                file_id=file_id,
+                prompt=prompt,
+                on_progress=on_progress,
+                timeout_sec=response_timeout_sec,
+            ),
+            label="overview_chunk",
+            progress_stage="overview_chunk_retrying",
             on_progress=on_progress,
-            timeout_sec=response_timeout_sec,
-        ))
+            context={
+                "part_index": part_index,
+                "chunk_count": total,
+                "model": strategy_model,
+                "fps": _LONG_OVERVIEW_FPS,
+            },
+        )
         if not call.text.strip():
             raise APIError(f"Responses API 未返回超长概览切片文本 part={part_index}")
         async with lock:
@@ -2334,12 +2492,21 @@ async def _prepare_chunked_overview_strategy(
         "chunk_count": total,
         "model": strategy_model,
     })
-    synth = await _call_text_responses(
-        responses_client,
-        model=strategy_model,
-        prompt=synth_prompt,
+    synth = await _retry_response_call(
+        lambda: _call_text_responses(
+            responses_client,
+            model=strategy_model,
+            prompt=synth_prompt,
+            on_progress=on_progress,
+            timeout_sec=response_timeout_sec,
+        ),
+        label="chunked_overview_strategy",
+        progress_stage="overview_strategy_synthesis_retrying",
         on_progress=on_progress,
-        timeout_sec=response_timeout_sec,
+        context={
+            "chunk_count": total,
+            "model": strategy_model,
+        },
     )
     _add_artifact(
         audit_files,
@@ -2408,6 +2575,89 @@ async def _analyze_video_chunks(
         else:
             fps, target_frames, will_truncate = calc_fps(chunk_duration, quality)
         actual_frames_est = int(fps * chunk_duration)
+        base_chunk_meta = {
+            "part_index": part_index,
+            "start_sec": plan_item["start_sec"],
+            "end_sec": plan_item["end_sec"],
+            "overlap_sec": plan_item["overlap_sec"],
+            "fps": fps,
+            "target_frames": target_frames,
+            "actual_frames_estimate": actual_frames_est,
+            "truncated": will_truncate,
+            "strategy_confidence": strategy_item.get("confidence"),
+            "strategy_scores": strategy_item.get("scores"),
+            "strategy_fallback_applied": strategy_item.get("fallback_applied"),
+            "strategy_fallback_reason": strategy_item.get("fallback_reason"),
+            "strategy_validation_fallback": strategy_item.get("validation_fallback"),
+            "strategy_fps_adjusted": strategy_item.get("fps_adjusted"),
+            "strategy_fps_adjust_reason": strategy_item.get("fps_adjust_reason"),
+            "strategy_lite_brief": strategy_item.get("lite_brief"),
+            "strategy_focus": strategy_item.get("focus"),
+        }
+        intent_prompts: dict[str, str] = {}
+        missing_intents: list[str] = []
+        for intent, prompt in prompts.items():
+            strategy_context = _chunk_strategy_context(strategy, part_index)
+            chunk_prompt = f"{prompt}\n\n"
+            if overview_context:
+                chunk_prompt += f"{overview_context}\n\n"
+            chunk_prompt += (
+                f"{strategy_context}\n\n" if strategy_context else ""
+            )
+            chunk_prompt += (
+                f"当前是长视频第 {part_index}/{total} 段，"
+                f"时间范围 {float(plan_item['start_sec']):.1f}s - "
+                f"{float(plan_item['end_sec']):.1f}s，"
+                f"与上一段约重叠 {float(plan_item['overlap_sec']):.1f}s。"
+                "请只分析当前片段，并保留可用于最终合并的结构化要点。"
+            )
+            intent_prompts[intent] = chunk_prompt
+            chunk_prompt_hash = _prompt_hash(chunk_prompt)
+            _add_artifact(
+                audit_files,
+                f"lite.{intent}.chunk.{part_index}.prompt",
+                _write_audit_text(
+                    audit_dir,
+                    f"03-lite/{intent}/part-{part_index:03d}-prompt.md",
+                    chunk_prompt,
+                ),
+            )
+            cached = _cached_chunk_output(
+                audit_dir,
+                intent=intent,
+                part_index=part_index,
+                prompt_hash=chunk_prompt_hash,
+            )
+            if cached:
+                text_piece, output_artifact = cached
+                _add_artifact(
+                    audit_files,
+                    f"lite.{intent}.chunk.{part_index}.output",
+                    output_artifact,
+                )
+                chunk_meta = {
+                    **base_chunk_meta,
+                    "file_id": "reused-from-artifact",
+                    "audit_artifact": output_artifact,
+                    "usage": {},
+                    "reused_from_artifact": True,
+                }
+                async with lock:
+                    per_intent_texts[intent].append((part_index, text_piece))
+                    per_intent_chunks[intent].append(chunk_meta)
+                await _call_progress(on_progress, "chunk_reused", {
+                    "part_index": part_index,
+                    "chunk_count": total,
+                    "intent": intent,
+                    "artifact": output_artifact,
+                    "text_length": len(text_piece),
+                })
+                continue
+            missing_intents.append(intent)
+
+        if not missing_intents:
+            return
+
         await _call_progress(on_progress, "chunk_uploading", {
             "part_index": part_index,
             "chunk_count": total,
@@ -2421,6 +2671,7 @@ async def _analyze_video_chunks(
             "strategy_fps_adjusted": strategy_item.get("fps_adjusted"),
             "strategy_fps_adjust_reason": strategy_item.get("fps_adjust_reason"),
             "strategy_lite_brief": str(strategy_item.get("lite_brief") or "")[:300],
+            "missing_intents": missing_intents,
         })
         try:
             file_obj = await _upload_with_preprocess(files_client, chunk_path, fps=fps, model=model)
@@ -2441,30 +2692,8 @@ async def _analyze_video_chunks(
             on_progress=on_progress,
         )
 
-        for intent, prompt in prompts.items():
-            strategy_context = _chunk_strategy_context(strategy, part_index)
-            chunk_prompt = f"{prompt}\n\n"
-            if overview_context:
-                chunk_prompt += f"{overview_context}\n\n"
-            chunk_prompt += (
-                f"{strategy_context}\n\n" if strategy_context else ""
-            )
-            chunk_prompt += (
-                f"当前是长视频第 {part_index}/{total} 段，"
-                f"时间范围 {float(plan_item['start_sec']):.1f}s - "
-                f"{float(plan_item['end_sec']):.1f}s，"
-                f"与上一段约重叠 {float(plan_item['overlap_sec']):.1f}s。"
-                "请只分析当前片段，并保留可用于最终合并的结构化要点。"
-            )
-            _add_artifact(
-                audit_files,
-                f"lite.{intent}.chunk.{part_index}.prompt",
-                _write_audit_text(
-                    audit_dir,
-                    f"03-lite/{intent}/part-{part_index:03d}-prompt.md",
-                    chunk_prompt,
-                ),
-            )
+        for intent in missing_intents:
+            chunk_prompt = intent_prompts[intent]
             await _call_progress(on_progress, "analyzing_chunk", {
                 "part_index": part_index,
                 "chunk_count": total,
@@ -2474,14 +2703,26 @@ async def _analyze_video_chunks(
                 "concurrency": chunk_concurrency,
                 "has_previous_response": False,
             })
-            call = _as_response_call_result(await _stream_responses(
-                responses_client,
-                model=model,
-                file_id=file_id,
-                prompt=chunk_prompt,
+            call = await _retry_response_call(
+                lambda: _stream_responses(
+                    responses_client,
+                    model=model,
+                    file_id=file_id,
+                    prompt=chunk_prompt,
+                    on_progress=on_progress,
+                    timeout_sec=response_timeout_sec,
+                ),
+                label="chunk_analysis",
+                progress_stage="chunk_retrying",
                 on_progress=on_progress,
-                timeout_sec=response_timeout_sec,
-            ))
+                context={
+                    "part_index": part_index,
+                    "chunk_count": total,
+                    "file_id": file_id,
+                    "model": model,
+                    "intent": intent,
+                },
+            )
             if not call.text.strip():
                 raise APIError(f"Responses API 未返回可写入的分片分析文本: {intent} part={part_index}")
             text_piece = (
@@ -2491,7 +2732,7 @@ async def _analyze_video_chunks(
             )
             output_artifact = _write_audit_text(
                 audit_dir,
-                f"03-lite/{intent}/part-{part_index:03d}-output.md",
+                _chunk_output_rel_path(intent, part_index),
                 text_piece,
             )
             _add_artifact(
@@ -2499,27 +2740,30 @@ async def _analyze_video_chunks(
                 f"lite.{intent}.chunk.{part_index}.output",
                 output_artifact,
             )
+            _add_artifact(
+                audit_files,
+                f"lite.{intent}.chunk.{part_index}.meta",
+                _write_audit_json(
+                    audit_dir,
+                    _chunk_meta_rel_path(intent, part_index),
+                    {
+                        "part_index": part_index,
+                        "intent": intent,
+                        "model": model,
+                        "file_id": file_id,
+                        "fps": fps,
+                        "prompt_hash": _prompt_hash(chunk_prompt),
+                        "text_length": len(call.text),
+                        "usage": call.usage,
+                    },
+                ),
+            )
             chunk_meta = {
-                "part_index": part_index,
-                "start_sec": plan_item["start_sec"],
-                "end_sec": plan_item["end_sec"],
-                "overlap_sec": plan_item["overlap_sec"],
+                **base_chunk_meta,
                 "file_id": file_id,
-                "fps": fps,
-                "target_frames": target_frames,
-                "actual_frames_estimate": actual_frames_est,
-                "truncated": will_truncate,
-                "strategy_confidence": strategy_item.get("confidence"),
-                "strategy_scores": strategy_item.get("scores"),
-                "strategy_fallback_applied": strategy_item.get("fallback_applied"),
-                "strategy_fallback_reason": strategy_item.get("fallback_reason"),
-                "strategy_validation_fallback": strategy_item.get("validation_fallback"),
-                "strategy_fps_adjusted": strategy_item.get("fps_adjusted"),
-                "strategy_fps_adjust_reason": strategy_item.get("fps_adjust_reason"),
-                "strategy_lite_brief": strategy_item.get("lite_brief"),
-                "strategy_focus": strategy_item.get("focus"),
                 "audit_artifact": output_artifact,
                 "usage": call.usage,
+                "reused_from_artifact": False,
             }
             async with lock:
                 per_intent_usages[intent].append(call.usage)
@@ -2588,13 +2832,24 @@ async def _analyze_video_chunks(
             "chunk_count": total,
             "intent": intent,
         })
-        synth = await _call_text_responses(
-            responses_client,
-            model=model,
-            prompt=synth_prompt,
+        synth = await _retry_response_call(
+            lambda: _call_text_responses(
+                responses_client,
+                model=model,
+                prompt=synth_prompt,
+                on_progress=on_progress,
+                previous_response_id=previous_memory_response.get(intent),
+                timeout_sec=response_timeout_sec,
+            ),
+            label="chunk_synthesis",
+            progress_stage="chunk_synthesis_retrying",
             on_progress=on_progress,
-            previous_response_id=previous_memory_response.get(intent),
-            timeout_sec=response_timeout_sec,
+            context={
+                "source_id": source_id,
+                "chunk_count": total,
+                "model": model,
+                "intent": intent,
+            },
         )
         final_response_id = synth.response_id or previous_memory_response.get(intent)
         final_usage = _combine_usage(per_intent_usages[intent] + [synth.usage])
