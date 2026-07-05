@@ -117,7 +117,6 @@ body[data-view="settings-detail-view"] #open-settings {
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 11px;
   overflow-y: auto;
   padding: 11px;
 }
@@ -128,6 +127,10 @@ body[data-view="settings-detail-view"] #open-settings {
 
 .view:focus {
   outline: none;
+}
+
+#home-view {
+  gap: 11px;
 }
 
 .status-grid {
@@ -672,6 +675,8 @@ textarea:focus {
   align-items: center;
   gap: 8px;
   margin: 0;
+  min-height: 34px;
+  margin-bottom: 11px;
   padding: 0;
   background: var(--bg);
 }
@@ -688,10 +693,6 @@ textarea:focus {
 
 .settings-page-head::after {
   content: none;
-}
-
-.detail-head {
-  margin-bottom: 0;
 }
 
 .back-button {
