@@ -66,7 +66,7 @@
 - `cost_risk_inverse`：成本低、无需登录/付费/敏感信息则高。
 - `ambiguity_inverse`：名称唯一、链接明确、不容易搜错则高。
 
-`freshness_risk` 越高表示越需要派生核验，不表示可以自动执行。所有派生都只是候选。
+`freshness_risk` 越高表示越需要派生核验，不表示可以自动执行。派生输出先是候选；执行层会二次评分、去重、校验 URL 和限制数量。
 
 只允许输出这三类：
 
@@ -74,7 +74,7 @@
 - `official_doc`：官方文档、API 文档、官方报告、官方博客。
 - `web_research`：需要多源核验的案例、趋势、事实说法。
 
-最多给 `8` 个候选。没有足够证据时给空数组。不要编造 URL；只有画面/口播/字幕中明确出现 URL 时才填 `target_url`，否则留空并降低 `evidence_strength`。
+最多给 `8` 个候选。没有足够证据时给空数组。不要编造 URL；只有画面/口播/字幕中明确出现 URL 时才填 `target_url`。如果是 GitHub/开源项目，且项目名清晰、上下文强、名称不泛化，即使没有 URL，也可以保持较高 `evidence_strength` 和 `ambiguity_inverse`，由执行层通过 GitHub API + README 解析；如果只是泛称或重名风险高，再降低分数。
 
 候选要像一张可执行任务卡，而不是只有标题：
 
@@ -82,6 +82,7 @@
 - `acceptance_criteria`：派生资产完成时必须满足的验收标准。
 - `parent_context`：它与父视频结论的关系，必须能追溯到视频内容。
 - `task_kind` 可留空，执行层会按 `target_type` 推断。
+- `requires_confirmation`：只有在证据不确定、目标不唯一、需要登录/付费、非 GitHub 类型、或需要人工判断官方性/多源核验时才设为 `true`。高置信 GitHub 项目候选可以设为 `false`，但不得为了自动执行而虚高评分。
 
 ```json
 {
@@ -103,17 +104,17 @@
         "写入对应资产并反链到父视频证据"
       ],
       "confidence": 0.82,
-      "requires_confirmation": true,
+      "requires_confirmation": false,
       "scores": {
         "knowledge_value": 5,
         "parent_dependency": 4,
-        "evidence_strength": 3,
+        "evidence_strength": 5,
         "actionability": 4,
         "freshness_risk": 4,
         "novelty": 4,
         "asset_fit": 5,
         "cost_risk_inverse": 4,
-        "ambiguity_inverse": 3
+        "ambiguity_inverse": 4
       }
     }
   ]

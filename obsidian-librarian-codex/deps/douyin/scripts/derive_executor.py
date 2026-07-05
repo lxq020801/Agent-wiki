@@ -49,6 +49,8 @@ SECRET_PATTERNS = [
     (re.compile(r"(?i)(access_token|private_token|github_token)=([^&\s]+)"), r"\1=[REDACTED]"),
     (re.compile(r"(?i)([?&][^=&#]*(token|key|secret|signature|sig)[^=&#]*=)[^&#\s]+"), r"\1[REDACTED]"),
 ]
+MACHINE_CONTEXT_LABELS = ("父资产与派生上下文", "目标来源材料")
+MACHINE_CONTEXT_KEYS = ("candidate_name", "parent_source_url", "acceptance_criteria", "source_block")
 SENSITIVE_QUERY_KEYS = {
     "access_token",
     "private_token",
@@ -76,6 +78,156 @@ def _redact_text(text: Any) -> str:
     cleaned = str(text or "")
     for pattern, repl in SECRET_PATTERNS:
         cleaned = pattern.sub(repl, cleaned)
+    return cleaned
+
+
+def _find_balanced_json_end(text: str, start: int) -> int | None:
+    if start >= len(text) or text[start] not in "{[":
+        return None
+    pairs = {"{": "}", "[": "]"}
+    stack = [text[start]]
+    in_string = False
+    escaped = False
+    for index in range(start + 1, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            if not stack or pairs[stack[-1]] != char:
+                return None
+            stack.pop()
+            if not stack:
+                return index + 1
+    return None
+
+
+def _remove_labeled_machine_block(text: str, label: str) -> str:
+    pattern = re.compile(rf"(?m)^.*{re.escape(label)}[：:].*$")
+    while True:
+        match = pattern.search(text)
+        if not match:
+            return text
+        start = match.start()
+        cursor = match.end()
+        while cursor < len(text) and text[cursor] in " \t\r\n":
+            cursor += 1
+        end = None
+        if cursor < len(text) and text[cursor] in "{[":
+            json_end = _find_balanced_json_end(text, cursor)
+            if json_end is not None:
+                end = json_end
+                while end < len(text) and text[end] in " \t\r\n":
+                    end += 1
+        if end is None:
+            next_heading = re.search(r"(?m)^#{1,6}\s+", text[match.end():])
+            end = match.end() + next_heading.start() if next_heading else len(text)
+        text = text[:start].rstrip() + "\n\n" + text[end:].lstrip()
+
+
+def _is_machine_material_json(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_is_machine_material_json(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    keys = {str(key) for key in value.keys()}
+    if keys.intersection(MACHINE_CONTEXT_KEYS):
+        return True
+    if "repo" in keys and ("readme" in keys or isinstance(value.get("repo"), dict)):
+        return True
+    if {"url", "title", "domain", "text"}.issubset(keys):
+        return True
+    return False
+
+
+def _json_loads_or_none(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _remove_machine_fenced_blocks(text: str) -> str:
+    key_pattern = re.compile(rf'"(?:{"|".join(re.escape(key) for key in MACHINE_CONTEXT_KEYS)})"\s*:')
+
+    def replace(match: re.Match[str]) -> str:
+        block = match.group(0)
+        inner = match.group(1)
+        if any(label in inner for label in MACHINE_CONTEXT_LABELS) or key_pattern.search(inner):
+            return ""
+        parsed = _json_loads_or_none(inner.strip())
+        if _is_machine_material_json(parsed):
+            return ""
+        return block
+
+    return re.sub(r"```[^\n]*\n([\s\S]*?)\n```", replace, text)
+
+
+def _remove_standalone_machine_json_blocks(text: str) -> str:
+    cursor = 0
+    output = []
+    for match in re.finditer(r"(?m)^[ \t]*[\{\[]", text):
+        start = match.start()
+        if start < cursor:
+            continue
+        json_start = match.end() - 1
+        json_end = _find_balanced_json_end(text, json_start)
+        if json_end is None:
+            continue
+        parsed = _json_loads_or_none(text[json_start:json_end])
+        if not _is_machine_material_json(parsed):
+            continue
+        output.append(text[cursor:start])
+        cursor = json_end
+        while cursor < len(text) and text[cursor] in " \t\r\n":
+            cursor += 1
+    if not output:
+        return text
+    output.append(text[cursor:])
+    return "".join(output)
+
+
+def _looks_like_machine_echo(text: str) -> bool:
+    if any(label in text for label in MACHINE_CONTEXT_LABELS):
+        return True
+    key_pattern = re.compile(rf'"(?:{"|".join(re.escape(key) for key in MACHINE_CONTEXT_KEYS)})"\s*:')
+    if key_pattern.search(text):
+        return True
+    github_material = re.search(r'"(?:repo|readme)"\s*:', text) and re.search(
+        r'"(?:full_name|html_url|stargazers_count)"\s*:',
+        text,
+    )
+    web_material = re.search(r'"(?:url|domain|text)"\s*:', text) and re.search(r'"title"\s*:', text)
+    return bool(github_material or web_material)
+
+
+def _sanitize_generated_body(text: Any) -> str:
+    cleaned = _remove_machine_fenced_blocks(_redact_text(text))
+    cleaned = _remove_standalone_machine_json_blocks(cleaned)
+    for label in MACHINE_CONTEXT_LABELS:
+        cleaned = _remove_labeled_machine_block(cleaned, label)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    if _looks_like_machine_echo(cleaned):
+        raise DeriveError(
+            "unsafe_model_output",
+            "模型输出疑似回显内部上下文，已拒绝写入正文",
+            recoverable=True,
+        )
+    if not cleaned:
+        raise DeriveError(
+            "empty_model_output",
+            "模型输出为空或只有内部上下文，已拒绝写入正文",
+            recoverable=True,
+        )
     return cleaned
 
 
@@ -697,7 +849,9 @@ def _append_related_to_frontmatter(text: str, link: str) -> str:
 
 def _append_related_section(text: str, child_link: str, relation: str) -> str:
     line = f"- {child_link}：{relation}"
-    if child_link in text:
+    span = _frontmatter_span(text)
+    body_text = text[span[1]:] if span else text
+    if child_link in body_text:
         return text
     marker = "\n## 相关资产\n"
     if marker in text:
@@ -709,6 +863,24 @@ def _append_related_section(text: str, child_link: str, relation: str) -> str:
             return before + marker + section + "\n" + line + "\n" + rest
         return before + marker + after.rstrip() + "\n" + line + "\n"
     return text.rstrip() + "\n\n## 相关资产\n" + line + "\n"
+
+
+def _append_backlink_section(text: str, parent_link: str, relation: str) -> str:
+    if not parent_link:
+        return text
+    line = f"- {parent_link}：{relation}"
+    if parent_link in text:
+        return text
+    marker = "\n## 被引用\n"
+    if marker in text:
+        before, after = text.split(marker, 1)
+        next_heading = re.search(r"\n##\s+", after)
+        if next_heading:
+            section = after[:next_heading.start()].rstrip()
+            rest = after[next_heading.start():]
+            return before + marker + section + "\n" + line + "\n" + rest
+        return before + marker + after.rstrip() + "\n" + line + "\n"
+    return text.rstrip() + "\n\n## 被引用\n" + line + "\n"
 
 
 def _link_parent_child(parent_path: Path | None, child_path: Path, child_title: str, relation: str) -> list[Path]:
@@ -766,7 +938,7 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
     prompt = _build_prompt(task, candidate, target, parent_link)
     sw.update(stage="analyzing_derived_target", model=config.analyzer_model)
     body, usage = _call_lite_model(config, prompt)
-    body = _redact_text(body)
+    body = _sanitize_generated_body(body)
     title = _asset_title(target.title or str(candidate.get("name") or "派生资产"))
     summary = _summary_from_text(body, title)
     cost = estimate_cost_rmb(config.analyzer_model, usage)
@@ -786,7 +958,13 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
     md_path.parent.mkdir(parents=True, exist_ok=True)
     if md_path.exists():
         raise DeriveError("asset_exists", f"派生资产已存在：{md_path}", recoverable=True)
-    md_path.write_text(frontmatter + "\n# " + title + "\n\n" + _redact_text(body).strip() + "\n", encoding="utf-8")
+    child_body = "# " + title + "\n\n" + body.strip() + "\n"
+    child_body = _append_backlink_section(
+        child_body,
+        parent_link,
+        str(candidate.get("relationType") or "派生资产"),
+    )
+    md_path.write_text(frontmatter + "\n" + child_body, encoding="utf-8")
     section = "GitHub项目" if target.kind == "github_project" else "网页剪藏"
     _update_index(config.vault_path, md_path, title, summary, section=section, tags=tags)
     touched = [md_path, config.vault_path / "index.md"]

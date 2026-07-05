@@ -465,6 +465,7 @@ class LibrarianServer:
                     'model_health_check',
                     'extension_task_ingest',
                     'task_status',
+                    'derived_task_action',
                 ]
             }))
             await websocket.send(json.dumps({
@@ -1030,6 +1031,8 @@ class LibrarianServer:
             'progress': {},
             'source': source,
             'source_url': candidate.get('targetUrl') or candidate.get('target_url') or parent_status.get('source_url') or '',
+            'ingest_intent': 'derived_ingest',
+            'ingest_intents': ['derived_ingest'],
             'title': candidate.get('name') or '派生任务',
             'parent_task_id': parent_task_id,
             'derived_candidate_id': candidate_id,
@@ -1067,8 +1070,11 @@ class LibrarianServer:
                     continue
                 candidate['targetUrl'] = clean_url
             action = self._read_derived_actions(parent_task_id).get('items', {}).get(str(candidate.get('id') or ''))
-            if isinstance(action, dict) and action.get('childTaskId'):
-                continue
+            if isinstance(action, dict):
+                if action.get('status') == 'ignored':
+                    continue
+                if action.get('childTaskId'):
+                    continue
             child = await self.enqueue_derived_candidate(parent_task_id, parent_status, candidate, source='derived_auto')
             self._update_derived_action_item(
                 parent_task_id, candidate.get('id'),
@@ -1429,6 +1435,10 @@ class LibrarianServer:
             derived_summary = {
                 **derived_summary,
                 'autoQueued': sum(1 for item in derived_tasks if item.get('status') == 'queued' and item.get('autoEligible')),
+                'queued': sum(1 for item in derived_tasks if item.get('status') == 'queued'),
+                'running': sum(1 for item in derived_tasks if item.get('status') == 'running'),
+                'done': sum(1 for item in derived_tasks if item.get('status') == 'done'),
+                'failed': sum(1 for item in derived_tasks if item.get('status') == 'failed'),
                 'ignored': sum(1 for item in derived_tasks if item.get('status') == 'ignored'),
                 'needsTarget': sum(1 for item in derived_tasks if item.get('status') == 'needs_target'),
             }

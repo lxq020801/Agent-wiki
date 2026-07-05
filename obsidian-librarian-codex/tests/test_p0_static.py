@@ -653,6 +653,17 @@ def test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp: Path) -> No
     assert "secret" not in log_text
 
 
+def test_knowledge_prompts_do_not_force_github_manual_confirmation() -> None:
+    video_prompt = (SCRIPTS / "prompts" / "video_knowledge_ingest.md").read_text(encoding="utf-8")
+    image_prompt = (SCRIPTS / "prompts" / "image_post_knowledge_ingest.md").read_text(encoding="utf-8")
+    for prompt in (video_prompt, image_prompt):
+        assert '"requires_confirmation": false' in prompt
+        assert "高置信 GitHub 项目候选可以设为 `false`" in prompt
+        assert "由执行层通过 GitHub API + README 解析" in prompt
+        assert '"evidence_strength": 5' in prompt
+        assert '"ambiguity_inverse": 4' in prompt
+
+
 def test_vault_write_schema(tmp: Path) -> None:
     import sys
 
@@ -3205,6 +3216,8 @@ def test_websocket_derived_enqueue_is_idempotent_and_redacts_urls(tmp: Path) -> 
     status_file = runtime / "status" / f"{child_id}.json"
     first_status = json.loads(status_file.read_text(encoding="utf-8"))
     assert first_status["source_url"] == "https://github.com/langchain-ai/langgraph?utm_source=x"
+    assert first_status["ingest_intent"] == "derived_ingest"
+    assert first_status["ingest_intents"] == ["derived_ingest"]
     assert "secret" not in status_file.read_text(encoding="utf-8")
 
     status_file.write_text(json.dumps({"id": child_id, "ok": True, "stage": "done"}), encoding="utf-8")
@@ -3314,6 +3327,191 @@ def test_derive_executor_resolves_github_name_and_links_parent(tmp: Path) -> Non
     assert "related:" in text
 
 
+def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import derive_executor
+    from config_loader import Config
+
+    vault = tmp / "derive-e2e-vault"
+    parent = vault / "知识资产" / "知识入库" / "20260705-parent.md"
+    parent.parent.mkdir(parents=True)
+    parent.write_text(
+        "---\n"
+        'title: "父视频：Agent Harness"\n'
+        "related: []\n"
+        "---\n"
+        "# 父视频：Agent Harness\n\n正文\n",
+        encoding="utf-8",
+    )
+    cfg = Config(
+        ark_api_key="test",
+        ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
+        analyzer_model="doubao-seed-2-0-lite-260428",
+        analyzer_fallback="doubao-seed-2-0-mini-260428",
+        strategy_model="doubao-seed-2-0-mini-260428",
+        default_quality="quality",
+        balanced_target_frames=240,
+        quality_target_frames=1250,
+        fps_min=0.2,
+        fps_max=5.0,
+        file_active_timeout_sec=120,
+        cookie_path=tmp / "cookie.txt",
+        vault_path=vault,
+        vault_relative_root="知识资产/知识入库",
+        server_enabled=True,
+        server_host="127.0.0.1",
+        server_port=8765,
+        config_file=tmp / "config.toml",
+    )
+
+    target = derive_executor.ResolvedTarget(
+        url="https://github.com/langchain-ai/langgraph",
+        title="LangGraph 项目",
+        kind="github_project",
+        confidence=0.95,
+        evidence=["GitHub API 搜索命中 langchain-ai/langgraph"],
+        raw={
+            "repo": {
+                "full_name": "langchain-ai/langgraph",
+                "description": "Build resilient language agents as graphs",
+                "language": "Python",
+                "stargazers_count": 10000,
+                "forks_count": 1200,
+                "open_issues_count": 300,
+                "license": {"spdx_id": "MIT"},
+                "pushed_at": "2026-07-01T00:00:00Z",
+                "html_url": "https://github.com/langchain-ai/langgraph",
+            },
+            "readme": "LangGraph builds stateful multi-actor agents as graphs.",
+        },
+    )
+    task = {
+        "id": "child-task",
+        "parent_task_id": "parent-task",
+        "parent_asset_path": str(parent),
+        "parent_title": "父视频：Agent Harness",
+        "parent_source_url": "https://v.douyin.com/parent/",
+        "candidate": {
+            "id": "dt-e2e",
+            "name": "LangGraph",
+            "targetType": "github_project",
+            "relationType": "implements",
+            "reason": "父视频用它解释 Agent 状态图。",
+            "evidence": ["口播 LangGraph"],
+        },
+    }
+
+    class FakeStatusWriter:
+        def __init__(self) -> None:
+            self.updates = []
+
+        def update(self, **fields):
+            self.updates.append(fields)
+
+    def fake_resolve(candidate):
+        return target
+
+    def fake_model(config, prompt):
+        assert "父资产与派生上下文" in prompt
+        return (
+            "父资产与派生上下文：\n"
+            '{"candidate_name":"LangGraph","parent_source_url":"https://v.douyin.com/parent/"}\n\n'
+            "目标来源材料：\n"
+            '{"repo":{"full_name":"langchain-ai/langgraph"},"readme":"internal-labeled"}\n\n'
+            "```json\n"
+            '{"repo":{"full_name":"langchain-ai/langgraph"},"readme":"internal-fenced"}\n'
+            "```\n\n"
+            "## 项目结论\nLangGraph 适合沉淀为 Agent Harness 状态图工具。\n\n"
+            "## 最小可运行路径\n安装依赖后从官方示例开始验证。"
+        ), {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}
+
+    original_resolve = derive_executor.resolve_target
+    original_model = derive_executor._call_lite_model
+    original_git = derive_executor._git_commit
+    try:
+        derive_executor.resolve_target = fake_resolve
+        derive_executor._call_lite_model = fake_model
+        derive_executor._git_commit = lambda vault_path, title, touched, asset_type: "committed"
+        sw = FakeStatusWriter()
+        summary = derive_executor.execute_derived_task(task, cfg, sw)
+    finally:
+        derive_executor.resolve_target = original_resolve
+        derive_executor._call_lite_model = original_model
+        derive_executor._git_commit = original_git
+
+    child = Path(summary["vault_path"])
+    assert child.exists()
+    child_text = child.read_text(encoding="utf-8")
+    parent_text = parent.read_text(encoding="utf-8")
+    child_link = f"[[{child.stem}|LangGraph 项目]]"
+    parent_link = f"[[{parent.stem}|父视频：Agent Harness]]"
+    assert child_link in parent_text
+    assert parent_link in child_text
+    assert "## 被引用" in child_text
+    assert "父资产与派生上下文" not in child_text
+    assert "目标来源材料" not in child_text
+    assert "candidate_name" not in child_text
+    assert "internal-labeled" not in child_text
+    assert "internal-fenced" not in child_text
+    assert '"repo"' not in child_text
+    assert '"readme"' not in child_text
+    assert "derived_from:" in child_text
+    assert "parent_candidate_id: \"dt-e2e\"" in child_text
+    assert "## 相关资产" in parent_text
+    assert (vault / "index.md").exists()
+
+    all_stems = {path.stem for path in vault.glob("**/*.md")}
+    for text in (parent_text, child_text):
+        for match in re.findall(r"!?\[\[([^|\]#]+)", text):
+            target_stem = match.split("|", 1)[0].split("#", 1)[0]
+            assert target_stem in all_stems, target_stem
+    assert any(update.get("stage") == "resolving_target" for update in sw.updates)
+    assert summary["git_status"] == "committed"
+
+
+def test_websocket_auto_enqueue_respects_ignored_candidate(tmp: Path) -> None:
+    import asyncio
+    import sys
+
+    runtime = tmp / "ws-runtime-derived-ignore"
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
+    sys.path.insert(0, str(ROOT / "server"))
+    from websocket_server import LibrarianServer
+
+    server = LibrarianServer(enable_task_runner=False)
+    parent_status = {
+        "id": "parent-ignore",
+        "ok": True,
+        "stage": "done",
+        "source_url": "https://v.douyin.com/ignore/",
+        "derived_tasks": [{
+            "id": "dt-ignore",
+            "name": "LangGraph",
+            "targetType": "github_project",
+            "taskKind": "github_project_ingest",
+            "status": "auto_ready",
+            "autoEligible": True,
+            "targetUrl": "https://github.com/langchain-ai/langgraph",
+        }],
+    }
+    server._update_derived_action_item(
+        "parent-ignore",
+        "dt-ignore",
+        status="ignored",
+        ignoredAt=123,
+    )
+
+    queued = asyncio.run(server.enqueue_auto_derived_tasks("parent-ignore", parent_status))
+    assert queued == []
+    action = server._read_derived_actions("parent-ignore")["items"]["dt-ignore"]
+    assert action["status"] == "ignored"
+    child_id = server._derived_child_task_id("parent-ignore", "dt-ignore")
+    assert not (runtime / "inbox" / f"{child_id}.json").exists()
+    assert not (runtime / "status" / f"{child_id}.json").exists()
+
+
 def test_websocket_rejects_invalid_ingest_intent(tmp: Path) -> None:
     import asyncio
     import sys
@@ -3345,6 +3543,7 @@ def main() -> int:
         test_derive_strategy_scores_limits_dedupes_and_redacts(tmp)
         test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp)
         test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp)
+        test_knowledge_prompts_do_not_force_github_manual_confirmation()
         test_derive_strategy_ignores_candidates_json_outside_derived_section(tmp)
         test_derived_status_prefers_knowledge_decision_even_when_second()
         test_vault_write_schema(tmp)
@@ -3387,6 +3586,8 @@ def main() -> int:
         test_websocket_derived_actions_require_ready_parent_and_valid_state(tmp)
         test_websocket_derived_enqueue_is_idempotent_and_redacts_urls(tmp)
         test_derive_executor_resolves_github_name_and_links_parent(tmp)
+        test_derive_executor_execute_task_writes_child_and_backlinks(tmp)
+        test_websocket_auto_enqueue_respects_ignored_candidate(tmp)
         test_websocket_rejects_invalid_ingest_intent(tmp)
     print("P0 static checks passed")
     return 0

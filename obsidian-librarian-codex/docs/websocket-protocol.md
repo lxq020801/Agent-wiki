@@ -184,6 +184,28 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 { "type": "task_status_request" }
 ```
 
+### `derived_task_action`
+
+对某个父任务下的派生候选执行人工操作。扩展只发送候选 ID、动作和可选目标 URL；服务端负责状态机校验、父资产存在性校验、URL 安全清洗、幂等入队和任务状态合并。
+
+允许动作：
+
+- `confirm`：确认执行派生。只有 `candidate` / `auto_ready` / `needs_target` 且父资产已写入时可执行。
+- `ignore`：忽略候选。忽略动作不校验输入框 URL，也不会创建子任务。
+
+`official_doc` / `web_research` 或其他缺目标候选必须提供公开 HTTPS URL。URL 不能包含账号密码、localhost/private IP，也会删除 token/key/secret/signature 等敏感 query。
+
+```json
+{
+  "type": "derived_task_action",
+  "requestId": "derived-1700000000000-abcd",
+  "taskId": "20260705-170000-abcd",
+  "derivedTaskId": "dt-xxxx",
+  "action": "confirm",
+  "targetUrl": "https://github.com/langchain-ai/langgraph"
+}
+```
+
 ## Agent -> 扩展
 
 ### `agent_ready`
@@ -198,7 +220,8 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
     "vault_discovery",
     "model_health_check",
     "extension_task_ingest",
-    "task_status"
+    "task_status",
+    "derived_task_action"
   ]
 }
 ```
@@ -277,6 +300,34 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 ```
 
 完整评分、证据、验收标准、去重信息和父资产追溯信息不通过 WebSocket 全量返回；它们写入 vault 的 `系统记录/派生任务候选/*.json`。
+
+### `derived_task_action_done` / `derived_task_action_rejected`
+
+派生候选操作的确认或拒绝回包。`confirm` 成功后会返回 `childTaskId`；重复确认已经入队的候选时，服务端返回同一个 `childTaskId`，不会覆盖已存在的子任务状态。
+
+```json
+{
+  "type": "derived_task_action_done",
+  "requestId": "derived-1700000000000-abcd",
+  "action": "confirm",
+  "parentTaskId": "20260705-170000-abcd",
+  "candidateId": "dt-xxxx",
+  "childTaskId": "20260705-170000-abcd-derive-dt-xxxx",
+  "timestamp": "2026-07-05T19:00:00"
+}
+```
+
+```json
+{
+  "type": "derived_task_action_rejected",
+  "requestId": "derived-1700000000000-abcd",
+  "parentTaskId": "20260705-170000-abcd",
+  "candidateId": "dt-xxxx",
+  "reason": "target_url_required",
+  "message": "这个候选需要先补充目标 URL",
+  "timestamp": "2026-07-05T19:00:00"
+}
+```
 
 ### `vault_status` / `model_status` / `config_synced` / `cookie_synced`
 

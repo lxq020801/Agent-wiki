@@ -3,7 +3,13 @@
 
 set -e
 
-EXT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/chrome-extension"
+RUNTIME_EXT_DIR="${OBSIDIAN_LIBRARIAN_HOME:-$HOME/.obsidian-librarian}/extension"
+SOURCE_EXT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/chrome-extension"
+EXT_DIR="$RUNTIME_EXT_DIR"
+
+if [ ! -d "$EXT_DIR" ]; then
+    EXT_DIR="$SOURCE_EXT_DIR"
+fi
 
 echo "═══════════════════════════════════════════════════"
 echo "  Obsidian Librarian — Chrome 扩展安装"
@@ -21,6 +27,7 @@ echo "1. 打开 Chrome，地址栏输入: chrome://extensions/"
 echo "2. 右上角打开「开发者模式」"
 echo "3. 点击「加载已解压的扩展程序」"
 echo "4. 选择目录: $EXT_DIR"
+echo "   推荐使用运行目录 ~/.obsidian-librarian/extension；如不存在，先运行 python3 install/bootstrap.py --skip-install-deps 同步。"
 echo ""
 echo "═══════════════════════════════════════════════════"
 echo ""
