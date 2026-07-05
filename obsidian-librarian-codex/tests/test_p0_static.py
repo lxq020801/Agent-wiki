@@ -211,6 +211,39 @@ def test_ingest_url_preserves_share_text_argument() -> None:
     assert cwd == ROOT / "deps" / "douyin"
 
 
+def test_extension_sync_preserves_unchanged_files(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(ROOT))
+    import install.bootstrap as bootstrap_module
+
+    src = tmp / "chrome-extension-src"
+    dest = tmp / "chrome-extension-dest"
+    (src / "popup").mkdir(parents=True)
+    (src / "manifest.json").write_text('{"manifest_version":3}\n', encoding="utf-8")
+    (src / "background.js").write_text("console.log('ok');\n", encoding="utf-8")
+    (src / "popup" / "popup.js").write_text("console.log('popup');\n", encoding="utf-8")
+    (src / ".DS_Store").write_text("ignored", encoding="utf-8")
+
+    copied, removed, unchanged = bootstrap_module._sync_extension_tree(src, dest)
+    assert copied == 3
+    assert removed == 0
+    assert unchanged == 0
+    assert not (dest / ".DS_Store").exists()
+
+    target = dest / "background.js"
+    before_content = target.read_text(encoding="utf-8")
+    before_mtime = target.stat().st_mtime_ns
+    (dest / "stale.js").write_text("old", encoding="utf-8")
+
+    copied, removed, unchanged = bootstrap_module._sync_extension_tree(src, dest)
+    assert copied == 0
+    assert removed == 1
+    assert unchanged == 3
+    assert target.read_text(encoding="utf-8") == before_content
+    assert target.stat().st_mtime_ns == before_mtime
+
+
 @dataclass
 class FakeMeta:
     aweme_id: str = "1234567890123456789"

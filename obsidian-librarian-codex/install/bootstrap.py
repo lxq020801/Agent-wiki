@@ -36,6 +36,7 @@ DEFAULT_PROVIDER = "doubao"
 PROVIDER_KEY_SECTIONS = {
     "doubao": "ark",
 }
+EXTENSION_COPY_IGNORES = {".DS_Store", "__pycache__"}
 
 BOOTSTRAP_CONFIG_TEMPLATE = """\
 # obsidian-librarian runtime config
@@ -192,18 +193,77 @@ def ensure_config_template(result: CheckResult) -> None:
     )
 
 
+def _is_ignored_extension_path(path: Path) -> bool:
+    return any(part in EXTENSION_COPY_IGNORES for part in path.parts)
+
+
+def _same_file_content(src: Path, dest: Path) -> bool:
+    if not dest.exists() or not dest.is_file():
+        return False
+    if src.stat().st_size != dest.stat().st_size:
+        return False
+    return src.read_bytes() == dest.read_bytes()
+
+
+def _sync_extension_tree(src_root: Path, dest_root: Path) -> tuple[int, int, int]:
+    copied = 0
+    removed = 0
+    unchanged = 0
+    expected_files: set[Path] = set()
+    expected_dirs: set[Path] = {Path(".")}
+
+    for src in src_root.rglob("*"):
+        rel = src.relative_to(src_root)
+        if _is_ignored_extension_path(rel):
+            continue
+        dest = dest_root / rel
+        if src.is_dir():
+            expected_dirs.add(rel)
+            dest.mkdir(parents=True, exist_ok=True)
+            continue
+        if not src.is_file():
+            continue
+        expected_files.add(rel)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if _same_file_content(src, dest):
+            unchanged += 1
+            continue
+        shutil.copy2(src, dest)
+        copied += 1
+
+    if dest_root.exists():
+        for dest in sorted(dest_root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+            rel = dest.relative_to(dest_root)
+            if _is_ignored_extension_path(rel):
+                if dest.is_dir():
+                    shutil.rmtree(dest)
+                else:
+                    dest.unlink()
+                removed += 1
+                continue
+            if dest.is_file() and rel not in expected_files:
+                dest.unlink()
+                removed += 1
+            elif dest.is_dir() and rel not in expected_dirs:
+                try:
+                    dest.rmdir()
+                    removed += 1
+                except OSError:
+                    pass
+
+    return copied, removed, unchanged
+
+
 def ensure_extension_copy(result: CheckResult) -> None:
     if not EXTENSION_SRC.exists():
         result.add_warning(f"extension source missing: {EXTENSION_SRC}")
         return
-    if EXTENSION_DEST.exists():
-        shutil.rmtree(EXTENSION_DEST)
-    shutil.copytree(
-        EXTENSION_SRC,
-        EXTENSION_DEST,
-        ignore=shutil.ignore_patterns(".DS_Store", "__pycache__"),
+    EXTENSION_DEST.mkdir(parents=True, exist_ok=True)
+    copied, removed, unchanged = _sync_extension_tree(EXTENSION_SRC, EXTENSION_DEST)
+    result.actions.append(
+        f"extension prepared: {EXTENSION_DEST} "
+        f"(updated {copied}, removed {removed}, unchanged {unchanged})"
     )
-    result.actions.append(f"extension prepared: {EXTENSION_DEST}")
     result.missing_user_actions.append(
         "Load the extension once: chrome://extensions/ -> Developer mode -> Load unpacked -> "
         f"{EXTENSION_DEST}"

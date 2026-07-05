@@ -243,20 +243,27 @@ async function storedAgentConfig() {
 
 function connectWebSocket() {
   debugLog('[Librarian BG] 连接 WebSocket:', WS_URL);
-  
-  if (ws) {
-    ws.close();
+
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+    return;
   }
-  
+
+  clearTimeout(reconnectTimer);
+
   try {
-    ws = new WebSocket(WS_URL);
-    
-    ws.onopen = () => {
+    const socket = new WebSocket(WS_URL);
+    ws = socket;
+
+    socket.onopen = () => {
+      if (ws !== socket) {
+        socket.close();
+        return;
+      }
       debugLog('[Librarian BG] WebSocket 已连接');
       clearTimeout(reconnectTimer);
-      
+
       // 发送握手
-      ws.send(JSON.stringify({
+      socket.send(JSON.stringify({
         type: 'handshake',
         client: 'obsidian-librarian-background',
         version: '0.1.0'
@@ -268,36 +275,46 @@ function connectWebSocket() {
         sendModelHealthCheck();
       }
     };
-    
-    ws.onmessage = (event) => {
+
+    socket.onmessage = (event) => {
       try {
         handleAgentMessage(JSON.parse(event.data));
       } catch (err) {
         console.error('[Librarian BG] 消息解析失败:', err);
       }
     };
-    
-    ws.onclose = () => {
+
+    socket.onclose = () => {
+      if (ws !== socket) return;
       debugLog('[Librarian BG] WebSocket 已断开，3秒后重连');
       ws = null;
       reconnectTimer = setTimeout(connectWebSocket, 3000);
     };
-    
-    ws.onerror = (err) => {
-      console.error('[Librarian BG] WebSocket 错误:', err);
-      ws = null;
+
+    socket.onerror = () => {
+      debugLog('[Librarian BG] WebSocket 暂不可用，等待 close 后重连');
     };
-    
+
   } catch (err) {
-    console.error('[Librarian BG] WebSocket 连接失败:', err);
+    debugLog('[Librarian BG] WebSocket 连接失败:', err);
+    ws = null;
     reconnectTimer = setTimeout(connectWebSocket, 3000);
   }
 }
 
 function sendToAgent(data) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(data));
-    return true;
+  const socket = ws;
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    try {
+      socket.send(JSON.stringify(data));
+      return true;
+    } catch (err) {
+      debugLog('[Librarian BG] WebSocket 发送失败:', err);
+      if (ws === socket) {
+        ws = null;
+      }
+      reconnectTimer = setTimeout(connectWebSocket, 3000);
+    }
   }
   return false;
 }
