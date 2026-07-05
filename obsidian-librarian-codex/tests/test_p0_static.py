@@ -543,7 +543,7 @@ def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp
         "novelty": 5,
         "asset_fit": 5,
         "cost_risk_inverse": 5,
-        "ambiguity_inverse": 5,
+        "ambiguity_inverse": 3,
     }
     analysis = "## 九、派生决策 JSON\n```json\n" + json.dumps({
         "candidates": [
@@ -555,6 +555,7 @@ def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp
                 "evidence": ["03:20 口播 LangGraph 做状态图"],
                 "confidence": 0.9,
                 "scores": scores,
+                "requires_confirmation": True,
             },
             {
                 "name": "Some API Docs",
@@ -581,6 +582,7 @@ def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp
     docs = next(item for item in public if item["name"] == "Some API Docs")
     assert langgraph["autoEligible"] is True
     assert langgraph["status"] == "auto_ready"
+    assert "requires_confirmation" not in langgraph["autoBlockReasons"]
     assert "target_resolution_required" not in langgraph["autoBlockReasons"]
     assert docs["autoEligible"] is False
     assert docs["status"] == "needs_target"
@@ -1586,6 +1588,11 @@ def test_status_writer_redacts_sensitive_fields(tmp: Path) -> None:
     from status_writer import StatusWriter
 
     writer = StatusWriter("task-redact", tmp / "status")
+    writer.progress("chunk_uploaded", {
+        "part_index": 2,
+        "chunk_count": 3,
+        "file_id": "file-safe",
+    })
     writer.progress("analyzing_done", {
         "response_id": "resp-secret",
         "previous_response_id": "resp-old",
@@ -1607,9 +1614,15 @@ def test_status_writer_redacts_sensitive_fields(tmp: Path) -> None:
             "ok": True,
         },
     })
-    writer.update(error="failed with api_key=sk-error and resp-error")
+    writer.update(ok=False, stage="failed", error="failed with api_key=sk-error and resp-error")
 
     text = writer.path.read_text(encoding="utf-8")
+    data = json.loads(text)
+    assert data["ok"] is False
+    assert data["finished_at"] >= data["started_at"]
+    assert data["elapsed_sec"] >= 0
+    assert data["task_duration_sec"] == data["elapsed_sec"]
+    assert data["chunk_progress"]["2"]["chunk_uploaded"]["file_id"] == "file-safe"
     assert "resp-secret" not in text
     assert "resp-old" not in text
     assert "sk-secret" not in text
@@ -1628,6 +1641,71 @@ def test_status_writer_redacts_sensitive_fields(tmp: Path) -> None:
     assert "sid=abc" not in text
     assert "response_id" not in text
     assert "previous_response_id" not in text
+
+
+def test_long_video_strategy_accepts_top_level_segments_and_partial_fallback() -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    plan = analyzer._chunk_plan(601)
+
+    def segment(item, *, part_index=None, evidence=True):
+        payload = {
+            "part_index": part_index or item["part_index"],
+            "start_sec": item["start_sec"],
+            "end_sec": item["end_sec"],
+            "rough_summary": "稳定讲解",
+            "recommended_fps": 3,
+            "confidence": 0.9,
+            "scores": {
+                "visual_change": 1,
+                "ocr_subtitle_density": 2,
+                "operation_density": 1,
+                "motion_detail": 0,
+                "concept_density": 3,
+                "risk_if_low_fps": 2,
+            },
+            "focus": ["结论"],
+            "risk_flags": [],
+            "why_not_lower_fps": "需要保留字幕细节",
+        }
+        if evidence:
+            payload["evidence"] = ["字幕稳定可读"]
+        return payload
+
+    top_level = analyzer._normalize_long_video_strategy(
+        json.dumps({
+            "overview": {"summary": "这条视频讲 Open Design。", "timeline": []},
+            "strategy": {"global_notes": "模型把 segments 放在顶层。"},
+            "segments": [segment(item) for item in plan],
+        }, ensure_ascii=False),
+        plan,
+    )
+    assert top_level["ok"] is True
+    assert top_level["detected_structure"]["segments_path"] == "segments"
+    assert analyzer._strategy_needs_json_repair(top_level) is False
+    assert [item["recommended_fps"] for item in top_level["chunks"]] == [3.0, 3.0, 3.0]
+
+    partial = analyzer._normalize_long_video_strategy(
+        json.dumps({
+            "overview": {"summary": "部分策略字段坏。", "timeline": []},
+            "segments": [
+                segment(plan[0]),
+                segment(plan[1], evidence=False),
+                segment(plan[2]),
+            ],
+        }, ensure_ascii=False),
+        plan,
+    )
+    assert partial["ok"] is True
+    assert partial["chunks"][0]["recommended_fps"] == 3.0
+    assert partial["chunks"][0]["fallback_applied"] is False
+    assert partial["chunks"][1]["recommended_fps"] == 5.0
+    assert partial["chunks"][1]["fallback_applied"] is True
+    assert "必填字段" in partial["chunks"][1]["fallback_reason"]
+    assert partial["chunks"][2]["recommended_fps"] == 3.0
 
 
 def test_long_video_strategy_validation_falls_back_to_5fps() -> None:
@@ -3327,6 +3405,160 @@ def test_derive_executor_resolves_github_name_and_links_parent(tmp: Path) -> Non
     assert "related:" in text
 
 
+def test_derive_executor_resolves_github_from_cleaned_chinese_candidate(tmp: Path) -> None:
+    import sys
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    sys.path.insert(0, str(SCRIPTS))
+    import derive_executor
+
+    search_queries: list[str] = []
+
+    def repo_meta(owner: str, name: str, description: str, stars: int) -> dict:
+        return {
+            "name": name,
+            "full_name": f"{owner}/{name}",
+            "description": description,
+            "language": "TypeScript",
+            "stargazers_count": stars,
+            "forks_count": 1200 if owner == "nexu-io" else 0,
+            "open_issues_count": 80 if owner == "nexu-io" else 0,
+            "license": {"spdx_id": "AGPL-3.0"},
+            "pushed_at": "2026-07-01T00:00:00Z",
+            "html_url": f"https://github.com/{owner}/{name}",
+            "owner": {"login": owner},
+        }
+
+    correct = repo_meta(
+        "nexu-io",
+        "open-design",
+        "The Vibe Design Workspace and open-source Claude Design alternative. Coding agents generate prototypes, slides, images and video.",
+        75105,
+    )
+    stale = repo_meta("manalkaff", "opendesign", "claude.ai/design open-sourced", 207)
+    generic = repo_meta("shadcn-ui", "ui", "Beautiful components for open source design systems.", 118137)
+
+    def fake_json_request(url: str, *, timeout: int = 20):
+        if "search/repositories" in url:
+            q = unquote(parse_qs(urlparse(url).query).get("q", [""])[0])
+            search_queries.append(q)
+            q_lower = q.lower()
+            if '"open design"' in q_lower or "open-design" in q_lower:
+                return {"items": [generic, correct, stale]}
+            if "opendesign" in q_lower:
+                return {"items": [stale]}
+            return {"items": []}
+        if url.endswith("/readme"):
+            if "/repos/nexu-io/open-design" in url:
+                return {
+                    "content": "T3BlbiBEZXNpZ24gdXNlcyBDbGF1ZGUgQ29kZSwgQ29kZXgsIEN1cnNvciBhbmQgbG9jYWwgQ0xJcyB0byBidWlsZCBoaWdoLWZpZGVsaXR5IHByb3RvdHlwZXMu"
+                }
+            return {"content": ""}
+        if "/repos/nexu-io/open-design" in url:
+            return correct
+        if "/repos/shadcn-ui/ui" in url:
+            return generic
+        if "/repos/manalkaff/opendesign" in url:
+            return stale
+        raise AssertionError(f"unexpected URL {url}")
+
+    original = derive_executor._json_request
+    derive_executor._json_request = fake_json_request
+    try:
+        target = derive_executor.resolve_github_target({
+            "name": "OpenDesign 开源AI原型设计项目",
+            "searchQuery": "OpenDesign AI 原型设计 GitHub repository",
+            "parentContext": "支持 Claude Code、Codex 等 CLI 生成 prototype 和设计系统",
+            "evidence": ["视频展示 OpenDesign 的 Quickstart、CLI 配置和高保真原型能力"],
+        })
+    finally:
+        derive_executor._json_request = original
+
+    assert target.url == "https://github.com/nexu-io/open-design"
+    assert target.title == "nexu-io/open-design"
+    assert any('"Open Design"' in item or "Open-Design" in item or "open-design" in item for item in search_queries)
+    assert all("OpenDesign 开源AI原型设计项目" not in item for item in search_queries)
+
+
+def test_derive_executor_parent_link_prefers_clean_frontmatter_title(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import derive_executor
+
+    vault = tmp / "vault"
+    parent = vault / "知识资产" / "知识入库" / "20260705-parent-long-title.md"
+    parent.parent.mkdir(parents=True, exist_ok=True)
+    parent.write_text(
+        "---\n"
+        'title: "Open Design：超火开源免费AI原型设计 open…"\n'
+        "related: []\n"
+        "---\n\n"
+        "# Parent\n",
+        encoding="utf-8",
+    )
+    noisy_title = "Open Design 完整标题\nOpen Design 使用\ngit clone https://github.com/nexu-io/open-design.git\npnpm install"
+    link, path = derive_executor._parent_link({
+        "parent_asset_path": str(parent),
+        "parent_title": noisy_title,
+    }, vault)
+
+    assert path == parent
+    assert link == "[[20260705-parent-long-title|Open Design：超火开源免费AI原型设计 open…]]"
+    assert "git clone" not in link
+    assert "\n" not in link
+
+
+def test_derive_executor_existing_child_backlink_is_cleaned(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import derive_executor
+
+    parent = tmp / "20260705-parent.md"
+    child = tmp / "20260705-child.md"
+    parent.write_text(
+        "---\n"
+        'title: "短父标题"\n'
+        "related: []\n"
+        "---\n\n"
+        "# Parent\n",
+        encoding="utf-8",
+    )
+    dirty_parent_link = "[[20260705-parent|长标题\n命令行\npnpm install]]"
+    clean_parent_link = "[[20260705-parent|短父标题]]"
+    child.write_text(
+        "---\n"
+        f"related: [{json.dumps(dirty_parent_link, ensure_ascii=False)}]\n"
+        "---\n\n"
+        "# Child\n\n"
+        "# 模型重复标题\n\n"
+        "## 被引用\n"
+        f"- {dirty_parent_link}：implements\n",
+        encoding="utf-8",
+    )
+
+    touched = derive_executor._link_child_back_to_parent(parent, child, clean_parent_link, "implements")
+    text = child.read_text(encoding="utf-8")
+    assert touched == [child]
+    assert clean_parent_link in text
+    assert "pnpm install" not in text
+    assert dirty_parent_link not in text
+    assert "# Child" in text
+    assert "# 模型重复标题" not in text
+
+
+def test_derive_executor_sanitizes_leading_h1() -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import derive_executor
+
+    body = derive_executor._sanitize_generated_body("# 重复标题\n\n## 项目结论\n正文")
+    assert body.startswith("## 项目结论")
+    assert "# 重复标题" not in body
+
+
 def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> None:
     import sys
 
@@ -3560,6 +3792,7 @@ def main() -> int:
         test_quality_fps_stays_5_until_safe_frame_target()
         test_video_chunk_threshold_and_memory_store(tmp)
         test_status_writer_redacts_sensitive_fields(tmp)
+        test_long_video_strategy_accepts_top_level_segments_and_partial_fallback()
         test_long_video_strategy_validation_falls_back_to_5fps()
         test_long_video_strategy_missing_required_fields_requests_repair()
         test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp)
@@ -3586,6 +3819,10 @@ def main() -> int:
         test_websocket_derived_actions_require_ready_parent_and_valid_state(tmp)
         test_websocket_derived_enqueue_is_idempotent_and_redacts_urls(tmp)
         test_derive_executor_resolves_github_name_and_links_parent(tmp)
+        test_derive_executor_resolves_github_from_cleaned_chinese_candidate(tmp)
+        test_derive_executor_parent_link_prefers_clean_frontmatter_title(tmp)
+        test_derive_executor_existing_child_backlink_is_cleaned(tmp)
+        test_derive_executor_sanitizes_leading_h1()
         test_derive_executor_execute_task_writes_child_and_backlinks(tmp)
         test_websocket_auto_enqueue_respects_ignored_candidate(tmp)
         test_websocket_rejects_invalid_ingest_intent(tmp)

@@ -41,6 +41,9 @@ from status_writer import StatusWriter, write_terminal
 DEFAULT_BRIDGE_ROOT = Path.home() / ".obsidian-librarian"
 AUTO_MATCH_SCORE = 6
 AUTO_MATCH_MARGIN = 2
+MAX_GITHUB_SEARCH_QUERIES = 8
+MAX_GITHUB_REPOS_TO_SCORE = 10
+MAX_GITHUB_REPOS_README = 4
 SECRET_PATTERNS = [
     (re.compile(r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer [REDACTED]"),
     (re.compile(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@"), r"\1[REDACTED]@"),
@@ -216,6 +219,7 @@ def _sanitize_generated_body(text: Any) -> str:
     for label in MACHINE_CONTEXT_LABELS:
         cleaned = _remove_labeled_machine_block(cleaned, label)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    cleaned = re.sub(r"(?s)^#(?!#)\s+[^\n]+(?:\n+|$)", "", cleaned, count=1).strip()
     if _looks_like_machine_echo(cleaned):
         raise DeriveError(
             "unsafe_model_output",
@@ -389,11 +393,170 @@ def _github_owner_repo(url: str) -> tuple[str, str] | None:
         _ensure_safe_external_url(str(url or ""))
         parts = [part for part in parsed.path.strip("/").split("/") if part]
         if len(parts) >= 2:
-            return parts[0], parts[1]
+            return parts[0], re.sub(r"\.git$", "", parts[1], flags=re.I)
     if re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", str(url or "")):
         owner, repo = str(url).split("/", 1)
-        return owner, repo
+        return owner, re.sub(r"\.git$", "", repo, flags=re.I)
     return None
+
+
+def _candidate_text_values(candidate: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in (
+        "name",
+        "searchQuery",
+        "search_query",
+        "reason",
+        "parentContext",
+        "parent_context",
+        "targetUrl",
+        "target_url",
+    ):
+        value = candidate.get(key)
+        if value:
+            values.append(str(value))
+    for key in ("evidence", "acceptanceCriteria", "acceptance_criteria"):
+        value = candidate.get(key)
+        if isinstance(value, list):
+            values.extend(str(item) for item in value if item)
+        elif value:
+            values.append(str(value))
+    return values
+
+
+def _github_ref_from_candidate_text(candidate: dict[str, Any]) -> tuple[str, str] | None:
+    for text in _candidate_text_values(candidate):
+        for pattern in (
+            r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)",
+            r"git@github\.com:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)",
+        ):
+            match = re.search(pattern, text)
+            if match:
+                owner, repo = match.group(1).split("/", 1)
+                return owner, re.sub(r"\.git$", "", repo, flags=re.I)
+    return None
+
+
+def _split_camel_words(text: str) -> str:
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
+
+
+def _compact_identity(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(text or "").lower())
+
+
+def _clean_alias_tokens(tokens: list[str]) -> list[str]:
+    generic = {
+        "github",
+        "git",
+        "repository",
+        "repo",
+        "project",
+        "official",
+        "documentation",
+        "docs",
+        "api",
+    }
+    return [token for token in tokens if token.lower() not in generic]
+
+
+def _github_candidate_aliases(candidate: dict[str, Any]) -> list[str]:
+    aliases: list[str] = []
+
+    def add(value: str) -> None:
+        clean = re.sub(r"\s+", " ", str(value or "").strip(" -_/.,:;()[]{}\"'"))
+        if not clean:
+            return
+        compact = _compact_identity(clean)
+        if len(compact) < 3 or compact in {"github", "repository", "project", "official", "api"}:
+            return
+        if all(_compact_identity(item) != compact for item in aliases):
+            aliases.append(clean)
+
+    for text in _candidate_text_values(candidate):
+        for owner, repo in re.findall(r"(?:github\.com/|git@github\.com:)([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", text):
+            add(f"{owner}/{re.sub(r'.git$', '', repo, flags=re.I)}")
+            add(re.sub(r"\.git$", "", repo, flags=re.I))
+
+        latin_runs = re.findall(r"[A-Za-z][A-Za-z0-9]*(?:[\s._-]+[A-Za-z][A-Za-z0-9]*)*", text)
+        for run in latin_runs:
+            raw_tokens = re.findall(r"[A-Za-z][A-Za-z0-9]*", run)
+            tokens = _clean_alias_tokens(raw_tokens)
+            if not tokens:
+                continue
+            phrase = " ".join(tokens)
+            add(phrase)
+            add("-".join(tokens))
+            add("".join(tokens))
+            camel = _split_camel_words(phrase)
+            if camel != phrase:
+                camel_tokens = re.findall(r"[A-Za-z][A-Za-z0-9]*", camel)
+                add(" ".join(camel_tokens))
+                add("-".join(camel_tokens))
+                add("".join(camel_tokens))
+
+    return aliases[:16]
+
+
+def _github_alias_variants(aliases: list[str]) -> list[str]:
+    variants: list[str] = []
+    for alias in aliases:
+        for variant in (alias, _split_camel_words(alias), _split_camel_words(alias).replace(" ", "-")):
+            clean = re.sub(r"\s+", " ", variant.strip())
+            if clean and clean not in variants:
+                variants.append(clean)
+    return variants
+
+
+def _github_context_terms(candidate: dict[str, Any]) -> list[str]:
+    generic = {
+        "github",
+        "git",
+        "repository",
+        "repo",
+        "project",
+        "official",
+        "documentation",
+        "docs",
+        "api",
+        "open",
+        "source",
+    }
+    terms: list[str] = []
+    for text in _candidate_text_values(candidate):
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", _split_camel_words(text).lower()):
+            token = token.strip("_-")
+            if token and token not in generic and token not in terms:
+                terms.append(token)
+    return terms[:5]
+
+
+def _github_search_queries(candidate: dict[str, Any]) -> list[str]:
+    aliases = _github_alias_variants(_github_candidate_aliases(candidate))
+    context_terms = _github_context_terms(candidate)
+    queries: list[str] = []
+
+    def add(query: str) -> None:
+        clean = re.sub(r"\s+", " ", query.strip())
+        if clean and clean not in queries:
+            queries.append(clean)
+
+    for alias in aliases:
+        if "/" in alias and re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", alias):
+            add(alias)
+        if " " in alias:
+            add(f'"{alias}" in:name,description,readme')
+        add(f"{alias} in:name,description,readme")
+        if " " in alias:
+            add(f"{alias.replace(' ', '-')} in:name,description,readme")
+        if len(queries) >= MAX_GITHUB_SEARCH_QUERIES:
+            return queries[:MAX_GITHUB_SEARCH_QUERIES]
+    for alias in aliases:
+        if context_terms:
+            add(f"{alias} {' '.join(context_terms[:3])} in:name,description,readme")
+        if len(queries) >= MAX_GITHUB_SEARCH_QUERIES:
+            break
+    return queries[:MAX_GITHUB_SEARCH_QUERIES]
 
 
 def _github_repo_payload(owner: str, repo: str) -> tuple[dict[str, Any], str]:
@@ -418,9 +581,11 @@ def _keywords(text: str) -> set[str]:
 
 def _score_repo_match(candidate: dict[str, Any], repo: dict[str, Any], readme: str) -> int:
     name = str(candidate.get("name") or "").lower()
+    aliases = _github_alias_variants(_github_candidate_aliases(candidate))
     context = " ".join([
         str(candidate.get("reason") or ""),
         str(candidate.get("parent_context") or ""),
+        str(candidate.get("parentContext") or ""),
         " ".join(str(x) for x in candidate.get("evidence") or []),
         str(candidate.get("searchQuery") or candidate.get("search_query") or ""),
     ]).lower()
@@ -433,6 +598,24 @@ def _score_repo_match(candidate: dict[str, Any], repo: dict[str, Any], readme: s
     score = 0
     repo_name = str(repo.get("name") or "").lower()
     full_name = str(repo.get("full_name") or "").lower()
+    repo_compact = _compact_identity(repo_name)
+    full_compact = _compact_identity(full_name)
+    alias_score = 0
+    for alias in aliases:
+        alias_lower = alias.lower()
+        alias_separator_normalized = re.sub(r"[\s_]+", "-", alias_lower)
+        alias_compact = _compact_identity(alias)
+        if not alias_compact:
+            continue
+        if alias_lower in {repo_name, full_name} or alias_separator_normalized == repo_name:
+            alias_score = max(alias_score, 9 if "-" in alias_separator_normalized else 8)
+        elif alias_compact == repo_compact:
+            alias_score = max(alias_score, 8)
+        elif alias_compact == full_compact:
+            alias_score = max(alias_score, 7)
+        elif len(alias_compact) >= 5 and (repo_compact.endswith(alias_compact) or alias_compact in repo_compact):
+            alias_score = max(alias_score, 3)
+    score += alias_score
     if name and name == repo_name:
         score += 5
     elif name and (name in repo_name or name in full_name):
@@ -449,6 +632,8 @@ def _score_repo_match(candidate: dict[str, Any], repo: dict[str, Any], readme: s
 def resolve_github_target(candidate: dict[str, Any]) -> ResolvedTarget:
     target_url = str(candidate.get("targetUrl") or candidate.get("target_url") or "").strip()
     repo_ref = _github_owner_repo(target_url)
+    if not repo_ref:
+        repo_ref = _github_ref_from_candidate_text(candidate)
     if repo_ref:
         owner, repo = repo_ref
         meta, readme = _github_repo_payload(owner, repo)
@@ -465,24 +650,44 @@ def resolve_github_target(candidate: dict[str, Any]) -> ResolvedTarget:
     query = str(candidate.get("searchQuery") or candidate.get("search_query") or name).strip()
     if not name and not query:
         raise DeriveError("needs_target", "GitHub 派生缺少项目名或 URL", recoverable=True)
-    search_q = urllib.parse.quote(f"{name or query} in:name,description")
-    search = _json_request(f"https://api.github.com/search/repositories?q={search_q}&sort=stars&order=desc&per_page=5")
-    repos = search.get("items") if isinstance(search.get("items"), list) else []
-    scored: list[tuple[int, dict[str, Any], str]] = []
-    for repo in repos[:5]:
-        if not isinstance(repo, dict):
-            continue
+    search_queries = _github_search_queries(candidate) or [f"{name or query} in:name,description,readme"]
+    seen: set[str] = set()
+    repo_candidates: list[tuple[dict[str, Any], str]] = []
+    for search_query in search_queries:
+        search_q = urllib.parse.quote(search_query)
+        search = _json_request(f"https://api.github.com/search/repositories?q={search_q}&sort=stars&order=desc&per_page=5")
+        repos = search.get("items") if isinstance(search.get("items"), list) else []
+        for repo in repos[:5]:
+            if not isinstance(repo, dict):
+                continue
+            full_name = str(repo.get("full_name") or "")
+            if full_name and full_name.lower() in seen:
+                continue
+            if full_name:
+                seen.add(full_name.lower())
+            repo_candidates.append((repo, search_query))
+            if len(repo_candidates) >= MAX_GITHUB_REPOS_TO_SCORE:
+                break
+        if len(repo_candidates) >= MAX_GITHUB_REPOS_TO_SCORE:
+            break
+    prelim = sorted(
+        ((_score_repo_match(candidate, repo, ""), repo, search_query) for repo, search_query in repo_candidates),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    scored: list[tuple[int, dict[str, Any], str, str]] = []
+    for _prelim_score, repo, search_query in prelim[:MAX_GITHUB_REPOS_README]:
         try:
             owner = repo["owner"]["login"]
             repo_name = repo["name"]
             meta, readme = _github_repo_payload(owner, repo_name)
         except Exception:
             meta, readme = repo, ""
-        scored.append((_score_repo_match(candidate, meta, readme), meta, readme))
+        scored.append((_score_repo_match(candidate, meta, readme), meta, readme, search_query))
     scored.sort(key=lambda item: item[0], reverse=True)
     if not scored:
         raise DeriveError("needs_target", f"GitHub API 未找到项目：{name or query}", recoverable=True)
-    best_score, best, best_readme = scored[0]
+    best_score, best, best_readme, best_query = scored[0]
     second = scored[1][0] if len(scored) > 1 else 0
     if best_score < AUTO_MATCH_SCORE or best_score - second < AUTO_MATCH_MARGIN:
         raise DeriveError(
@@ -498,6 +703,7 @@ def resolve_github_target(candidate: dict[str, Any]) -> ResolvedTarget:
         confidence=min(0.95, 0.55 + best_score / 20),
         evidence=[
             f"GitHub API 搜索命中 {best.get('full_name')}",
+            f"匹配查询：{best_query}",
             f"README/描述与视频上下文匹配分 {best_score}",
         ],
         raw={"repo": best, "readme": best_readme},
@@ -548,6 +754,15 @@ def _call_lite_model(config: Config, prompt: str) -> tuple[str, dict[str, Any]]:
     return text.strip(), usage
 
 
+def _safe_link_alias(value: Any, fallback: str) -> str:
+    alias = str(value or fallback or "").strip()
+    alias = alias.replace("[", "").replace("]", "").replace("|", "-")
+    alias = re.sub(r"\s+", " ", alias).strip()
+    if len(alias) > 88:
+        alias = alias[:87].rstrip() + "…"
+    return alias or str(fallback or "").strip() or "Untitled"
+
+
 def _parent_link(task: dict[str, Any], vault_path: Path) -> tuple[str, Path | None]:
     parent_path = task.get("parent_asset_path") or task.get("parentAssetPath")
     if not parent_path:
@@ -559,12 +774,17 @@ def _parent_link(task: dict[str, Any], vault_path: Path) -> tuple[str, Path | No
         path.resolve().relative_to(vault_path.resolve())
     except ValueError:
         return "", None
-    title = str(task.get("parent_title") or task.get("parentTitle") or path.stem)
-    return f"[[{path.stem}|{title}]]", path
+    title = ""
+    try:
+        title = _frontmatter_value(_frontmatter_block(path.read_text(encoding="utf-8", errors="ignore")), "title")
+    except OSError:
+        title = ""
+    title = title or str(task.get("parent_title") or task.get("parentTitle") or path.stem)
+    return _asset_link(path, title), path
 
 
 def _asset_link(path: Path, title: str) -> str:
-    return f"[[{path.stem}|{title}]]"
+    return f"[[{path.stem}|{_safe_link_alias(title, path.stem)}]]"
 
 
 def _canonical_asset_url(value: str) -> str:
@@ -883,6 +1103,39 @@ def _append_backlink_section(text: str, parent_link: str, relation: str) -> str:
     return text.rstrip() + "\n\n## 被引用\n" + line + "\n"
 
 
+def _normalize_wikilink_aliases(text: str, target_path: Path, clean_link: str) -> str:
+    if not clean_link:
+        return text
+    pattern = re.compile(r"\[\[" + re.escape(target_path.stem) + r"(?:\|[^\]]*)?\]\]", re.S)
+    return pattern.sub(clean_link, text)
+
+
+def _normalize_duplicate_leading_h1(text: str) -> str:
+    span = _frontmatter_span(text)
+    prefix = text[:span[1]] if span else ""
+    body = text[span[1]:] if span else text
+    updated = re.sub(
+        r"(?s)^(\s*#(?!#)\s+[^\n]+\n+)\s*#(?!#)\s+[^\n]+(?:\n+|$)",
+        r"\1",
+        body,
+        count=1,
+    )
+    return prefix + updated
+
+
+def _link_child_back_to_parent(parent_path: Path | None, child_path: Path, parent_link: str, relation: str) -> list[Path]:
+    if not parent_path or not parent_path.exists() or not child_path.exists() or not parent_link:
+        return []
+    text = child_path.read_text(encoding="utf-8")
+    updated = _normalize_wikilink_aliases(text, parent_path, parent_link)
+    updated = _normalize_duplicate_leading_h1(updated)
+    updated = _append_backlink_section(updated, parent_link, relation)
+    if updated != text:
+        child_path.write_text(updated, encoding="utf-8")
+        return [child_path]
+    return []
+
+
 def _link_parent_child(parent_path: Path | None, child_path: Path, child_title: str, relation: str) -> list[Path]:
     if not parent_path or not parent_path.exists():
         return []
@@ -915,6 +1168,7 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
     if existing_path:
         relation = str(candidate.get("relationType") or "派生资产")
         touched = _link_parent_child(parent_path, existing_path, existing_title or existing_path.stem, relation)
+        touched.extend(_link_child_back_to_parent(parent_path, existing_path, parent_link, relation))
         git_status = "existing_asset"
         if touched:
             git_status = _git_commit(config.vault_path, existing_title or existing_path.stem, touched, asset_type="derived_ingest")

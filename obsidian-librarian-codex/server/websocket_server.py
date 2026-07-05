@@ -702,6 +702,18 @@ class LibrarianServer:
         _write_json_atomic(target, _redact_runtime_value(payload))
         return target
 
+    def _finish_status_fields(self, status):
+        finished = time.time()
+        started = status.get('started_at')
+        if not isinstance(started, (int, float)):
+            started = finished
+        elapsed = max(0, round(finished - started, 1))
+        status.setdefault('finished_at', finished)
+        status.setdefault('elapsed_sec', elapsed)
+        status.setdefault('task_duration_sec', elapsed)
+        status['updated_at'] = finished
+        return status
+
     def _derived_actions_path(self, parent_task_id):
         return self._task_dirs()['derived_actions'] / f'{parent_task_id}.json'
 
@@ -1279,9 +1291,9 @@ class LibrarianServer:
                     'ok': False,
                     'stage': 'failed',
                     'error': f'{script.name} exited with code {code}',
-                    'updated_at': time.time(),
                     'log_path': str(log_path),
                 })
+                status = self._finish_status_fields(status)
                 self._write_task_status(task_id, status)
             elif code == 0 and task_type != 'derived_ingest':
                 queued = await self.enqueue_auto_derived_tasks(task_id, status)
@@ -1351,8 +1363,8 @@ class LibrarianServer:
                     'stage': 'failed',
                     'error': f'Responses API analysis timed out after {timeout_sec}s',
                     'hint': '模型分析超时，可稍后重试或拆更短的视频',
-                    'updated_at': time.time(),
                 })
+                status = self._finish_status_fields(status)
                 self._write_task_status(task_id, status)
             return
 
@@ -1413,15 +1425,27 @@ class LibrarianServer:
         started = status.get('started_at') or status.get('created_at')
         updated = status.get('updated_at') or started
         elapsed = None
-        if isinstance(started, (int, float)) and isinstance(updated, (int, float)):
+        if isinstance(status.get('elapsed_sec'), (int, float)):
+            elapsed = max(0, round(float(status.get('elapsed_sec')), 1))
+        elif isinstance(status.get('task_duration_sec'), (int, float)):
+            elapsed = max(0, round(float(status.get('task_duration_sec')), 1))
+        elif isinstance(started, (int, float)) and isinstance(updated, (int, float)):
             elapsed = max(0, round(updated - started, 1))
             if status.get('ok') is None:
                 elapsed = max(0, round(time.time() - started, 1))
         meta = status.get('meta') if isinstance(status.get('meta'), dict) else {}
+        assets = status.get('assets') if isinstance(status.get('assets'), list) else []
+        asset_title = ''
+        if assets and isinstance(assets[0], dict):
+            asset_title = str(assets[0].get('title') or '').strip()
+        page_title = str(status.get('page_title') or '').strip()
+        if page_title.endswith('的抖音 - 抖音') or page_title.endswith('的抖音'):
+            page_title = ''
         title = (
             meta.get('title')
+            or asset_title
             or status.get('title')
-            or status.get('page_title')
+            or page_title
             or status.get('source_url')
             or status.get('url')
             or status.get('id')
@@ -1462,7 +1486,7 @@ class LibrarianServer:
             'error': status.get('error') or '',
             'hint': status.get('hint') or '',
             'vaultPath': status.get('vault_path') or '',
-            'assets': status.get('assets') if isinstance(status.get('assets'), list) else [],
+            'assets': assets,
             'derivedTasks': derived_tasks,
             'derivedSummary': derived_summary,
             'parentTaskId': status.get('parent_task_id') or '',

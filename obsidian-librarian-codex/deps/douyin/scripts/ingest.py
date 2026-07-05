@@ -1226,6 +1226,7 @@ async def run_task(
             assets.append({
                 "ingest_intent": intent,
                 "asset_family": _intent_profile(intent)["asset_family"],
+                "title": meta.title,
                 "vault_path": str(md_path),
                 "git_status": git_status,
                 "derived_tasks": public_derived_tasks(derived_decisions.get(intent, {})),
@@ -1361,6 +1362,7 @@ async def run_image_post_task(
             assets.append({
                 "ingest_intent": intent,
                 "asset_family": _intent_profile(intent)["asset_family"],
+                "title": meta.title,
                 "vault_path": str(md_path),
                 "git_status": git_status,
                 "derived_tasks": public_derived_tasks(derived_decisions.get(intent, {})),

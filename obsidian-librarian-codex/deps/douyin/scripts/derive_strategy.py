@@ -664,6 +664,15 @@ def _auto_block_reasons(item: dict[str, Any]) -> list[str]:
         reasons.append("target_type_not_allowed")
     if target_type != "github_project":
         reasons.append("manual_review_required_for_target_type")
+    scores = item.get("scores") if isinstance(item.get("scores"), dict) else {}
+    github_high_confidence_auto = (
+        target_type == "github_project"
+        and int(item.get("score") or 0) >= 90
+        and float(item.get("confidence") or 0.0) >= AUTO_CONFIDENCE_THRESHOLD
+        and int(scores.get("evidence_strength") or 0) >= 4
+        and int(scores.get("ambiguity_inverse") or 0) >= 3
+        and bool(item.get("target_url") or item.get("name"))
+    )
     downgrade_flags = set(item.get("downgrade_flags") or [])
     for flag in sorted(downgrade_flags):
         if re.search(r"_below_\d+$", flag):
@@ -682,6 +691,8 @@ def _auto_block_reasons(item: dict[str, Any]) -> list[str]:
         "invalid_target_url",
     }
     for flag in sorted(blocking_flags & downgrade_flags):
+        if flag == "requires_confirmation" and github_high_confidence_auto:
+            continue
         reasons.append(flag)
     if target_type in {"official_doc", "web_research"} and not item.get("target_url"):
         reasons.append("target_url_required")

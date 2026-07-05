@@ -757,6 +757,7 @@ def _strategy_fallback(
         "fallback_reason": reason,
         "overview": overview or {},
         "global_notes": "",
+        "detected_structure": {},
         "raw_text": raw_text[:4000],
         "chunks": chunks,
     }
@@ -777,6 +778,15 @@ def _strategy_needs_json_repair(strategy: dict[str, Any]) -> bool:
     return False
 
 
+def _raw_text_diagnostic(text: Any, *, limit: int = 1200) -> dict[str, Any]:
+    raw = str(text or "")
+    return {
+        "raw_text_len": len(raw),
+        "raw_text_head": raw[:limit],
+        "raw_text_tail": raw[-limit:] if len(raw) > limit else "",
+    }
+
+
 def _write_strategy_log(event: str, payload: dict[str, Any]) -> None:
     """Append non-sensitive strategy diagnostics for later tuning."""
     try:
@@ -790,13 +800,53 @@ def _write_strategy_log(event: str, payload: dict[str, Any]) -> None:
         record = _redact_sensitive_payload(record)
         # Avoid large raw model output in local logs.
         if "raw_text" in record:
-            record["raw_text"] = str(record["raw_text"])[:2000]
+            raw_text = str(record.pop("raw_text"))
+            record.update(_raw_text_diagnostic(raw_text))
         path = log_dir / _STRATEGY_LOG_NAME
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     except Exception:
         # Logging must never break ingest.
         pass
+
+
+def _strategy_segments_from_payload(payload: dict[str, Any]) -> tuple[list[Any], dict[str, Any], str, dict[str, Any]]:
+    strategy = payload.get("strategy") if isinstance(payload.get("strategy"), dict) else {}
+    detected = {
+        "has_strategy": isinstance(payload.get("strategy"), dict),
+        "strategy_has_segments": isinstance(strategy.get("segments"), list),
+        "top_level_has_segments": isinstance(payload.get("segments"), list),
+        "top_level_has_chunks": isinstance(payload.get("chunks"), list),
+        "top_level_has_fps_plan": isinstance(payload.get("fps_plan"), list),
+    }
+    if isinstance(strategy.get("segments"), list):
+        return strategy["segments"], strategy, "strategy.segments", detected
+    if isinstance(payload.get("segments"), list):
+        return payload["segments"], strategy, "segments", detected
+    if isinstance(payload.get("chunks"), list):
+        return payload["chunks"], strategy, "chunks", detected
+    if isinstance(payload.get("fps_plan"), list):
+        return payload["fps_plan"], strategy, "fps_plan", detected
+    return [], strategy, "", detected
+
+
+def _segment_value(segment: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    for key in keys:
+        if key in segment and segment.get(key) not in (None, ""):
+            return segment.get(key)
+    return default
+
+
+def _strategy_rank(strategy: dict[str, Any]) -> tuple[int, int, int]:
+    chunks = strategy.get("chunks") if isinstance(strategy.get("chunks"), list) else []
+    valid = sum(1 for item in chunks if isinstance(item, dict) and not item.get("fallback_applied"))
+    fallback = sum(1 for item in chunks if isinstance(item, dict) and item.get("fallback_applied"))
+    ok = 1 if strategy.get("ok") else 0
+    return (valid, ok, -fallback)
+
+
+def _better_strategy(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
+    return first if _strategy_rank(first) >= _strategy_rank(second) else second
 
 
 def _normalize_long_video_strategy(
@@ -814,8 +864,7 @@ def _normalize_long_video_strategy(
         )
 
     overview = payload.get("overview") if isinstance(payload.get("overview"), dict) else {}
-    strategy = payload.get("strategy") if isinstance(payload.get("strategy"), dict) else {}
-    raw_segments = strategy.get("segments") if isinstance(strategy.get("segments"), list) else []
+    raw_segments, strategy, segments_path, detected_structure = _strategy_segments_from_payload(payload)
     by_part: dict[int, dict[str, Any]] = {}
     for segment in raw_segments:
         if not isinstance(segment, dict):
@@ -830,7 +879,7 @@ def _normalize_long_video_strategy(
             reason="概览策略缺少 segments",
             overview=overview,
             raw_text=strategy_text,
-        )
+        ) | {"detected_structure": detected_structure}
 
     normalized: list[dict[str, Any]] = []
     for item in chunk_plan:
@@ -847,7 +896,14 @@ def _normalize_long_video_strategy(
 
         missing_fields = _missing_strategy_segment_fields(segment)
         confidence = max(0.0, min(1.0, _to_float(segment.get("confidence"), 0.0)))
-        raw_fps = _to_float(segment.get("recommended_fps"), _LONG_CHUNK_FPS_MAX)
+        raw_fps = _to_float(_segment_value(
+            segment,
+            "recommended_fps",
+            "fps",
+            "target_fps",
+            "suggested_fps",
+            default=_LONG_CHUNK_FPS_MAX,
+        ), _LONG_CHUNK_FPS_MAX)
         fps = max(_LONG_CHUNK_FPS_MIN, min(_LONG_CHUNK_FPS_MAX, raw_fps))
         # Keep upload values simple and stable; Ark accepts floats, but these are
         # strategy levels rather than exact mathematical results.
@@ -861,9 +917,9 @@ def _normalize_long_video_strategy(
             "concept_density": _score(scores_raw.get("concept_density")),
             "risk_if_low_fps": _score(scores_raw.get("risk_if_low_fps")),
         }
-        evidence = _string_list(segment.get("evidence"))
-        focus = _string_list(segment.get("focus"))
-        risk_flags = _string_list(segment.get("risk_flags"))
+        evidence = _string_list(_segment_value(segment, "evidence", "fps_evidence", "reason"))
+        focus = _string_list(_segment_value(segment, "focus", "focus_points", "analysis_focus"))
+        risk_flags = _string_list(_segment_value(segment, "risk_flags", "risks", "risk"))
         fallback_reasons: list[str] = []
 
         if missing_fields:
@@ -910,11 +966,11 @@ def _normalize_long_video_strategy(
             "recommended_fps": fps,
             "confidence": confidence,
             "scores": scores,
-            "rough_summary": str(segment.get("rough_summary") or "").strip()[:800],
+            "rough_summary": str(_segment_value(segment, "rough_summary", "summary", "rough_content", default="") or "").strip()[:800],
             "evidence": evidence,
             "focus": focus,
             "risk_flags": risk_flags,
-            "why_not_lower_fps": str(segment.get("why_not_lower_fps") or "").strip()[:800],
+            "why_not_lower_fps": str(_segment_value(segment, "why_not_lower_fps", "why_not_lower", "lower_fps_risk", default="") or "").strip()[:800],
             "fallback_applied": bool(fallback_reasons),
             "fallback_reason": "; ".join(fallback_reasons),
         })
@@ -924,6 +980,7 @@ def _normalize_long_video_strategy(
         "fallback_reason": "",
         "overview": overview,
         "global_notes": str(strategy.get("global_notes") or "").strip()[:1200],
+        "detected_structure": {**detected_structure, "segments_path": segments_path},
         "raw_text": strategy_text[:4000],
         "chunks": normalized,
     }
@@ -1797,12 +1854,14 @@ async def _prepare_long_video_strategy(
             raise APIError("Responses API 未返回长视频概览策略文本")
         strategy = _normalize_long_video_strategy(call.text, chunk_plan)
         if _strategy_needs_json_repair(strategy):
+            original_strategy = strategy
             repair_reason = str(strategy.get("fallback_reason") or "策略字段缺失")
             _write_strategy_log("overview_strategy_repair_needed", {
                 "source_id": source_id,
                 "strategy_model": strategy_model,
                 "analysis_model": model,
                 "reason": repair_reason,
+                "detected_structure": strategy.get("detected_structure", {}),
                 "raw_text": strategy.get("raw_text", call.text),
             })
             await _call_progress(on_progress, "repairing_overview_strategy", {
@@ -1830,6 +1889,7 @@ async def _prepare_long_video_strategy(
                     "strategy_model": strategy_model,
                     "analysis_model": model,
                     "reason": repair_reason,
+                    "detected_structure": repaired_strategy.get("detected_structure", {}),
                     "usage": repair.usage,
                 })
                 await _call_progress(on_progress, "overview_strategy_repaired", {
@@ -1837,12 +1897,14 @@ async def _prepare_long_video_strategy(
                     "model": strategy_model,
                 })
             else:
-                strategy = repaired_strategy
+                strategy = _better_strategy(original_strategy, repaired_strategy)
                 _write_strategy_log("overview_strategy_repair_failed", {
                     "source_id": source_id,
                     "strategy_model": strategy_model,
                     "analysis_model": model,
                     "reason": repaired_strategy.get("fallback_reason", repair_reason),
+                    "detected_structure": repaired_strategy.get("detected_structure", {}),
+                    "kept_original_strategy": strategy is original_strategy,
                     "raw_text": repaired_strategy.get("raw_text", repair.text),
                     "usage": repair.usage,
                     "fallback": "fallback_to_5fps",

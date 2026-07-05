@@ -105,10 +105,16 @@ class StatusWriter:
     def update(self, *, stage: str | None = None, ok: bool | None = None,
                error: str | None = None, **fields: Any) -> None:
         """更新状态。任意 kwargs 会合并进 state。"""
+        now = time.time()
         if stage is not None:
             self._state["stage"] = stage
         if ok is not None:
             self._state["ok"] = ok
+            if ok is True or ok is False:
+                self._state.setdefault("finished_at", now)
+                elapsed = max(0.0, now - float(self._state.get("started_at") or now))
+                self._state["elapsed_sec"] = round(elapsed, 1)
+                self._state["task_duration_sec"] = round(elapsed, 1)
         if error is not None:
             self._state["error"] = _redact_status_text(error)
         for k, v in fields.items():
@@ -116,17 +122,27 @@ class StatusWriter:
                 continue
             else:
                 self._state[k] = _redact_status_value(v)
-        self._state["updated_at"] = time.time()
+        self._state["updated_at"] = now
         self._write()
 
     def progress(self, sub_stage: str, info: dict[str, Any]) -> None:
         """记录细粒度进度（嵌进 progress dict 里）。"""
+        now = time.time()
+        safe_info = _redact_status_value(info)
         self._state["stage"] = sub_stage
-        self._state.setdefault("progress", {})[sub_stage] = {
-            **_redact_status_value(info),
-            "at": time.time(),
+        progress_item = {
+            **safe_info,
+            "at": now,
         }
-        self._state["updated_at"] = time.time()
+        self._state.setdefault("progress", {})[sub_stage] = progress_item
+        part_index = safe_info.get("part_index") if isinstance(safe_info, dict) else None
+        if part_index is not None:
+            key = str(part_index)
+            chunk_progress = self._state.setdefault("chunk_progress", {})
+            chunk_item = chunk_progress.setdefault(key, {"part_index": part_index})
+            chunk_item[sub_stage] = progress_item
+            chunk_item["updated_at"] = now
+        self._state["updated_at"] = now
         self._write()
 
     def _write(self) -> None:
