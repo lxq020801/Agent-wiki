@@ -26,13 +26,13 @@
 
 ## 派生候选边界
 
-Ark 视频理解只负责从 `knowledge_ingest` 输出中给出结构化派生候选。执行层会二次解析、评分、去重、限制数量，并默认把所有候选保持为人工确认状态。
+Ark 视频理解只负责从 `knowledge_ingest` 输出中给出结构化派生候选。执行层会二次解析、评分、去重、限制数量，并只把高置信、低风险、可解析的 GitHub 项目候选自动入队；其他候选保持为人工确认或补链接状态。
 
 当前允许的候选目标类型：
 
-- `github_project`：明确 GitHub 仓库或开源库。
-- `official_doc`：官方文档、API 文档、官方报告、官方博客。
-- `web_research`：需要多源核验的事实、案例或趋势。
+- `github_project`：明确 GitHub 仓库或开源库。可以在只有项目名时由派生执行器通过 GitHub API + README 解析；解析后会再次查 vault，避免重复写同一项目资产。
+- `official_doc`：官方文档、API 文档、官方报告、官方博客。当前只进入候选/人工确认；后续补官方域名校验后再放开自动。
+- `web_research`：需要多源核验的事实、案例或趋势。当前只进入候选/人工确认；未实现多源核验前不自动写库。
 
 候选不是正式资产。完整记录写入 `系统记录/派生任务候选/*.json`；父资产只写轻量 `derived_candidate_record` 和 `derived_candidate_ids`。派生记录不得包含 API Key、Cookie、Bearer token、`response_id`。
 

@@ -59,6 +59,7 @@ let previewInputTimer = null;
 let previewRequestSeq = 0;
 let lastPreviewKey = '';
 let lastSettingsTrigger = null;
+const pendingDerivedActions = new Map();
 
 function debugLog(...args) {
   if (DEBUG_LOGS) console.log(...args);
@@ -331,6 +332,72 @@ function requestTaskStatus() {
   sendToAgent({ type: 'task_status_request' });
 }
 
+function derivedActionKey(taskId, candidateId) {
+  return `${taskId || ''}:${candidateId || ''}`;
+}
+
+function clearPendingDerivedAction(taskId, candidateId) {
+  const id = candidateId || '';
+  pendingDerivedActions.delete(derivedActionKey(taskId, id));
+  pendingDerivedActions.delete(derivedActionKey('', id));
+  if (!taskId && id) {
+    for (const key of Array.from(pendingDerivedActions.keys())) {
+      if (key.endsWith(`:${id}`)) pendingDerivedActions.delete(key);
+    }
+  }
+}
+
+function submitDerivedAction(row, action) {
+  if (!row) return;
+  const taskId = row.dataset.taskId || '';
+  const candidateId = row.dataset.candidateId || '';
+  const status = row.dataset.derivedStatus || '';
+  const targetType = row.dataset.targetType || '';
+  const input = row.querySelector('[data-role="derived-url"]');
+  let targetUrl = action === 'confirm' && input ? input.value.trim() : '';
+  if (action === 'confirm' && !targetUrl && (status === 'needs_target' || ['official_doc', 'web_research'].includes(targetType))) {
+    showHint('task-hint', '请先补充目标 HTTPS 链接', 'warning');
+    input?.focus();
+    return;
+  }
+  if (action === 'confirm' && targetUrl) {
+    try {
+      const url = new URL(targetUrl);
+      if (url.protocol !== 'https:') throw new Error('URL 必须是 HTTPS');
+    } catch (err) {
+      showHint('task-hint', err.message || '目标链接格式不正确', 'error');
+      return;
+    }
+  }
+  if (action !== 'confirm') targetUrl = '';
+  if (!taskId || !candidateId) return;
+  const key = derivedActionKey(taskId, candidateId);
+  pendingDerivedActions.set(key, action);
+  setDerivedRowPending(row, true);
+  const sent = sendToAgent({
+    type: 'derived_task_action',
+    requestId: `derived-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    taskId,
+    derivedTaskId: candidateId,
+    action,
+    targetUrl
+  });
+  if (!sent) {
+    pendingDerivedActions.delete(key);
+    setDerivedRowPending(row, false);
+    showHint('task-hint', 'Agent 未连接，无法操作派生候选', 'warning');
+    return;
+  }
+  requestTaskStatus();
+}
+
+function setDerivedRowPending(row, pending) {
+  row?.querySelectorAll?.('.derived-action').forEach(button => {
+    button.disabled = pending;
+    if (pending && button.dataset.action === 'confirm') button.textContent = '处理中';
+  });
+}
+
 function transientStorage() {
   return chrome.storage.session || chrome.storage.local;
 }
@@ -394,6 +461,15 @@ function handleAgentMessage(msg) {
       break;
     case 'task_accepted':
       showHint('ingest-hint', msg.message || '任务已进入队列', 'success');
+      requestTaskStatus();
+      break;
+    case 'derived_task_action_done':
+      clearPendingDerivedAction(msg.parentTaskId || msg.taskId, msg.candidateId || msg.derivedTaskId);
+      requestTaskStatus();
+      break;
+    case 'derived_task_action_rejected':
+      clearPendingDerivedAction(msg.parentTaskId || msg.taskId, msg.candidateId || msg.derivedTaskId);
+      showHint('task-hint', msg.message || '派生操作失败', 'error');
       requestTaskStatus();
       break;
     case 'error':
@@ -517,7 +593,7 @@ function renderTaskList(targetId, items) {
     list.appendChild(empty);
     return;
   }
-  for (const task of items.slice(0, 8)) {
+  for (const task of items.slice(0, 10)) {
     const card = document.createElement('div');
     card.className = `task-card ${taskTone(task)}`;
     const head = document.createElement('div');
@@ -549,8 +625,141 @@ function renderTaskList(targetId, items) {
       detail.textContent = task.url || '任务已进入队列';
     }
     card.append(head, meta, bar, detail);
+    appendDerivedPanel(card, task);
     list.appendChild(card);
   }
+}
+
+function appendDerivedPanel(card, task) {
+  const derived = Array.isArray(task.derivedTasks) ? task.derivedTasks : [];
+  if (!derived.length) return;
+  const panel = document.createElement('div');
+  panel.className = 'derived-panel';
+  const title = document.createElement('div');
+  title.className = 'derived-panel-title';
+  const summary = task.derivedSummary || {};
+  const autoCount = Number(summary.auto_ready || summary.autoReady || 0);
+  title.textContent = autoCount > 0
+    ? `派生候选 · ${derived.length} 个 · ${autoCount} 个自动`
+    : `派生候选 · ${derived.length} 个`;
+  panel.appendChild(title);
+  for (const item of derived) {
+    panel.appendChild(renderDerivedItem(task, item));
+  }
+  card.appendChild(panel);
+}
+
+function renderDerivedItem(task, item) {
+  const row = document.createElement('div');
+  row.className = `derived-item ${derivedTone(item)}`;
+  row.dataset.taskId = task.id || '';
+  row.dataset.candidateId = item.id || '';
+  row.dataset.derivedStatus = item.status || item.candidateStatus || '';
+  row.dataset.targetType = item.targetType || '';
+  const head = document.createElement('div');
+  head.className = 'derived-head';
+  const name = document.createElement('strong');
+  name.textContent = compactTaskTitle(item.name || item.targetUrl || item.searchQuery || '派生候选');
+  name.title = item.name || item.targetUrl || item.searchQuery || '';
+  const status = document.createElement('span');
+  status.className = `derived-status ${derivedTone(item)}`;
+  status.textContent = derivedStatusLabel(item);
+  head.append(name, status);
+
+  const meta = document.createElement('div');
+  meta.className = 'derived-meta';
+  const score = Number.isFinite(Number(item.score)) ? `${Number(item.score)}分` : '';
+  meta.textContent = [
+    targetTypeLabel(item.targetType),
+    score,
+    item.targetUrl || item.searchQuery || ''
+  ].filter(Boolean).join(' · ');
+
+  const reason = document.createElement('div');
+  reason.className = 'derived-reason';
+  reason.textContent = item.reason || '';
+
+  row.append(head, meta);
+  if (reason.textContent) row.appendChild(reason);
+
+  const actions = renderDerivedActions(task, item);
+  if (actions) row.appendChild(actions);
+  return row;
+}
+
+function renderDerivedActions(task, item) {
+  const status = item.status || item.candidateStatus || '';
+  if (['done', 'running', 'queued', 'ignored', 'existing_related'].includes(status)) return null;
+  if (!isAgentConnected) return null;
+  const key = derivedActionKey(task.id || '', item.id || '');
+  const pending = pendingDerivedActions.has(key);
+  const actions = document.createElement('div');
+  actions.className = 'derived-actions';
+  let input = null;
+  if (status === 'needs_target' || (!item.targetUrl && ['official_doc', 'web_research'].includes(item.targetType))) {
+    input = document.createElement('input');
+    input.className = 'derived-url-input';
+    input.type = 'url';
+    input.placeholder = '补充公开 HTTPS 链接';
+    input.value = item.targetUrl || '';
+    input.dataset.role = 'derived-url';
+    input.setAttribute('aria-label', `为 ${item.name || '派生候选'} 补充目标链接`);
+    actions.appendChild(input);
+  }
+  const confirm = document.createElement('button');
+  confirm.className = 'small primary derived-action';
+  confirm.type = 'button';
+  confirm.textContent = pending ? '处理中' : '确认派生';
+  confirm.disabled = pending || Boolean(input && !input.value.trim());
+  confirm.setAttribute('aria-label', `确认派生 ${item.name || '派生候选'}`);
+  confirm.dataset.action = 'confirm';
+  const ignore = document.createElement('button');
+  ignore.className = 'small secondary derived-action';
+  ignore.type = 'button';
+  ignore.textContent = '忽略';
+  ignore.disabled = pending;
+  ignore.setAttribute('aria-label', `忽略 ${item.name || '派生候选'}`);
+  ignore.dataset.action = 'ignore';
+  actions.append(confirm, ignore);
+  if (input) {
+    input.addEventListener('input', () => {
+      confirm.disabled = pending || !input.value.trim();
+    });
+  }
+  return actions;
+}
+
+function derivedTone(item) {
+  const status = item.status || item.candidateStatus || '';
+  if (status === 'done' || status === 'existing_related') return 'done';
+  if (status === 'failed') return 'failed';
+  if (status === 'running' || status === 'queued' || status === 'auto_ready') return 'running';
+  if (status === 'needs_target') return 'needs-target';
+  if (status === 'ignored') return 'muted';
+  return 'candidate';
+}
+
+function derivedStatusLabel(item) {
+  const status = item.status || item.candidateStatus || '';
+  return {
+    auto_ready: '自动待派生',
+    candidate: '待确认',
+    needs_target: '需补链接',
+    queued: '已排队',
+    running: '执行中',
+    done: '已完成',
+    failed: '失败',
+    ignored: '已忽略',
+    existing_related: '已有资产'
+  }[status] || status || '候选';
+}
+
+function targetTypeLabel(type) {
+  return {
+    github_project: 'GitHub 项目',
+    official_doc: '官方/API 文档',
+    web_research: '网页研究'
+  }[type] || type || '';
 }
 
 function taskTone(task) {
@@ -613,6 +822,9 @@ function stageLabel(stage) {
     analyzing_done: '分析完成',
     analyzed: '分析完成',
     derived_candidates_ready: '派生候选已生成',
+    resolving_target: '解析派生目标',
+    target_resolved: '派生目标已解析',
+    analyzing_derived_target: '分析派生目标',
     writing_vault: '写入知识库',
     done: '成功',
     failed: '失败',
@@ -1200,6 +1412,17 @@ function bindOptionControls() {
   });
 }
 
+function bindDerivedTaskActions() {
+  const list = document.getElementById('settings-task-list');
+  if (!list) return;
+  list.addEventListener('click', event => {
+    const button = event.target.closest('.derived-action');
+    if (!button) return;
+    const row = button.closest('.derived-item');
+    submitDerivedAction(row, button.dataset.action);
+  });
+}
+
 function syncModelPresetFromInput() {
   setControlValue('analysis-model-preset', presetFromModel(document.getElementById('analysis-model-id').value));
   updateVideoSettingsSummary();
@@ -1243,6 +1466,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setPreviewImage('', 'video');
   });
   bindOptionControls();
+  bindDerivedTaskActions();
   if (!hasExtensionApis()) {
     renderDouyinPreview({
       ok: false,

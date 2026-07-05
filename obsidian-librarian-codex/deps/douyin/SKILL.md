@@ -58,7 +58,10 @@ The WebSocket control server writes:
    leads into bounded candidates. It writes full candidate records under
    `系统记录/派生任务候选/`; the parent Markdown only stores
    `derived_candidate_record` and `derived_candidate_ids` plus a readable
-   summary table. Candidates are not executed by default.
+   summary table. High-confidence, low-risk, resolvable candidates may be queued
+   as `derived_ingest` tasks by the WebSocket service after the parent asset is
+   written. Ambiguous or missing-target candidates remain pending for extension
+   confirmation.
 
 `--task` is used by the WebSocket task queue and remains useful for debugging.
 
@@ -132,6 +135,15 @@ Derivation candidate contract:
 - Allowed target types: `github_project`, `official_doc`, `web_research`.
 - Full candidate fields, scores, evidence, dedupe status, parent lineage, and
   acceptance criteria live in `系统记录/派生任务候选/*.json`.
+- Candidate-stage Markdown must not contain future `[[wikilink]]` targets. The
+  derived executor writes child assets first, then updates parent/child links.
+- GitHub candidates may omit URL when the project name and context are strong;
+  `derive_executor.py` resolves them through GitHub API search plus README
+  comparison before writing the child asset.
+- Only high-confidence GitHub candidates are eligible for automatic enqueue in
+  the current runtime. `official_doc` and `web_research` remain candidates that
+  require manual confirmation or a supplied URL until official-domain and
+  multi-source verification are implemented.
 - Frontmatter only stores lightweight references:
 
 ```yaml

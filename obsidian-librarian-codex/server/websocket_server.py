@@ -1,7 +1,9 @@
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import re
 import sys
 import subprocess
 import time
@@ -53,6 +55,51 @@ def default_runtime_root():
 DEFAULT_TASK_CONCURRENCY = 2
 MIN_TASK_CONCURRENCY = 1
 MAX_TASK_CONCURRENCY = 4
+SENSITIVE_QUERY_KEYS = {
+    'access_token',
+    'private_token',
+    'github_token',
+    'token',
+    'api_key',
+    'apikey',
+    'key',
+    'secret',
+    'client_secret',
+    'signature',
+    'sig',
+}
+
+
+def _redact_runtime_text(value):
+    text = str(value or '')
+    patterns = [
+        (r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]"),
+        (r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@", r"\1[REDACTED]@"),
+        (r"\bresp-[A-Za-z0-9._-]+\b", "resp-[REDACTED]"),
+        (r"\bghp_[A-Za-z0-9_]{20,}\b", "ghp_[REDACTED]"),
+        (r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", "github_pat_[REDACTED]"),
+        (r"(?i)(access_token|private_token|github_token)=([^&\s]+)", r"\1=[REDACTED]"),
+        (r"(?i)([?&][^=&#]*(token|key|secret|signature|sig)[^=&#]*=)[^&#\s]+", r"\1[REDACTED]"),
+    ]
+    for pattern, repl in patterns:
+        text = re.sub(pattern, repl, text)
+    return text
+
+
+def _redact_runtime_value(value):
+    if isinstance(value, dict):
+        clean = {}
+        for key, child in value.items():
+            canonical = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if canonical.endswith('apikey') or canonical in {'cookie', 'setcookie', 'authorization'}:
+                continue
+            clean[key] = _redact_runtime_value(child)
+        return clean
+    if isinstance(value, list):
+        return [_redact_runtime_value(item) for item in value]
+    if isinstance(value, str):
+        return _redact_runtime_text(value)
+    return value
 
 
 def _normalize_task_concurrency(value, default=DEFAULT_TASK_CONCURRENCY):
@@ -145,6 +192,9 @@ TASK_STAGES = {
     "analyzing_done": "分析完成",
     "analyzed": "分析完成",
     "derived_candidates_ready": "派生候选已生成",
+    "resolving_target": "解析派生目标",
+    "target_resolved": "派生目标已解析",
+    "analyzing_derived_target": "分析派生目标",
     "writing_vault": "写入知识库",
     "done": "成功",
     "failed": "失败",
@@ -159,6 +209,7 @@ RESPONSE_PHASE_STAGES = {
     "repairing_overview_strategy",
     "analyzing_chunk",
     "synthesizing_chunks",
+    "analyzing_derived_target",
 }
 
 
@@ -192,6 +243,14 @@ def _json_file(path):
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _write_json_atomic(path, payload):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
 
 
 def _normalize_provider(value):
@@ -530,6 +589,15 @@ class LibrarianServer:
                 'tasks': await asyncio.to_thread(self.task_status_snapshot),
                 'timestamp': datetime.now().isoformat(),
             }, ensure_ascii=False))
+
+        elif msg_type == 'derived_task_action':
+            reply = await self.handle_derived_task_action(msg)
+            await websocket.send(json.dumps(reply, ensure_ascii=False))
+            await self.broadcast({
+                'type': 'task_status_snapshot',
+                'tasks': await asyncio.to_thread(self.task_status_snapshot),
+                'timestamp': datetime.now().isoformat(),
+            })
             
         else:
             log(f"[Server] 未知消息类型: {msg_type}")
@@ -558,6 +626,7 @@ class LibrarianServer:
             'inbox': self.runtime_root / 'inbox',
             'status': self.runtime_root / 'status',
             'logs': self.runtime_root / 'logs' / 'tasks',
+            'derived_actions': self.runtime_root / 'derived-actions',
         }
 
     def _extract_task_url(self, msg):
@@ -629,8 +698,387 @@ class LibrarianServer:
         status_dir = self._task_dirs()['status']
         status_dir.mkdir(parents=True, exist_ok=True)
         target = status_dir / f'{task_id}.json'
-        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+        _write_json_atomic(target, _redact_runtime_value(payload))
         return target
+
+    def _derived_actions_path(self, parent_task_id):
+        return self._task_dirs()['derived_actions'] / f'{parent_task_id}.json'
+
+    def _read_derived_actions(self, parent_task_id):
+        data = _json_file(self._derived_actions_path(parent_task_id))
+        if isinstance(data, dict):
+            return data
+        return {"parentTaskId": parent_task_id, "items": {}}
+
+    def _write_derived_actions(self, parent_task_id, actions):
+        actions["parentTaskId"] = parent_task_id
+        actions["updatedAt"] = time.time()
+        _write_json_atomic(self._derived_actions_path(parent_task_id), actions)
+
+    def _derived_child_task_id(self, parent_task_id, candidate_id):
+        safe = ''.join(ch if ch.isalnum() or ch in '-_' else '-' for ch in str(candidate_id or 'derived'))
+        return f"{parent_task_id}-derive-{safe[:18]}"
+
+    def _merge_derived_actions(self, parent_task_id, tasks):
+        if not isinstance(tasks, list) or not parent_task_id:
+            return tasks if isinstance(tasks, list) else []
+        actions = self._read_derived_actions(parent_task_id).get("items", {})
+        if not isinstance(actions, dict):
+            return tasks
+        merged = []
+        for item in tasks:
+            if not isinstance(item, dict):
+                continue
+            current = dict(item)
+            action = actions.get(str(current.get("id") or ""))
+            if isinstance(action, dict):
+                if action.get("status"):
+                    current["status"] = action["status"]
+                    current["candidateStatus"] = action["status"]
+                for key in ("childTaskId", "childStatus", "targetUrl", "ignoredAt", "confirmedAt", "error"):
+                    if action.get(key):
+                        current[key] = action[key]
+                child_id = action.get("childTaskId")
+                if child_id:
+                    child_status = _json_file(self._task_dirs()['status'] / f"{child_id}.json") or {}
+                    if child_status.get("ok") is True:
+                        current["status"] = "done"
+                        current["candidateStatus"] = "done"
+                    elif child_status.get("ok") is False:
+                        current["status"] = "failed"
+                        current["candidateStatus"] = "failed"
+                        current["error"] = child_status.get("error") or current.get("error") or ""
+                    elif child_status:
+                        current["status"] = "running" if child_status.get("stage") != "queued" else "queued"
+                        current["candidateStatus"] = current["status"]
+                    current["childStage"] = child_status.get("stage") or ""
+                    current["childVaultPath"] = child_status.get("vault_path") or ""
+            merged.append(current)
+        return merged
+
+    def _update_derived_action_item(self, parent_task_id, candidate_id, **fields):
+        actions = self._read_derived_actions(parent_task_id)
+        items = actions.setdefault("items", {})
+        item = items.setdefault(str(candidate_id), {})
+        item.update({key: value for key, value in fields.items() if value is not None})
+        item["candidateId"] = str(candidate_id)
+        item["updatedAt"] = time.time()
+        self._write_derived_actions(parent_task_id, actions)
+        return item
+
+    def _find_derived_candidate(self, parent_status, candidate_id):
+        for item in parent_status.get('derived_tasks') or []:
+            if isinstance(item, dict) and str(item.get('id') or '') == str(candidate_id):
+                return dict(item)
+        return None
+
+    def _parent_asset_path(self, parent_status, candidate_id=''):
+        parent_assets = parent_status.get('assets') if isinstance(parent_status.get('assets'), list) else []
+        if candidate_id:
+            for asset in parent_assets:
+                derived = asset.get('derived_tasks') if isinstance(asset, dict) else []
+                if not isinstance(derived, list):
+                    continue
+                if any(isinstance(item, dict) and str(item.get('id') or '') == str(candidate_id) for item in derived):
+                    path = str(asset.get('vault_path') or '').strip()
+                    if path:
+                        return path
+        if parent_assets:
+            path = str(parent_assets[0].get('vault_path') or '').strip()
+            if path:
+                return path
+        return str(parent_status.get('vault_path') or '').strip()
+
+    def _is_safe_external_url(self, value):
+        parsed = urllib.parse.urlparse(str(value or '').strip())
+        if parsed.scheme != 'https' or not parsed.netloc:
+            return False
+        if parsed.username or parsed.password:
+            return False
+        host = (parsed.hostname or '').lower()
+        if host in {'localhost', '0.0.0.0'} or host.endswith('.local'):
+            return False
+        try:
+            ip = ipaddress.ip_address(host.strip('[]'))
+        except ValueError:
+            return True
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            return False
+        return True
+
+    def _clean_external_url(self, value):
+        if not self._is_safe_external_url(value):
+            return ''
+        parsed = urllib.parse.urlparse(str(value or '').strip())
+        query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=False)
+        clean_query = [
+            (key, val)
+            for key, val in query
+            if key.lower() not in SENSITIVE_QUERY_KEYS
+            and not any(marker in key.lower() for marker in ('token', 'secret', 'signature'))
+        ]
+        return urllib.parse.urlunparse((
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path or '/',
+            '',
+            urllib.parse.urlencode(clean_query, doseq=True),
+            '',
+        ))
+
+    async def handle_derived_task_action(self, msg):
+        request_id = msg.get('requestId') or msg.get('request_id') or ''
+        parent_task_id = str(msg.get('taskId') or msg.get('parentTaskId') or '').strip()
+        candidate_id = str(msg.get('derivedTaskId') or msg.get('candidateId') or '').strip()
+        action = str(msg.get('action') or '').strip()
+        if action not in {'confirm', 'ignore'} or not parent_task_id or not candidate_id:
+            return {
+                'type': 'derived_task_action_rejected',
+                'requestId': request_id,
+                'parentTaskId': parent_task_id,
+                'candidateId': candidate_id,
+                'reason': 'invalid_action',
+                'message': '派生操作参数无效',
+                'timestamp': datetime.now().isoformat(),
+            }
+        parent_status = _json_file(self._task_dirs()['status'] / f'{parent_task_id}.json') or {}
+        candidate = self._find_derived_candidate(parent_status, candidate_id)
+        if not candidate:
+            return {
+                'type': 'derived_task_action_rejected',
+                'requestId': request_id,
+                'parentTaskId': parent_task_id,
+                'candidateId': candidate_id,
+                'reason': 'candidate_not_found',
+                'message': '没有找到对应派生候选',
+                'timestamp': datetime.now().isoformat(),
+            }
+        existing_action = self._read_derived_actions(parent_task_id).get('items', {}).get(candidate_id)
+        if isinstance(existing_action, dict) and existing_action.get('childTaskId'):
+            return {
+                'type': 'derived_task_action_done',
+                'requestId': request_id,
+                'action': action,
+                'parentTaskId': parent_task_id,
+                'candidateId': candidate_id,
+                'childTaskId': existing_action.get('childTaskId'),
+                'message': '这个派生候选已经进入队列',
+                'timestamp': datetime.now().isoformat(),
+            }
+        existing_action_status = existing_action.get('status') if isinstance(existing_action, dict) else ''
+        if action == 'confirm' and existing_action_status == 'ignored':
+            return {
+                'type': 'derived_task_action_rejected',
+                'requestId': request_id,
+                'parentTaskId': parent_task_id,
+                'candidateId': candidate_id,
+                'reason': 'candidate_ignored',
+                'message': '这个候选已被忽略',
+                'timestamp': datetime.now().isoformat(),
+            }
+        if action == 'ignore':
+            self._update_derived_action_item(
+                parent_task_id, candidate_id,
+                status='ignored', ignoredAt=time.time(),
+            )
+            return {
+                'type': 'derived_task_action_done',
+                'requestId': request_id,
+                'action': action,
+                'parentTaskId': parent_task_id,
+                'candidateId': candidate_id,
+                'timestamp': datetime.now().isoformat(),
+            }
+        candidate_status = str(candidate.get('status') or candidate.get('candidateStatus') or '').strip()
+        candidate_decision = str(candidate.get('decision') or '').strip()
+        allowed_statuses = {'candidate', 'auto_ready', 'needs_target'}
+        if candidate_decision and candidate_decision != 'candidate':
+            return {
+                'type': 'derived_task_action_rejected',
+                'requestId': request_id,
+                'parentTaskId': parent_task_id,
+                'candidateId': candidate_id,
+                'reason': 'candidate_not_executable',
+                'message': '这个派生候选当前不能执行',
+                'timestamp': datetime.now().isoformat(),
+            }
+        if candidate_status and candidate_status not in allowed_statuses:
+            return {
+                'type': 'derived_task_action_rejected',
+                'requestId': request_id,
+                'parentTaskId': parent_task_id,
+                'candidateId': candidate_id,
+                'reason': 'candidate_status_not_executable',
+                'message': '这个派生候选当前状态不能确认',
+                'timestamp': datetime.now().isoformat(),
+            }
+        parent_asset_path = self._parent_asset_path(parent_status, candidate_id)
+        if parent_status.get('ok') is not True or not parent_asset_path:
+            return {
+                'type': 'derived_task_action_rejected',
+                'requestId': request_id,
+                'parentTaskId': parent_task_id,
+                'candidateId': candidate_id,
+                'reason': 'parent_asset_not_ready',
+                'message': '父资产还没有写入知识库，稍后再确认派生',
+                'timestamp': datetime.now().isoformat(),
+            }
+        if not Path(parent_asset_path).expanduser().exists():
+            return {
+                'type': 'derived_task_action_rejected',
+                'requestId': request_id,
+                'parentTaskId': parent_task_id,
+                'candidateId': candidate_id,
+                'reason': 'parent_asset_missing',
+                'message': '没有找到父资产文件，暂不能派生写库',
+                'timestamp': datetime.now().isoformat(),
+            }
+        target_url = str(msg.get('targetUrl') or '').strip()
+        if target_url:
+            clean_url = self._clean_external_url(target_url)
+            if not clean_url:
+                return {
+                    'type': 'derived_task_action_rejected',
+                    'requestId': request_id,
+                    'parentTaskId': parent_task_id,
+                    'candidateId': candidate_id,
+                    'reason': 'invalid_target_url',
+                    'message': '派生目标 URL 必须是可信 HTTPS 外部链接',
+                    'timestamp': datetime.now().isoformat(),
+                }
+            candidate['targetUrl'] = clean_url
+        elif candidate.get('targetUrl') or candidate.get('target_url'):
+            clean_url = self._clean_external_url(candidate.get('targetUrl') or candidate.get('target_url'))
+            if not clean_url:
+                return {
+                    'type': 'derived_task_action_rejected',
+                    'requestId': request_id,
+                    'parentTaskId': parent_task_id,
+                    'candidateId': candidate_id,
+                    'reason': 'invalid_target_url',
+                    'message': '派生目标 URL 必须是可信 HTTPS 外部链接',
+                    'timestamp': datetime.now().isoformat(),
+                }
+            candidate['targetUrl'] = clean_url
+        elif candidate.get('status') == 'needs_target':
+            return {
+                'type': 'derived_task_action_rejected',
+                'requestId': request_id,
+                'parentTaskId': parent_task_id,
+                'candidateId': candidate_id,
+                'reason': 'target_url_required',
+                'message': '这个候选需要先补充目标 URL',
+                'timestamp': datetime.now().isoformat(),
+            }
+        child_task = await self.enqueue_derived_candidate(
+            parent_task_id, parent_status, candidate, source='derived_manual',
+        )
+        self._update_derived_action_item(
+            parent_task_id, candidate_id,
+            status='queued',
+            childTaskId=child_task['id'],
+            targetUrl=candidate.get('targetUrl') or '',
+            confirmedAt=time.time(),
+        )
+        return {
+            'type': 'derived_task_action_done',
+            'requestId': request_id,
+            'action': action,
+            'parentTaskId': parent_task_id,
+            'candidateId': candidate_id,
+            'childTaskId': child_task['id'],
+            'timestamp': datetime.now().isoformat(),
+        }
+
+    async def enqueue_derived_candidate(self, parent_task_id, parent_status, candidate, *, source='derived_auto'):
+        candidate_id = str(candidate.get('id') or '').strip()
+        child_id = self._derived_child_task_id(parent_task_id, candidate_id)
+        dirs = self._task_dirs()
+        dirs['inbox'].mkdir(parents=True, exist_ok=True)
+        child_file = dirs['inbox'] / f'{child_id}.json'
+        parent_title = parent_status.get('title') or ''
+        parent_asset_path = self._parent_asset_path(parent_status, candidate_id)
+        parent_title = parent_title or str((parent_status.get('meta') or {}).get('title') or parent_status.get('page_title') or '')
+        task = {
+            'id': child_id,
+            'type': 'derived_ingest',
+            'source': source,
+            'created_at': datetime.now().isoformat(),
+            'parent_task_id': parent_task_id,
+            'parent_asset_path': parent_asset_path,
+            'parent_title': parent_title,
+            'parent_source_url': parent_status.get('source_url') or parent_status.get('url') or '',
+            'candidate': candidate,
+        }
+        status_path = dirs['status'] / f'{child_id}.json'
+        existing_status = _json_file(status_path)
+        if isinstance(existing_status, dict) and existing_status.get('id') == child_id:
+            if self.enable_task_runner and existing_status.get('ok') is None and child_file.exists():
+                self.ensure_task_worker()
+                await self.enqueue_task_file(child_file)
+            return task
+        if not child_file.exists():
+            _write_json_atomic(child_file, task)
+        self._write_task_status(child_id, {
+            'id': child_id,
+            'ok': None,
+            'type': 'derived_ingest',
+            'stage': 'queued',
+            'stage_label': TASK_STAGES['queued'],
+            'started_at': time.time(),
+            'updated_at': time.time(),
+            'progress': {},
+            'source': source,
+            'source_url': candidate.get('targetUrl') or candidate.get('target_url') or parent_status.get('source_url') or '',
+            'title': candidate.get('name') or '派生任务',
+            'parent_task_id': parent_task_id,
+            'derived_candidate_id': candidate_id,
+            'derived_task': candidate,
+        })
+        if self.enable_task_runner:
+            self.ensure_task_worker()
+            await self.enqueue_task_file(child_file)
+        return task
+
+    async def enqueue_auto_derived_tasks(self, parent_task_id, parent_status):
+        if parent_status.get('ok') is not True:
+            return []
+        if parent_status.get('type') == 'derived_ingest':
+            return []
+        tasks = parent_status.get('derived_tasks') if isinstance(parent_status.get('derived_tasks'), list) else []
+        queued = []
+        for candidate in tasks:
+            if not isinstance(candidate, dict) or candidate.get('autoEligible') is not True:
+                continue
+            candidate = dict(candidate)
+            if str(candidate.get('targetType') or candidate.get('target_type') or '') != 'github_project':
+                continue
+            if candidate.get('status') not in {'auto_ready', 'candidate'}:
+                continue
+            raw_target_url = candidate.get('targetUrl') or candidate.get('target_url') or ''
+            if raw_target_url:
+                clean_url = self._clean_external_url(raw_target_url)
+                if not clean_url:
+                    self._update_derived_action_item(
+                        parent_task_id, candidate.get('id'),
+                        status='needs_target',
+                        error='invalid_target_url',
+                    )
+                    continue
+                candidate['targetUrl'] = clean_url
+            action = self._read_derived_actions(parent_task_id).get('items', {}).get(str(candidate.get('id') or ''))
+            if isinstance(action, dict) and action.get('childTaskId'):
+                continue
+            child = await self.enqueue_derived_candidate(parent_task_id, parent_status, candidate, source='derived_auto')
+            self._update_derived_action_item(
+                parent_task_id, candidate.get('id'),
+                status='queued',
+                childTaskId=child['id'],
+                targetUrl=candidate.get('targetUrl') or '',
+                autoQueuedAt=time.time(),
+            )
+            queued.append(child)
+        return queued
 
     def _read_task_file(self, task_file):
         try:
@@ -790,13 +1238,17 @@ class LibrarianServer:
                 python = select_runtime_python()
             except Exception:
                 python = Path(sys.executable)
-            ingest = PROJECT_ROOT / 'deps' / 'douyin' / 'scripts' / 'ingest.py'
+            task_type = task.get('type') or 'douyin_ingest'
+            if task_type == 'derived_ingest':
+                script = PROJECT_ROOT / 'deps' / 'douyin' / 'scripts' / 'derive_executor.py'
+            else:
+                script = PROJECT_ROOT / 'deps' / 'douyin' / 'scripts' / 'ingest.py'
 
             log(f"[Server] 开始执行任务: {task_id}")
             with open(log_path, 'ab') as log_file:
                 proc = await asyncio.create_subprocess_exec(
                     str(python),
-                    str(ingest),
+                    str(script),
                     '--task',
                     str(task_file),
                     cwd=str(PROJECT_ROOT / 'deps' / 'douyin'),
@@ -820,11 +1272,15 @@ class LibrarianServer:
                     'id': task_id,
                     'ok': False,
                     'stage': 'failed',
-                    'error': f'ingest.py exited with code {code}',
+                    'error': f'{script.name} exited with code {code}',
                     'updated_at': time.time(),
                     'log_path': str(log_path),
                 })
                 self._write_task_status(task_id, status)
+            elif code == 0 and task_type != 'derived_ingest':
+                queued = await self.enqueue_auto_derived_tasks(task_id, status)
+                if queued:
+                    log(f"[Server] 自动派生已入队: parent={task_id} count={len(queued)}")
             log(f"[Server] 任务结束: {task_id} exit={code}")
         finally:
             self.running_task_ids.discard(task_id)
@@ -923,6 +1379,9 @@ class LibrarianServer:
             'repairing_overview_strategy': 73,
             'overview_strategy_repaired': 74,
             'overview_strategy_decided': 74,
+            'resolving_target': 20,
+            'target_resolved': 35,
+            'analyzing_derived_target': 72,
             'chunk_uploading': 76,
             'chunk_uploaded': 78,
             'uploading': 52,
@@ -961,8 +1420,21 @@ class LibrarianServer:
             or status.get('url')
             or status.get('id')
         )
+        derived_tasks = self._merge_derived_actions(
+            status.get('id'),
+            status.get('derived_tasks') if isinstance(status.get('derived_tasks'), list) else [],
+        )
+        derived_summary = status.get('derived_summary') if isinstance(status.get('derived_summary'), dict) else {}
+        if derived_tasks:
+            derived_summary = {
+                **derived_summary,
+                'autoQueued': sum(1 for item in derived_tasks if item.get('status') == 'queued' and item.get('autoEligible')),
+                'ignored': sum(1 for item in derived_tasks if item.get('status') == 'ignored'),
+                'needsTarget': sum(1 for item in derived_tasks if item.get('status') == 'needs_target'),
+            }
         return {
             'id': status.get('id'),
+            'type': status.get('type') or '',
             'ok': status.get('ok'),
             'stage': status.get('stage') or 'queued',
             'displayStage': stage,
@@ -981,8 +1453,11 @@ class LibrarianServer:
             'hint': status.get('hint') or '',
             'vaultPath': status.get('vault_path') or '',
             'assets': status.get('assets') if isinstance(status.get('assets'), list) else [],
-            'derivedTasks': status.get('derived_tasks') if isinstance(status.get('derived_tasks'), list) else [],
-            'derivedSummary': status.get('derived_summary') if isinstance(status.get('derived_summary'), dict) else {},
+            'derivedTasks': derived_tasks,
+            'derivedSummary': derived_summary,
+            'parentTaskId': status.get('parent_task_id') or '',
+            'derivedCandidateId': status.get('derived_candidate_id') or '',
+            'derivedTask': status.get('derived_task') if isinstance(status.get('derived_task'), dict) else {},
         }
 
     def task_status_snapshot(self, limit=20):

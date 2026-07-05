@@ -12,7 +12,7 @@
 | `type` | enum | `video_analysis` / `image_post_analysis` / `github_project` / `web_clip` / `code_module` | 来源模板类型，决定由哪个工具/模板生成 |
 | `asset_family` | enum | `knowledge_asset` / `creative_pattern` / `github_project` / `code_module` / `idea_asset` | 资产用途，决定主目录和召回用途 |
 | `source_media` | enum | `douyin_video` / `douyin_image_post` / `webpage` / `github` / `manual` / `other` | 来源形态 |
-| `ingest_intent` | enum | `knowledge_ingest` / `viral_breakdown` / `manual` | 本次入库意图 |
+| `ingest_intent` | enum | `knowledge_ingest` / `viral_breakdown` / `manual` / `derived_ingest` | 本次入库意图 |
 | `title` | string | ≤60字，中文优先 | 资产标题，禁止纯英文（无中文来源需翻译） |
 | `source_url` | string | 有效 URL 或 `"manual"` | 原始来源链接；无来源（如纯原创）填 `"manual"` |
 | `ingested` | string | `YYYY-MM-DD` | 首次入库日期（非时间戳） |
@@ -58,6 +58,20 @@ related: []
 | `web_clip` | `domain`, `author`, `publish_date` | 域名、作者、发布日期 |
 | `code_module` | `language`, `dependencies`, `source_path` | 语言、依赖列表、源码路径 |
 
+派生子资产可选字段：
+
+| 字段 | 适用类型 | 说明 |
+|------|----------|------|
+| `derived_kind` | `github_project` / `web_clip` | 派生来源类型：`github_project` / `official_doc` / `web_research` |
+| `derived_from` | `github_project` / `web_clip` | 指向父资产的真实 wikilink，必须在父资产存在后写入 |
+| `parent_task_id` | `github_project` / `web_clip` | 触发派生的父任务 ID |
+| `parent_candidate_id` | `github_project` / `web_clip` | 派生候选 ID |
+| `parent_source_url` | `github_project` / `web_clip` | 父内容来源 URL |
+| `verification_status` | `github_project` / `web_clip` | `verified` / `partially_verified` / `unverified` |
+| `evidence_level` | `github_project` / `web_clip` | `primary` / `official` / `secondary` |
+| `reusable_score` | `github_project` / `web_clip` | 1-5，可复用性评分 |
+| `executable_score` | `github_project` / `web_clip` | 1-5，可执行性评分 |
+
 派生候选只允许轻量引用字段：
 
 | 字段 | 适用类型 | 说明 |
@@ -65,7 +79,7 @@ related: []
 | `derived_candidate_record` | `video_analysis` / `image_post_analysis` | 指向 `系统记录/派生任务候选/*.json` 的相对路径 |
 | `derived_candidate_ids` | `video_analysis` / `image_post_analysis` | 候选 ID 列表，只放 `dt-...` 字符串 |
 
-禁止把派生候选完整对象写入资产 frontmatter。以下运行态字段只能存在于系统记录 JSON：`scores`、`evidence`、`reason`、`dedupe`、`parent_task_id`、`execution_status`、`candidate_status`、`target_type`、`derived_kind`、`acceptance_criteria`。
+禁止把派生候选完整对象写入父资产 frontmatter。以下候选运行态字段只能存在于系统记录 JSON：`scores`、`evidence`、`reason`、`dedupe`、`execution_status`、`candidate_status`、`target_type`、`acceptance_criteria`。
 
 ## 字段约束速查
 

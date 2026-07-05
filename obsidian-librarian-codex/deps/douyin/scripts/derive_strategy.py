@@ -2,12 +2,14 @@
 derive_strategy.py — turn model-discovered follow-up leads into bounded candidates.
 
 The derivation layer is intentionally conservative: it scores and records
-candidates, but does not enqueue child tasks by default. That keeps one video
-from exploding into a noisy task tree.
+candidates, and only high-confidence, low-risk, resolvable candidates are
+eligible for automatic child tasks. That keeps one video from exploding into a
+noisy task tree while still making obvious follow-ups automatic.
 """
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -20,7 +22,11 @@ from typing import Any
 ALLOWED_TARGET_TYPES = {"github_project", "official_doc", "web_research"}
 MAX_RAW_CANDIDATES = 12
 MAX_RETAINED_CANDIDATES = 8
+MAX_AUTO_CANDIDATES = 3
+MAX_AUTO_PER_TYPE = 2
 CANDIDATE_THRESHOLD = 50
+AUTO_SCORE_THRESHOLD = 80
+AUTO_CONFIDENCE_THRESHOLD = 0.75
 
 SCORE_WEIGHTS = {
     "knowledge_value": 1.4,
@@ -38,8 +44,26 @@ MAX_WEIGHTED_SCORE = sum(weight * 5 for weight in SCORE_WEIGHTS.values())
 SECRET_PATTERNS = [
     re.compile(r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+"),
     re.compile(r"(?i)(api[_-]?key|ark[_-]?api[_-]?key|cookie|set-cookie)\s*[:=]\s*[^\s,}]+"),
+    re.compile(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@"),
     re.compile(r"\bresp[_-][A-Za-z0-9._-]+\b"),
+    re.compile(r"\bghp_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"(?i)(access_token|private_token|github_token)=([^&\s]+)"),
+    re.compile(r"(?i)([?&][^=&#]*(?:token|key|secret|signature|sig)[^=&#]*=)[^&#\s]+"),
 ]
+SENSITIVE_QUERY_KEYS = {
+    "access_token",
+    "private_token",
+    "github_token",
+    "token",
+    "api_key",
+    "apikey",
+    "key",
+    "secret",
+    "client_secret",
+    "signature",
+    "sig",
+}
 
 
 def _runtime_root() -> Path:
@@ -131,8 +155,8 @@ def _normalize_name(value: Any) -> str:
 
 
 def canonicalize_url(value: Any) -> str:
-    url = _redact_text(value)
-    if not url or not re.match(r"https?://", url, re.I):
+    url = str(value or "").strip()
+    if not url or _url_safety_reason(url):
         return ""
     parsed = urllib.parse.urlparse(url)
     host = (parsed.hostname or "").lower()
@@ -142,21 +166,48 @@ def canonicalize_url(value: Any) -> str:
         if len(parts) >= 2:
             return f"https://github.com/{parts[0]}/{parts[1]}"
     drop_prefixes = ("utm_",)
-    drop_keys = {"spm", "from", "share_token", "share_id"}
+    drop_keys = {"spm", "from", "share_token", "share_id", *SENSITIVE_QUERY_KEYS}
     query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=False)
     clean_query = [
         (key, val)
         for key, val in query
-        if not key.lower().startswith(drop_prefixes) and key.lower() not in drop_keys
+        if not key.lower().startswith(drop_prefixes)
+        and key.lower() not in drop_keys
+        and not any(marker in key.lower() for marker in ("token", "secret", "signature"))
     ]
     return urllib.parse.urlunparse((
-        parsed.scheme.lower(),
+        "https",
         host,
         path.rstrip("/") or "/",
         "",
         urllib.parse.urlencode(clean_query, doseq=True),
         "",
     ))
+
+
+def _url_safety_reason(value: Any) -> str:
+    url = str(value or "").strip()
+    if not url:
+        return ""
+    if not re.match(r"https?://", url, re.I):
+        return "invalid_target_url"
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").strip().lower()
+    if parsed.username or parsed.password:
+        return "url_contains_credentials"
+    if parsed.scheme.lower() != "https" and host != "github.com":
+        return "non_https_target_url"
+    if not host:
+        return "missing_target_host"
+    if host in {"localhost", "0.0.0.0"} or host.endswith(".local"):
+        return "local_target_url"
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return ""
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+        return "private_target_url"
+    return ""
 
 
 def _target_type_from_action(action: str, name: str = "", item_type: str = "") -> str:
@@ -493,7 +544,9 @@ def _normalize_candidate(
     vault_path: Path,
 ) -> dict[str, Any]:
     name = _normalize_name(raw.get("name") or raw.get("title") or raw.get("candidate_name"))
-    target_url = canonicalize_url(raw.get("target_url") or raw.get("url") or raw.get("candidate_url"))
+    raw_target_url = raw.get("target_url") or raw.get("url") or raw.get("candidate_url")
+    unsafe_url_reason = _url_safety_reason(raw_target_url)
+    target_url = "" if unsafe_url_reason else canonicalize_url(raw_target_url)
     raw_type = str(raw.get("target_type") or raw.get("derived_kind") or raw.get("candidate_type") or "").strip()
     subtype = str(raw.get("subtype") or raw.get("derived_subtype") or "").strip()
     target_type = raw_type if raw_type in ALLOWED_TARGET_TYPES else _target_type_from_action(
@@ -523,8 +576,14 @@ def _normalize_candidate(
     downgrade_flags = _string_list(raw.get("downgrade_flags"), limit=8)
     if not name and not target_url:
         downgrade_flags.append("missing_name_and_url")
-    if not target_url and target_type in {"github_project", "official_doc"}:
+    if not target_url and target_type == "official_doc":
         downgrade_flags.append("missing_explicit_url")
+    if not target_url and target_type == "github_project":
+        downgrade_flags.append("target_resolution_required")
+    if not target_url and target_type == "web_research":
+        downgrade_flags.append("missing_explicit_source")
+    if unsafe_url_reason:
+        downgrade_flags.append(unsafe_url_reason)
     if "[不确定]" in str(raw) or "[看不清]" in str(raw) or "[看不见]" in str(raw):
         downgrade_flags.append("uncertain_evidence")
     if bool(raw.get("requires_confirmation")):
@@ -535,7 +594,9 @@ def _normalize_candidate(
         execution_status = "rejected"
     elif dedupe_status != "new":
         execution_status = "existing_related"
-    elif not target_url and target_type in {"github_project", "official_doc"}:
+    elif not target_url and target_type == "official_doc":
+        execution_status = "needs_target"
+    elif not target_url and target_type == "web_research":
         execution_status = "needs_target"
     task_kind = _task_kind(target_type, subtype)
     search_query = _redact_text(raw.get("search_query") or _build_search_query(
@@ -572,6 +633,8 @@ def _normalize_candidate(
         "intended_asset_family": "github_project" if target_type == "github_project" else "knowledge_asset",
         "lineage_depth": 1,
         "allow_child_derivation": False,
+        "auto_eligible": False,
+        "auto_block_reasons": [],
         "dedupe": {
             "status": dedupe_status,
             "matched_asset": matched_asset,
@@ -580,6 +643,72 @@ def _normalize_candidate(
         "reject_reasons": reject_reasons,
         "next_action": "manual_review",
     }
+
+
+def _auto_block_reasons(item: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if item.get("decision") != "candidate":
+        reasons.append("not_candidate")
+    if item.get("execution_status") not in {"candidate", "auto_ready"}:
+        reasons.append(f"status_{item.get('execution_status') or 'unknown'}")
+    if int(item.get("score") or 0) < AUTO_SCORE_THRESHOLD:
+        reasons.append("score_below_auto_threshold")
+    if float(item.get("confidence") or 0.0) < AUTO_CONFIDENCE_THRESHOLD:
+        reasons.append("confidence_below_auto_threshold")
+    if item.get("dedupe", {}).get("status") != "new":
+        reasons.append("dedupe_not_new")
+    if item.get("lineage_depth") not in (None, 1):
+        reasons.append("lineage_depth_not_one")
+    target_type = str(item.get("target_type") or "")
+    if target_type not in ALLOWED_TARGET_TYPES:
+        reasons.append("target_type_not_allowed")
+    if target_type != "github_project":
+        reasons.append("manual_review_required_for_target_type")
+    downgrade_flags = set(item.get("downgrade_flags") or [])
+    for flag in sorted(downgrade_flags):
+        if re.search(r"_below_\d+$", flag):
+            reasons.append(flag)
+    blocking_flags = {
+        "requires_confirmation",
+        "uncertain_evidence",
+        "missing_name_and_url",
+        "missing_explicit_url",
+        "missing_explicit_source",
+        "url_contains_credentials",
+        "non_https_target_url",
+        "local_target_url",
+        "private_target_url",
+        "missing_target_host",
+        "invalid_target_url",
+    }
+    for flag in sorted(blocking_flags & downgrade_flags):
+        reasons.append(flag)
+    if target_type in {"official_doc", "web_research"} and not item.get("target_url"):
+        reasons.append("target_url_required")
+    if target_type == "github_project" and not (item.get("target_url") or item.get("name")):
+        reasons.append("github_name_or_url_required")
+    return sorted(set(reasons))
+
+
+def _mark_auto_eligible(items: list[dict[str, Any]]) -> None:
+    auto_count = 0
+    per_type: dict[str, int] = {}
+    for item in sorted(items, key=lambda x: int(x.get("score") or 0), reverse=True):
+        reasons = _auto_block_reasons(item)
+        target_type = str(item.get("target_type") or "")
+        if auto_count >= MAX_AUTO_CANDIDATES:
+            reasons.append("auto_total_limit_reached")
+        if per_type.get(target_type, 0) >= MAX_AUTO_PER_TYPE:
+            reasons.append("auto_type_limit_reached")
+        reasons = sorted(set(reasons))
+        item["auto_block_reasons"] = reasons
+        item["auto_eligible"] = not reasons
+        if item["auto_eligible"]:
+            auto_count += 1
+            per_type[target_type] = per_type.get(target_type, 0) + 1
+            if item.get("execution_status") == "candidate":
+                item["execution_status"] = "auto_ready"
+            item["next_action"] = "auto_enqueue"
 
 
 def derive_tasks_from_analysis(
@@ -651,11 +780,23 @@ def derive_tasks_from_analysis(
             "source_media": source_media,
             "ingest_intent": ingest_intent,
             "candidate": item,
-        })
+            })
 
+    _mark_auto_eligible(retained)
+    for item in retained:
+        if item.get("auto_eligible"):
+            _write_derive_log("derive_auto_ready", {
+                "task_id": task_id,
+                "source_id": source_id,
+                "source_url": source_url,
+                "source_media": source_media,
+                "ingest_intent": ingest_intent,
+                "candidate": item,
+            })
     counts = {
         "candidate": sum(1 for item in retained if item.get("decision") == "candidate"),
         "rejected": sum(1 for item in retained if item.get("decision") == "reject"),
+        "auto_ready": sum(1 for item in retained if item.get("auto_eligible")),
         "existing_related": sum(1 for item in retained if item.get("execution_status") == "existing_related"),
         "needs_target": sum(1 for item in retained if item.get("execution_status") == "needs_target"),
         "suppressed": suppressed_count,
@@ -687,6 +828,8 @@ def public_derived_tasks(decision: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         if item.get("decision") == "reject":
             continue
+        evidence = _string_list(item.get("evidence") or [], limit=3)
+        acceptance = _string_list(item.get("acceptance_criteria") or [], limit=3)
         public.append({
             "id": item.get("id"),
             "name": item.get("name"),
@@ -694,10 +837,18 @@ def public_derived_tasks(decision: dict[str, Any]) -> list[dict[str, Any]]:
             "taskKind": item.get("task_kind"),
             "targetUrl": item.get("target_url"),
             "searchQuery": item.get("search_query"),
+            "canonicalTarget": item.get("canonical_target"),
             "decision": item.get("decision"),
             "status": item.get("execution_status"),
             "candidateStatus": item.get("execution_status"),
+            "autoEligible": item.get("auto_eligible") is True,
+            "autoBlockReasons": item.get("auto_block_reasons") or [],
             "score": item.get("score"),
+            "confidence": item.get("confidence"),
             "reason": item.get("reason"),
+            "evidence": evidence,
+            "acceptanceCriteria": acceptance,
+            "relationType": item.get("relation_type"),
+            "matchedAsset": (item.get("dedupe") or {}).get("matched_asset"),
         })
     return public

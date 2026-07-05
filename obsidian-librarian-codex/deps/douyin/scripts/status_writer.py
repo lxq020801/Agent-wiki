@@ -21,6 +21,9 @@ _REDACTED_KEYS = {
     "setcookie",
     "responseid",
     "previousresponseid",
+    "githubtoken",
+    "accesstoken",
+    "privatetoken",
 }
 
 
@@ -48,7 +51,12 @@ def _redact_status_text(text: str) -> str:
             r"(?i)[\"']?(authorization|cookie|set-cookie)[\"']?\s*[:=]\s*[^\n\r]+",
             "sensitive=[REDACTED]",
         ),
+        (r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@", r"\1[REDACTED]@"),
         (r"\bresp-[A-Za-z0-9._-]+\b", "resp-[REDACTED]"),
+        (r"\bghp_[A-Za-z0-9_]{20,}\b", "ghp_[REDACTED]"),
+        (r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", "github_pat_[REDACTED]"),
+        (r"(?i)(access_token|private_token|github_token)=([^&\s]+)", r"\1=[REDACTED]"),
+        (r"(?i)([?&][^=&#]*(token|key|secret|signature|sig)[^=&#]*=)[^&#\s]+", r"\1[REDACTED]"),
     ]
     for pattern, repl in patterns:
         cleaned = re.sub(pattern, repl, cleaned)

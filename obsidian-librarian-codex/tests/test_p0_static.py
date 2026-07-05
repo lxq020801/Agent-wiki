@@ -525,6 +525,134 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
     assert "cookie" not in log_text.lower()
 
 
+def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp: Path) -> None:
+    import sys
+
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "derive-auto-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    from derive_strategy import derive_tasks_from_analysis, public_derived_tasks
+
+    vault = tmp / "derive-auto-vault"
+    vault.mkdir()
+    scores = {
+        "knowledge_value": 5,
+        "parent_dependency": 5,
+        "evidence_strength": 5,
+        "actionability": 5,
+        "freshness_risk": 4,
+        "novelty": 5,
+        "asset_fit": 5,
+        "cost_risk_inverse": 5,
+        "ambiguity_inverse": 5,
+    }
+    analysis = "## 九、派生决策 JSON\n```json\n" + json.dumps({
+        "candidates": [
+            {
+                "name": "LangGraph",
+                "target_type": "github_project",
+                "mentioned_context": "视频说 LangGraph 用于 Agent 状态图和工作流编排。",
+                "reason": "这是父视频方法可执行化的关键项目。",
+                "evidence": ["03:20 口播 LangGraph 做状态图"],
+                "confidence": 0.9,
+                "scores": scores,
+            },
+            {
+                "name": "Some API Docs",
+                "target_type": "official_doc",
+                "mentioned_context": "视频提到某个 API，但没有给链接。",
+                "reason": "需要官方文档核验。",
+                "evidence": ["只出现 API 名称"],
+                "confidence": 0.9,
+                "scores": scores,
+            },
+        ]
+    }, ensure_ascii=False) + "\n```"
+    decision = derive_tasks_from_analysis(
+        analysis,
+        source_id="auto-aweme",
+        source_url="https://v.douyin.com/auto/",
+        source_media="douyin_video",
+        ingest_intent="knowledge_ingest",
+        vault_path=vault,
+        task_id="derive-auto-task",
+    )
+    public = public_derived_tasks(decision)
+    langgraph = next(item for item in public if item["name"] == "LangGraph")
+    docs = next(item for item in public if item["name"] == "Some API Docs")
+    assert langgraph["autoEligible"] is True
+    assert langgraph["status"] == "auto_ready"
+    assert "target_resolution_required" not in langgraph["autoBlockReasons"]
+    assert docs["autoEligible"] is False
+    assert docs["status"] == "needs_target"
+    assert "target_url_required" in docs["autoBlockReasons"]
+
+
+def test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp: Path) -> None:
+    import sys
+
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "derive-url-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    from derive_strategy import derive_tasks_from_analysis, public_derived_tasks
+
+    vault = tmp / "derive-url-vault"
+    vault.mkdir()
+    scores = {
+        "knowledge_value": 5,
+        "parent_dependency": 5,
+        "evidence_strength": 5,
+        "actionability": 5,
+        "freshness_risk": 4,
+        "novelty": 5,
+        "asset_fit": 5,
+        "cost_risk_inverse": 5,
+        "ambiguity_inverse": 5,
+    }
+    analysis = "## 九、派生决策 JSON\n```json\n" + json.dumps({
+        "candidates": [
+            {
+                "name": "Official Docs",
+                "target_type": "official_doc",
+                "target_url": "https://docs.example.com/api?token=secret&utm_source=x",
+                "reason": "需要核验 API 参数。",
+                "evidence": ["视频出现官方文档名称"],
+                "confidence": 0.95,
+                "scores": scores,
+            },
+            {
+                "name": "Credential Repo",
+                "target_type": "github_project",
+                "target_url": "https://user:pass@github.com/langchain-ai/langgraph",
+                "reason": "视频说它用于状态图。",
+                "evidence": ["口播 LangGraph"],
+                "confidence": 0.95,
+                "scores": scores,
+            },
+        ],
+    }, ensure_ascii=False) + "\n```"
+
+    decision = derive_tasks_from_analysis(
+        analysis,
+        source_id="unsafe-url-aweme",
+        source_url="https://v.douyin.com/unsafe/",
+        source_media="douyin_video",
+        ingest_intent="knowledge_ingest",
+        vault_path=vault,
+        task_id="derive-url-task",
+    )
+    public = public_derived_tasks(decision)
+    docs = next(item for item in public if item["name"] == "Official Docs")
+    repo = next(item for item in public if item["name"] == "Credential Repo")
+    assert docs["targetUrl"] == "https://docs.example.com/api"
+    assert docs["autoEligible"] is False
+    assert "manual_review_required_for_target_type" in docs["autoBlockReasons"]
+    assert repo["targetUrl"] == ""
+    assert repo["autoEligible"] is False
+    assert "url_contains_credentials" in repo["autoBlockReasons"]
+    log_text = (tmp / "derive-url-runtime" / "logs" / "derive-strategy-events.jsonl").read_text(encoding="utf-8")
+    assert "pass@github.com" not in log_text
+    assert "secret" not in log_text
+
+
 def test_vault_write_schema(tmp: Path) -> None:
     import sys
 
@@ -2805,6 +2933,7 @@ analyzer = "doubao-seed-2-1-pro-260628"
             "state": "ready",
             "provider": "doubao",
             "model": "doubao-seed-2-1-pro-260628",
+            "endpoint": "https://ark.cn-beijing.volces.com/api/v3",
             "checkedAt": "2026-07-02T12:00:00",
             "message": "模型连通正常",
         }, ensure_ascii=False),
@@ -2919,13 +3048,270 @@ def test_websocket_public_task_status_exposes_derived_candidates(tmp: Path) -> N
     server = LibrarianServer(enable_task_runner=False)
     item = server._public_task_status(status_file)
     assert item["derivedTasks"] == derived_tasks
-    assert item["derivedSummary"] == derived_summary
+    for key, value in derived_summary.items():
+        assert item["derivedSummary"][key] == value
     assert item["stageLabel"] == "派生候选已生成"
 
     snapshot = server.task_status_snapshot()
     assert snapshot["items"][0]["id"] == "task-derived-status"
     assert snapshot["items"][0]["derivedTasks"] == derived_tasks
-    assert snapshot["items"][0]["derivedSummary"] == derived_summary
+    for key, value in derived_summary.items():
+        assert snapshot["items"][0]["derivedSummary"][key] == value
+
+
+def test_websocket_auto_enqueues_derived_ingest_task(tmp: Path) -> None:
+    import asyncio
+    import sys
+
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "ws-runtime-derived-auto")
+    sys.path.insert(0, str(ROOT / "server"))
+    from websocket_server import LibrarianServer
+
+    server = LibrarianServer(enable_task_runner=False)
+    parent_status = {
+        "id": "parent-task",
+        "ok": True,
+        "stage": "done",
+        "source_url": "https://v.douyin.com/auto/",
+        "title": "Agent Harness 视频",
+        "assets": [{
+            "vault_path": str(tmp / "vault" / "知识资产" / "知识入库" / "20260705-parent.md"),
+        }],
+        "derived_tasks": [{
+            "id": "dt-auto",
+            "name": "LangGraph",
+            "targetType": "github_project",
+            "taskKind": "github_project_ingest",
+            "status": "auto_ready",
+            "autoEligible": True,
+            "score": 91,
+            "confidence": 0.9,
+            "reason": "视频用它做 Agent 状态图。",
+        }],
+    }
+    queued = asyncio.run(server.enqueue_auto_derived_tasks("parent-task", parent_status))
+    assert len(queued) == 1
+    child = queued[0]
+    assert child["type"] == "derived_ingest"
+    assert child["parent_task_id"] == "parent-task"
+    assert child["candidate"]["id"] == "dt-auto"
+    task_file = tmp / "ws-runtime-derived-auto" / "inbox" / f"{child['id']}.json"
+    status_file = tmp / "ws-runtime-derived-auto" / "status" / f"{child['id']}.json"
+    assert task_file.exists()
+    assert status_file.exists()
+    written = json.loads(task_file.read_text(encoding="utf-8"))
+    assert written["type"] == "derived_ingest"
+    assert written["parent_asset_path"].endswith("20260705-parent.md")
+    sidecar = json.loads((tmp / "ws-runtime-derived-auto" / "derived-actions" / "parent-task.json").read_text(encoding="utf-8"))
+    assert sidecar["items"]["dt-auto"]["childTaskId"] == child["id"]
+
+
+def test_websocket_derived_actions_require_ready_parent_and_valid_state(tmp: Path) -> None:
+    import asyncio
+    import sys
+
+    runtime = tmp / "ws-runtime-derived-action"
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
+    sys.path.insert(0, str(ROOT / "server"))
+    from websocket_server import LibrarianServer
+
+    status_dir = runtime / "status"
+    status_dir.mkdir(parents=True)
+    parent_file = status_dir / "parent-action.json"
+    parent_file.write_text(json.dumps({
+        "id": "parent-action",
+        "ok": None,
+        "stage": "derived_candidates_ready",
+        "source_url": "https://v.douyin.com/action/",
+        "derived_tasks": [{
+            "id": "dt-action",
+            "name": "LangGraph",
+            "targetType": "github_project",
+            "decision": "candidate",
+            "status": "candidate",
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+    server = LibrarianServer(enable_task_runner=False)
+    reply = asyncio.run(server.handle_derived_task_action({
+        "action": "confirm",
+        "taskId": "parent-action",
+        "derivedTaskId": "dt-action",
+    }))
+    assert reply["type"] == "derived_task_action_rejected"
+    assert reply["reason"] == "parent_asset_not_ready"
+
+    parent_asset = tmp / "vault" / "知识资产" / "知识入库" / "20260705-parent.md"
+    parent_asset.parent.mkdir(parents=True)
+    parent_asset.write_text("---\nrelated: []\n---\n# Parent\n", encoding="utf-8")
+    parent_file.write_text(json.dumps({
+        "id": "parent-action",
+        "ok": True,
+        "stage": "done",
+        "source_url": "https://v.douyin.com/action/",
+        "assets": [{"vault_path": str(parent_asset), "derived_tasks": []}],
+        "derived_tasks": [{
+            "id": "dt-existing",
+            "name": "LangGraph",
+            "targetType": "github_project",
+            "decision": "candidate",
+            "status": "existing_related",
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+    reply = asyncio.run(server.handle_derived_task_action({
+        "action": "confirm",
+        "taskId": "parent-action",
+        "derivedTaskId": "dt-existing",
+    }))
+    assert reply["type"] == "derived_task_action_rejected"
+    assert reply["reason"] == "candidate_status_not_executable"
+
+
+def test_websocket_derived_enqueue_is_idempotent_and_redacts_urls(tmp: Path) -> None:
+    import asyncio
+    import sys
+
+    runtime = tmp / "ws-runtime-derived-idempotent"
+    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
+    sys.path.insert(0, str(ROOT / "server"))
+    from websocket_server import LibrarianServer
+
+    vault = tmp / "vault"
+    parent = vault / "知识资产" / "知识入库" / "20260705-parent.md"
+    parent.parent.mkdir(parents=True, exist_ok=True)
+    parent.write_text("---\nrelated: []\n---\n# Parent\n", encoding="utf-8")
+    server = LibrarianServer(enable_task_runner=False)
+    parent_status = {
+        "id": "parent-idem",
+        "ok": True,
+        "stage": "done",
+        "source_url": "https://v.douyin.com/idem/",
+        "assets": [{
+            "vault_path": str(parent),
+            "derived_tasks": [{"id": "dt-idem"}],
+        }],
+        "derived_tasks": [{
+            "id": "dt-idem",
+            "name": "LangGraph",
+            "targetType": "github_project",
+            "taskKind": "github_project_ingest",
+            "status": "auto_ready",
+            "autoEligible": True,
+            "targetUrl": "https://github.com/langchain-ai/langgraph?access_token=secret&utm_source=x",
+        }],
+    }
+    queued = asyncio.run(server.enqueue_auto_derived_tasks("parent-idem", parent_status))
+    assert len(queued) == 1
+    child_id = queued[0]["id"]
+    status_file = runtime / "status" / f"{child_id}.json"
+    first_status = json.loads(status_file.read_text(encoding="utf-8"))
+    assert first_status["source_url"] == "https://github.com/langchain-ai/langgraph?utm_source=x"
+    assert "secret" not in status_file.read_text(encoding="utf-8")
+
+    status_file.write_text(json.dumps({"id": child_id, "ok": True, "stage": "done"}), encoding="utf-8")
+    queued_again = asyncio.run(server.enqueue_auto_derived_tasks("parent-idem", parent_status))
+    assert queued_again == []
+    assert json.loads(status_file.read_text(encoding="utf-8"))["stage"] == "done"
+
+
+def test_derive_executor_resolves_github_name_and_links_parent(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import derive_executor
+
+    def fake_json_request(url: str, *, timeout: int = 20):
+        if "search/repositories" in url:
+            return {
+                "items": [
+                    {
+                        "name": "langgraph",
+                        "full_name": "langchain-ai/langgraph",
+                        "description": "Build resilient language agents as graphs",
+                        "stargazers_count": 10000,
+                        "owner": {"login": "langchain-ai"},
+                    },
+                    {
+                        "name": "langgraph-demo",
+                        "full_name": "someone/langgraph-demo",
+                        "description": "Demo project",
+                        "stargazers_count": 1,
+                        "owner": {"login": "someone"},
+                    },
+                ]
+            }
+        if url.endswith("/readme"):
+            return {
+                "content": "TGFuZ0dyYXBoIGJ1aWxkcyBzdGF0ZWZ1bCBtdWx0aS1hY3RvciBhZ2VudHMgYXMgZ3JhcGhzLg=="
+            }
+        if "/repos/someone/langgraph-demo" in url:
+            return {
+                "name": "langgraph-demo",
+                "full_name": "someone/langgraph-demo",
+                "description": "Demo project",
+                "language": "Python",
+                "stargazers_count": 1,
+                "forks_count": 0,
+                "open_issues_count": 0,
+                "license": {"spdx_id": "MIT"},
+                "pushed_at": "2026-07-01T00:00:00Z",
+                "html_url": "https://github.com/someone/langgraph-demo",
+                "owner": {"login": "someone"},
+            }
+        return {
+            "name": "langgraph",
+            "full_name": "langchain-ai/langgraph",
+            "description": "Build resilient language agents as graphs",
+            "language": "Python",
+            "stargazers_count": 10000,
+            "forks_count": 1200,
+            "open_issues_count": 300,
+            "license": {"spdx_id": "MIT"},
+            "pushed_at": "2026-07-01T00:00:00Z",
+            "html_url": "https://github.com/langchain-ai/langgraph",
+            "owner": {"login": "langchain-ai"},
+        }
+
+    original = derive_executor._json_request
+    derive_executor._json_request = fake_json_request
+    try:
+        target = derive_executor.resolve_github_target({
+            "name": "LangGraph",
+            "reason": "视频说它用于 Agent 状态图和工作流编排。",
+            "evidence": ["口播 Agent 状态图"],
+        })
+    finally:
+        derive_executor._json_request = original
+    assert target.url == "https://github.com/langchain-ai/langgraph"
+    assert target.confidence >= 0.75
+
+    vault = tmp / "vault"
+    existing = vault / "知识资产" / "GitHub项目" / "20260705-existing-langgraph.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_text(
+        "---\n"
+        'title: "LangGraph 已有资产"\n'
+        'repo: "https://github.com/langchain-ai/langgraph?utm_source=old"\n'
+        "related: []\n"
+        "---\n"
+        "# LangGraph 已有资产\n",
+        encoding="utf-8",
+    )
+    existing_path, existing_title = derive_executor._existing_asset_for_target(vault, target)
+    assert existing_path == existing
+    assert existing_title == "LangGraph 已有资产"
+
+    parent = tmp / "20260705-parent.md"
+    child = tmp / "20260705-langgraph.md"
+    parent.write_text(
+        "---\nrelated: []\n---\n\n# Parent\n\n正文\n",
+        encoding="utf-8",
+    )
+    child.write_text("# Child\n", encoding="utf-8")
+    touched = derive_executor._link_parent_child(parent, child, "LangGraph 项目", "implements")
+    text = parent.read_text(encoding="utf-8")
+    assert touched == [parent]
+    assert "[[20260705-langgraph|LangGraph 项目]]" in text
+    assert "related:" in text
 
 
 def test_websocket_rejects_invalid_ingest_intent(tmp: Path) -> None:
@@ -2957,6 +3343,8 @@ def main() -> int:
         test_download_video_resumes_partial_file(tmp)
         test_ingest_url_preserves_share_text_argument()
         test_derive_strategy_scores_limits_dedupes_and_redacts(tmp)
+        test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp)
+        test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp)
         test_derive_strategy_ignores_candidates_json_outside_derived_section(tmp)
         test_derived_status_prefers_knowledge_decision_even_when_second()
         test_vault_write_schema(tmp)
@@ -2995,6 +3383,10 @@ def main() -> int:
         test_codex_handoff_is_marked_archived()
         test_websocket_accepts_task_request(tmp)
         test_websocket_public_task_status_exposes_derived_candidates(tmp)
+        test_websocket_auto_enqueues_derived_ingest_task(tmp)
+        test_websocket_derived_actions_require_ready_parent_and_valid_state(tmp)
+        test_websocket_derived_enqueue_is_idempotent_and_redacts_urls(tmp)
+        test_derive_executor_resolves_github_name_and_links_parent(tmp)
         test_websocket_rejects_invalid_ingest_intent(tmp)
     print("P0 static checks passed")
     return 0

@@ -96,7 +96,7 @@ vault/
 
 > 目录按 `asset_family` 分区；来源信息写入 frontmatter。缺失必备章节视为不完整资产。
 
-### D. 派生任务候选不是资产
+### D. 派生任务候选与派生资产
 
 视频/图文知识入库可以生成派生任务候选，例如 GitHub 项目、官方文档、API 文档或网页研究。候选只是运行态决策记录，不是正式知识资产：
 
@@ -107,6 +107,13 @@ vault/
 - 父资产 frontmatter 只允许保留 `derived_candidate_record` 和 `derived_candidate_ids` 这种轻量引用。
 
 完整评分、证据、去重状态、执行建议、验收标准、父资产追溯信息必须留在系统记录 JSON，不得塞进资产 frontmatter。
+
+高置信、低风险、可解析的 GitHub 项目候选可以自动进入 `derived_ingest` 派生执行队列。`official_doc` 和 `web_research` 在官方性校验/多源核验能力完善前只进入候选或人工确认。派生工具执行完成后才生成正式资产，并回写真实存在的 Obsidian wikilink：
+
+- `github_project` -> `type: github_project` / `asset_family: github_project` / `source_media: github`
+- `official_doc` / `web_research` -> `type: web_clip` / `asset_family: knowledge_asset` / `source_media: webpage`，并写 `derived_kind`
+- 父资产 `related` 追加子资产链接；子资产 `derived_from` 和 `related` 回链父资产
+- 候选阶段禁止写未来 `[[wikilink]]`，避免死链
 
 ---
 
@@ -140,7 +147,7 @@ related: []                 # 关联的 [[笔记名]] 列表
 | `type` | 是 | 来源模板类型：`video_analysis` / `image_post_analysis` / `github_project` / `web_clip` / `code_module` |
 | `asset_family` | 是 | `knowledge_asset` / `creative_pattern` / `github_project` / `code_module` / `idea_asset` |
 | `source_media` | 是 | `douyin_video` / `douyin_image_post` / `webpage` / `github` / `manual` / `other` |
-| `ingest_intent` | 是 | `knowledge_ingest` / `viral_breakdown` / `manual` |
+| `ingest_intent` | 是 | `knowledge_ingest` / `viral_breakdown` / `manual` / `derived_ingest` |
 | `title` | 是 | ≤60字，中文优先 |
 | `source_url` | 是 | 原始链接，无来源填 `"manual"` |
 | `ingested` | 是 | `YYYY-MM-DD` |
@@ -165,9 +172,9 @@ related: []                 # 关联的 [[笔记名]] 列表
 
 所有标签必须先在此登记，再在资产中使用。新增标签时 agent 必须同步更新本章。
 
-**平台类：** `douyin` `bilibili` `youtube` `github` `zhihu` `weixin` `xiaohongshu` `hackernews` `arxiv` `medium` `substack` `twitter`
+**平台类：** `douyin` `bilibili` `youtube` `github` `webpage` `zhihu` `weixin` `xiaohongshu` `hackernews` `arxiv` `medium` `substack` `twitter`
 
-**领域类：** `ai-agent` `video-analysis` `image-analysis` `code-generation` `knowledge-management` `creative-pattern` `web-scraping` `api-design` `prompt-engineering` `llm` `rag` `mcp` `tool-use` `browser-automation`
+**领域类：** `ai-agent` `video-analysis` `image-analysis` `code-generation` `knowledge-management` `creative-pattern` `web-scraping` `api-design` `prompt-engineering` `llm` `rag` `mcp` `tool-use` `browser-automation` `derived-asset` `official-doc` `web-research` `project`
 
 **类型类：** `knowledge-asset` `tutorial` `reference` `case-study` `tool` `library` `framework` `opinion` `news` `paper` `sop`
 

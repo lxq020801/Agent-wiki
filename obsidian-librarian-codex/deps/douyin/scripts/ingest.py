@@ -175,7 +175,7 @@ def _format_derived_tasks_section(
     if not items:
         return "- 暂无达到候选阈值的派生任务。"
     lines = [
-        "> 默认只生成候选，不自动执行；需要确认后再进入派生任务队列。",
+        "> 高置信、低风险、可解析的候选会自动进入派生队列；其余候选需要确认或补充目标。",
         "",
         "| 决策 | 类型 | 名称 | 分数 | 状态 | 原因 |",
         "|---|---|---|---:|---|---|",
@@ -1188,7 +1188,7 @@ async def run_task(
     total_cost = _combine_costs(costs)
     sw.update(cost_estimate=total_cost)
 
-    # ── 阶段 4：派生候选决策（只生成候选，不默认执行） ──
+    # ── 阶段 4：派生候选决策（高置信候选后续由服务端自动入队） ──
     derived_decisions: dict[str, dict[str, Any]] = {}
     for intent, result in results.items():
         decision = derive_tasks_from_analysis(
