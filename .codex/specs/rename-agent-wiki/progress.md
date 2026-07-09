@@ -3,8 +3,8 @@
 ## Current State（当前状态）
 
 - Controller branch（控制分支）：`codex/rename-agent-wiki`
-- Current phase（当前阶段）：Stage 2 Internal Slug and Protocol Identifiers（内部短名和协议标识）已提交；准备派发 Stage 3 Runtime Directory and Environment Variables（运行数据目录和环境变量）
-- Execution started（执行是否开始）：是，仅执行 Stage 0 盘点；产品代码尚未改名
+- Current phase（当前阶段）：Stage 3 Runtime Directory and Environment Variables（运行数据目录和环境变量）已提交；准备派发 Stage 4 Active Documentation and Reference Rewrite（有效文档和参考资料重写）
+- Execution started（执行是否开始）：是，Stage 1-3 已开始并提交产品代码改名
 - Runtime migration started（运行数据迁移是否开始）：否
 - Final merge completed（最终合并是否完成）：否
 
@@ -26,7 +26,7 @@
 | 0 | Preflight and Inventory（执行前检查和盘点） | completed（已完成） | `019f47e1-5aae-72a0-8099-47f9f193d35e` | `fb7d012` | 仅更新本文件；未改产品代码 |
 | 1 | User-Facing Display Rename（用户可见名称改名） | completed（已完成） | `019f47e8-860f-79d1-8512-749ddcd3e48a` | `9c38029` | 改用户可见展示名；未改 runtime/env/protocol |
 | 2 | Internal Slug and Protocol Identifiers（内部短名和协议标识） | completed（已完成） | `019f47f0-396d-7343-a60c-9eb846be87fb` | `5f3c6d0` | 改内部短名、协议/client id、User-Agent、本地 Git bot；未改 runtime/env |
-| 3 | Runtime Directory and Environment Variables（运行数据目录和环境变量） | pending（待处理） |  |  |  |
+| 3 | Runtime Directory and Environment Variables（运行数据目录和环境变量） | completed（已完成） | `019f47f7-ef2f-7ca2-a3aa-52548ac01dfd` + controller verification（控制会话验证） | `3122d43` | 改默认 runtime 目录和 env var；未迁移真实运行数据 |
 | 4 | Active Documentation and Reference Rewrite（有效文档和参考资料重写） | pending（待处理） |  |  |  |
 | 5 | Tests and Fixtures（测试和测试夹具） | pending（待处理） |  |  |  |
 | 6 | Full Repository Legacy-Name Sweep（全仓库旧名称清扫） | pending（待处理） |  |  |  |
@@ -41,6 +41,7 @@
 - Stage 0 已由任务会话完成，并由 controller 提交为 `fb7d012`（`Record Stage 0 rename inventory`）。
 - Stage 1 已由任务会话完成，controller 补充一处 `derive_executor.py` 命令行展示文案，并提交为 `9c38029`（`Rename user-facing display name to Agent-wiki`）。
 - Stage 2 已由任务会话完成，并由 controller 提交为 `5f3c6d0`（`Rename internal protocol identifiers to agent-wiki`）。
+- Stage 3 retry 任务会话留下 runtime/env 改名结果，controller 验证并提交为 `3122d43`（`Rename runtime defaults and env vars to Agent-wiki`）。
 
 ## Inventory Notes（盘点记录）
 
@@ -160,6 +161,13 @@ High-hit tracked files（高命中文件，供后续阶段拆分）：
   - `git diff --check` -> 通过，无输出
   - `git status --short --branch` -> `## codex/rename-agent-wiki` plus `M .codex/specs/rename-agent-wiki/progress.md`
   - 未运行测试；Stage 0 仅为盘点和进度记录，未改产品代码。
+- Stage 3:
+  - Changed files（变更文件）：仅限 Stage 3 允许的 14 个 active code/current docs 文件
+  - `git diff --check` -> 通过，无输出
+  - `python3 -m py_compile ...` -> 通过，无输出
+  - `bash -n obsidian-librarian-codex/deps/douyin/setup.sh obsidian-librarian-codex/setup-extension.sh` -> 通过，无输出
+  - allowed-file legacy search（允许文件旧名搜索）：`OBSIDIAN_LIBRARIAN|~/.obsidian-librarian|\.obsidian-librarian|\$HOME/.obsidian-librarian` -> 无命中
+  - runtime migration（运行数据迁移）：未开始，未创建/复制/删除真实 runtime 目录
 
 ## Blockers（阻塞点）
 
