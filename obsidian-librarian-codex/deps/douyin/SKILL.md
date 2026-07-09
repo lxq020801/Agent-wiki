@@ -1,7 +1,7 @@
-# obsidian-librarian Douyin Ingest Tool
+# Agent-wiki Douyin Ingest Tool
 
 This folder is the Douyin execution layer for the top-level
-obsidian-librarian Agent skill. The Agent-facing entrypoint is:
+Agent-wiki skill. The Agent-facing entrypoint is:
 
 ```bash
 python3 scripts/ingest_url.py "<douyin-url>"

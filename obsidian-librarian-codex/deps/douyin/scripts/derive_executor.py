@@ -1623,7 +1623,7 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Execute an Obsidian Librarian derived task")
+    parser = argparse.ArgumentParser(description="Execute an Agent-wiki derived task")
     parser.add_argument("--task", required=True, help="derived_ingest task JSON path")
     args = parser.parse_args(argv)
     task_file = Path(args.task).expanduser()

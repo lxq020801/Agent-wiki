@@ -1,13 +1,13 @@
 ---
 name: obsidian-librarian
-description: "给 Codex 看的中文项目说明书：定义 obsidian-librarian 的 harness、工具、扩展三层形态、vault 宪法、当前运行口径与红线；用于抖音入库、配置/Cookie 同步和知识库维护。"
+description: "给 Codex 看的中文项目说明书：定义 Agent-wiki 的 harness、工具、扩展三层形态、vault 宪法、当前运行口径与红线；用于抖音入库、配置/Cookie 同步和知识库维护。"
 ---
 
-# Obsidian Librarian
+# Agent-wiki
 
 > 这是给 AI 看的项目说明书，不是开发计划书，也不是项目回顾。
 
-obsidian-librarian 是一个面向 Agent 的本地知识库系统。项目只有三个产物：
+Agent-wiki 是一个面向 Agent 的本地知识库系统。项目只有三个产物：
 
 - **harness**：给 AI 的说明书、约束、边界、入库规则、失败处理
 - **工具**：真正执行下载、分析、写库、索引、提交的脚本
@@ -17,7 +17,7 @@ AI 是主执行面；Chrome 扩展只是辅助控制台。
 
 ## 这个项目是什么
 
-obsidian-librarian 是一个 Agent 驱动的个人知识资产系统。它把外部内容、个人灵感、项目经验和表达样本沉淀成 Obsidian 中可维护、可召回、可复用的资产，让未来 AI 工作从本地资产出发。
+Agent-wiki 是一个 Agent 驱动的个人知识资产系统。它把外部内容、个人灵感、项目经验和表达样本沉淀成 Obsidian 中可维护、可召回、可复用的资产，让未来 AI 工作从本地资产出发。
 
 用户可以在 Agent 会话里发链接，也可以在扩展里点页面入口。无论入口在哪里，Agent/工具链都负责最终分类、下载、分析、写入知识库、更新索引、提交 git，再把结果回给用户。
 

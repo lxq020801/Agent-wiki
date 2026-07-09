@@ -12,7 +12,7 @@ if [ ! -d "$EXT_DIR" ]; then
 fi
 
 echo "═══════════════════════════════════════════════════"
-echo "  Obsidian Librarian — Chrome 扩展安装"
+echo "  Agent-wiki — Chrome 扩展安装"
 echo "═══════════════════════════════════════════════════"
 echo ""
 

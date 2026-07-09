@@ -1,6 +1,6 @@
-# Obsidian Librarian
+# Agent-wiki
 
-Obsidian Librarian 是一个 Agent 驱动的个人知识资产系统。它把抖音视频/图文等外部内容沉淀进 Obsidian，让未来 AI 工作可以从本地知识资产出发。
+Agent-wiki 是一个 Agent 驱动的个人知识资产系统。它把抖音视频/图文等外部内容沉淀进 Obsidian，让未来 AI 工作可以从本地知识资产出发。
 
 项目由三部分组成：
 

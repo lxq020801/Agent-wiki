@@ -1,4 +1,4 @@
-// popup.js - Obsidian Librarian control console
+// popup.js - Agent-wiki control console
 // 首页只负责提交拆解任务；设置页负责 API、Cookie、Vault 与拆解偏好。
 
 const WS_URL = 'ws://127.0.0.1:8765';

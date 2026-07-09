@@ -411,7 +411,7 @@ def _origin_allowed(websocket):
 
 
 class LibrarianServer:
-    """Obsidian Librarian WebSocket 服务器
+    """Agent-wiki WebSocket 服务器
     
     职责：
       1. 接收扩展发送的配置和 cookie

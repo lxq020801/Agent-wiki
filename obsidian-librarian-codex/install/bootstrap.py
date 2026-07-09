@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Agent bootstrap for obsidian-librarian.
+Agent bootstrap for Agent-wiki.
 
 This is the Scheme C entrypoint: every Agent-facing workflow can run this first.
 It prepares what can be prepared automatically and reports only the user actions
@@ -39,7 +39,7 @@ PROVIDER_KEY_SECTIONS = {
 EXTENSION_COPY_IGNORES = {".DS_Store", "__pycache__"}
 
 BOOTSTRAP_CONFIG_TEMPLATE = """\
-# obsidian-librarian runtime config
+# Agent-wiki runtime config
 # Fill these fields through the Chrome extension control console.
 
 [provider]
@@ -462,7 +462,7 @@ def check_vault(result: CheckResult) -> None:
                 f"vault path repaired: {vault} ({discovery.selected.source})"
             )
         else:
-            result.missing_user_actions.append("Select or initialize an Obsidian Librarian vault in the extension.")
+            result.missing_user_actions.append("Select or initialize an Agent-wiki vault in the extension.")
             return
     vault = vault.resolve()
     for rel in [
@@ -491,12 +491,12 @@ def bootstrap(*, install_deps: bool = True) -> CheckResult:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Prepare obsidian-librarian runtime")
+    parser = argparse.ArgumentParser(description="Prepare Agent-wiki runtime")
     parser.add_argument("--skip-install-deps", action="store_true", help="skip Python dependency installation")
     args = parser.parse_args(argv)
 
     result = bootstrap(install_deps=not args.skip_install_deps)
-    print("obsidian-librarian bootstrap")
+    print("Agent-wiki bootstrap")
     print(f"project: {PROJECT_ROOT}")
     print(f"runtime: {RUNTIME_ROOT}")
     for item in result.actions:

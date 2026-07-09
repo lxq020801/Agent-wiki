@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Obsidian Librarian 启动器
+Agent-wiki 启动器
 
 职责：
   1. 检查环境（venv、依赖、目录）
@@ -93,7 +93,7 @@ def start_server():
 def main():
     """主入口"""
     print("=" * 50)
-    print("Obsidian Librarian 启动器")
+    print("Agent-wiki 启动器")
     print("=" * 50)
     
     # 1. 自动初始化
