@@ -7,6 +7,15 @@
 - [ ] Each completed stage has either a commit or a documented reason for batching.
 - [ ] No task session performed out-of-scope edits.
 
+## Rollback Readiness
+
+- [ ] `main` remains unchanged until final user-approved merge.
+- [ ] Starting `main` commit is recorded in `progress.md`.
+- [ ] Starting rename branch commit is recorded in `progress.md`.
+- [ ] Every completed stage commit is recorded in `progress.md`.
+- [ ] Any failed committed stage is fixed by a follow-up commit or reverted with user-visible reporting.
+- [ ] No `git reset`, force-push, branch deletion, or runtime-data deletion is performed without explicit user approval.
+
 ## Product Naming
 
 - [ ] User-facing product name is `Agent-wiki`.
@@ -36,10 +45,12 @@
 - [ ] Old runtime directory was inspected.
 - [ ] New runtime directory was inspected.
 - [ ] Backup was created before migration.
+- [ ] Backup path was recorded in `progress.md`.
 - [ ] Config migrated or regenerated.
 - [ ] Cookie migrated if present.
 - [ ] Inbox/status/logs/run-artifacts/response-memory migrated if present.
 - [ ] Migration verification recorded.
+- [ ] Old runtime directory was not deleted unless the user explicitly approved deletion after verification.
 
 ## Validation
 

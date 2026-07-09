@@ -8,6 +8,15 @@
 - Runtime migration started: no
 - Final merge completed: no
 
+## Rollback Baseline
+
+- `main` baseline at spec review: `79c9506` (`Tighten derived candidate visibility rules`)
+- Spec scaffold commit: `ebd111b` (`Add Agent-wiki rename spec`)
+- Product rename implementation started: no
+- Rollback before final merge: switch back to `main` or stop using `codex/rename-agent-wiki`
+- Runtime backup created: no, because runtime migration has not started
+- Runtime deletion approved: no
+
 ## Stage Progress
 
 | Stage | Name | Status | Session | Commit | Notes |
@@ -25,6 +34,7 @@
 ## Controller Log
 
 - Created spec scaffold for full rename to `Agent-wiki`.
+- Reviewed spec safety posture and added explicit rollback rules.
 - No product rename implementation has started yet.
 
 ## Inventory Notes

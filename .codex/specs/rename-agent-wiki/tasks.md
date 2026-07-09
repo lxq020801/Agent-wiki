@@ -8,6 +8,8 @@ One stage equals one task session and normally one commit. The controller sessio
 
 - [ ] Confirm current branch is `codex/rename-agent-wiki`.
 - [ ] Confirm working tree is clean before edits.
+- [ ] Record the current `main` commit as the rollback baseline.
+- [ ] Record the current rename branch commit before product edits begin.
 - [ ] Inventory all legacy-name occurrences in tracked active files.
 - [ ] Categorize occurrences into display name, internal slug, runtime path, environment variable, protocol/client id, docs/history, tests, and local-only ignored files.
 - [ ] Produce a replacement map before editing.
@@ -15,6 +17,7 @@ One stage equals one task session and normally one commit. The controller sessio
 Acceptance:
 
 - Inventory commands and counts are recorded in `progress.md`.
+- Rollback baseline commits are recorded in `progress.md`.
 - No product files are changed in this stage unless the controller requests it.
 
 ## Stage 1: User-Facing Display Rename
@@ -96,13 +99,16 @@ Acceptance:
 - [ ] Inspect whether the old runtime directory exists.
 - [ ] Inspect whether `~/.agent-wiki/` already exists.
 - [ ] Create a timestamped backup before moving or copying data.
+- [ ] Copy or migrate data only after backup creation is verified.
 - [ ] Migrate config, cookie, status, inbox, logs, run artifacts, extension files, service files, and response memory.
 - [ ] Verify migrated files exist.
+- [ ] Leave the old runtime directory in place unless the user explicitly approves deletion after verification.
 
 Acceptance:
 
 - Runtime data is present under `~/.agent-wiki/`.
 - Backup path is recorded.
+- Old runtime directory deletion was not performed without explicit user approval.
 - No old runtime path is required by code.
 
 ## Stage 8: Final Validation and Merge Readiness
@@ -111,6 +117,7 @@ Acceptance:
 - [ ] Run tests if `pytest` is available.
 - [ ] Run `git status`.
 - [ ] Run legacy-name search after removing or relocating temporary spec artifacts.
+- [ ] Confirm rollback records, stage commits, and runtime backup records are complete.
 - [ ] Produce final summary and merge recommendation.
 
 Acceptance:

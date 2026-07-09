@@ -102,6 +102,26 @@ This keeps automatic execution possible while preventing context drift.
 - Do not merge to `main` until all checklist items pass.
 - Do not push to GitHub until the user confirms repository setup and visibility.
 
+## Rollback and Recovery Plan
+
+Before final merge, `main` is the safe return point. The rename work lives on `codex/rename-agent-wiki`; abandoning or pausing this branch must leave `main` unchanged.
+
+Stage commits are checkpoints:
+
+1. Record the starting `main` commit before Stage 0 begins.
+2. Record every completed stage commit in `progress.md`.
+3. If a stage is wrong after commit, prefer a new fix commit or `git revert` for that specific stage commit.
+4. Do not use `git reset`, force-push, delete branches, or delete runtime data unless the user explicitly approves that exact action.
+
+Runtime data rollback is separate from code rollback:
+
+1. Runtime migration happens only in Stage 7.
+2. Stage 7 must create and record a timestamped backup before copying or moving data.
+3. Migration should be copy-first and verify-first.
+4. The old runtime directory must not be deleted during Stage 7 unless the user explicitly approves deletion after verification.
+
+If the branch has been pushed or a pull request exists later, recovery should normally close the pull request or revert the merge commit. Do not force-push as a default recovery action.
+
 ## Global Safety Rules
 
 - Never use broad destructive cleanup without an explicit stage instruction.
