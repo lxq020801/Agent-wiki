@@ -3,7 +3,7 @@
 ## Current State（当前状态）
 
 - Controller branch（控制分支）：`codex/rename-agent-wiki`
-- Current phase（当前阶段）：Stage 1 User-Facing Display Rename（用户可见名称改名）已提交；准备派发 Stage 2 Internal Slug and Protocol Identifiers（内部短名和协议标识）
+- Current phase（当前阶段）：Stage 2 Internal Slug and Protocol Identifiers（内部短名和协议标识）已提交；准备派发 Stage 3 Runtime Directory and Environment Variables（运行数据目录和环境变量）
 - Execution started（执行是否开始）：是，仅执行 Stage 0 盘点；产品代码尚未改名
 - Runtime migration started（运行数据迁移是否开始）：否
 - Final merge completed（最终合并是否完成）：否
@@ -25,7 +25,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 0 | Preflight and Inventory（执行前检查和盘点） | completed（已完成） | `019f47e1-5aae-72a0-8099-47f9f193d35e` | `fb7d012` | 仅更新本文件；未改产品代码 |
 | 1 | User-Facing Display Rename（用户可见名称改名） | completed（已完成） | `019f47e8-860f-79d1-8512-749ddcd3e48a` | `9c38029` | 改用户可见展示名；未改 runtime/env/protocol |
-| 2 | Internal Slug and Protocol Identifiers（内部短名和协议标识） | pending（待处理） |  |  |  |
+| 2 | Internal Slug and Protocol Identifiers（内部短名和协议标识） | completed（已完成） | `019f47f0-396d-7343-a60c-9eb846be87fb` | `5f3c6d0` | 改内部短名、协议/client id、User-Agent、本地 Git bot；未改 runtime/env |
 | 3 | Runtime Directory and Environment Variables（运行数据目录和环境变量） | pending（待处理） |  |  |  |
 | 4 | Active Documentation and Reference Rewrite（有效文档和参考资料重写） | pending（待处理） |  |  |  |
 | 5 | Tests and Fixtures（测试和测试夹具） | pending（待处理） |  |  |  |
@@ -40,6 +40,7 @@
 - 已把 spec 文档改为中文说明，方便后续会话和用户共同阅读。
 - Stage 0 已由任务会话完成，并由 controller 提交为 `fb7d012`（`Record Stage 0 rename inventory`）。
 - Stage 1 已由任务会话完成，controller 补充一处 `derive_executor.py` 命令行展示文案，并提交为 `9c38029`（`Rename user-facing display name to Agent-wiki`）。
+- Stage 2 已由任务会话完成，并由 controller 提交为 `5f3c6d0`（`Rename internal protocol identifiers to agent-wiki`）。
 
 ## Inventory Notes（盘点记录）
 
