@@ -5,7 +5,7 @@
 //   3. 安装时初始化
 
 const WS_URL = 'ws://127.0.0.1:8765';
-const MODEL_HEALTH_ALARM = 'obsidian-librarian-model-health';
+const MODEL_HEALTH_ALARM = 'agent-wiki-model-health';
 const NOTIFICATION_ICON = 'icons/icon-128.png';
 const DEBUG_LOGS = false;
 const PROVIDERS = {
@@ -265,7 +265,7 @@ function connectWebSocket() {
       // 发送握手
       socket.send(JSON.stringify({
         type: 'handshake',
-        client: 'obsidian-librarian-background',
+        client: 'agent-wiki-background',
         version: '0.1.0'
       }));
 

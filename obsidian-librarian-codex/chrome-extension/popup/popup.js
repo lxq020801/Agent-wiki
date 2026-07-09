@@ -276,7 +276,7 @@ function connectWebSocket() {
       updateConnectionStatus(true);
       ws.send(JSON.stringify({
         type: 'handshake',
-        client: 'obsidian-librarian-extension',
+        client: 'agent-wiki-extension',
         version: '0.1.0'
       }));
       requestStatus();

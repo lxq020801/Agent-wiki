@@ -1,5 +1,5 @@
 ---
-name: obsidian-librarian
+name: agent-wiki
 description: "给 Codex 看的中文项目说明书：定义 Agent-wiki 的 harness、工具、扩展三层形态、vault 宪法、当前运行口径与红线；用于抖音入库、配置/Cookie 同步和知识库维护。"
 ---
 

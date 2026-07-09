@@ -338,7 +338,7 @@ def load_config(path: Optional[Path] = None) -> Config:
 
 
 CONFIG_TEMPLATE = """\
-# obsidian-librarian 配置文件
+# Agent-wiki 配置文件
 # 由 Agent 自动初始化。⚠️ 标记的字段需要用户填写。
 # 后期 Chrome 扩展会提供 GUI 编辑，目前手动填。
 

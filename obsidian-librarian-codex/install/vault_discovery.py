@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fast, bounded Obsidian vault discovery for obsidian-librarian.
+"""Fast, bounded Obsidian vault discovery for agent-wiki.
 
 This module deliberately avoids full-disk scans. It only inspects high-signal
 locations: existing runtime config, current working directory ancestry,
@@ -100,7 +100,7 @@ def _looks_like_skill_package(path: Path) -> bool:
     ):
         return False
     text = _read_text_prefix(path / "SKILL.md")
-    return "name: obsidian-librarian" in text or "obsidian-librarian" in text
+    return "name: agent-wiki" in text or "agent-wiki" in text
 
 
 def _has_required_signal_combo(reasons: list[str]) -> bool:
@@ -109,7 +109,7 @@ def _has_required_signal_combo(reasons: list[str]) -> bool:
 
     has_obsidian = ".obsidian" in reasons
     strong_markers = {
-        "SCHEMA.md:obsidian-librarian",
+        "SCHEMA.md:agent-wiki",
         "index.md:知识库索引",
         "知识资产",
         "知识资产（Knowledge Assets）",
@@ -129,7 +129,7 @@ def _has_required_signal_combo(reasons: list[str]) -> bool:
     if has_obsidian and marker_count >= 1:
         return True
 
-    # A newly initialized obsidian-librarian vault may not have .obsidian yet,
+    # A newly initialized agent-wiki vault may not have .obsidian yet,
     # but it should have at least two independent project markers.
     return strong_count >= 1 and marker_count >= 2
 
@@ -153,7 +153,7 @@ def score_vault(path: Path, *, source: str) -> Optional[VaultCandidate]:
         text = _read_text_prefix(schema)
         if "知识库宪法" in text or "SCHEMA.md" in text:
             score += 35
-            reasons.append("SCHEMA.md:obsidian-librarian")
+            reasons.append("SCHEMA.md:agent-wiki")
         else:
             score += 20
             reasons.append("SCHEMA.md")

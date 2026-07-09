@@ -1903,7 +1903,7 @@ async def analyze_video_many(
             "overlap_sec": _CHUNK_OVERLAP_SEC,
             "duration_sec": duration,
         })
-        with tempfile.TemporaryDirectory(prefix="obsidian-librarian-chunks-") as tmpdir:
+        with tempfile.TemporaryDirectory(prefix="agent-wiki-chunks-") as tmpdir:
             chunk_paths = await asyncio.to_thread(
                 _split_video_for_chunks,
                 video_path,

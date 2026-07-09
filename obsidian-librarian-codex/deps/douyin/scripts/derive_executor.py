@@ -405,7 +405,7 @@ def _archive_task(task_file: Path, base_dir: Path, ok: bool) -> Path:
 def _json_request(url: str, *, timeout: int = 20) -> dict[str, Any]:
     req = urllib.request.Request(url, headers={
         "Accept": "application/vnd.github+json",
-        "User-Agent": "obsidian-librarian-derive",
+        "User-Agent": "agent-wiki-derive",
     })
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -420,7 +420,7 @@ def _text_request(url: str, *, timeout: int = 25) -> tuple[str, str]:
     _ensure_safe_external_url(url)
     req = urllib.request.Request(url, headers={
         "Accept": "text/html, text/plain;q=0.9, */*;q=0.8",
-        "User-Agent": "obsidian-librarian-derive",
+        "User-Agent": "agent-wiki-derive",
     })
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

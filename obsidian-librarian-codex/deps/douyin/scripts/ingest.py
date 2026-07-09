@@ -736,8 +736,8 @@ def _git_commit(
             raise RuntimeError("git init failed")
 
     for key, value in [
-        ("user.name", "Obsidian Librarian"),
-        ("user.email", "obsidian-librarian@local"),
+        ("user.name", "Agent-wiki"),
+        ("user.email", "agent-wiki@local"),
     ]:
         current = subprocess.run(
             ["git", "config", "--local", "--get", key],
@@ -1487,7 +1487,7 @@ class IngestError(Exception):
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Douyin video ingest for obsidian-librarian"
+        description="Douyin video ingest for Agent-wiki"
     )
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--task", type=Path,
