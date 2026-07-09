@@ -24,7 +24,7 @@ except ImportError:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_ROOT = Path(os.environ.get("OBSIDIAN_LIBRARIAN_HOME", "~/.obsidian-librarian")).expanduser()
+RUNTIME_ROOT = Path(os.environ.get("AGENT_WIKI_HOME", "~/.agent-wiki")).expanduser()
 DOUYIN_DIR = PROJECT_ROOT / "deps" / "douyin"
 DOUYIN_VENV = DOUYIN_DIR / ".venv"
 DOUYIN_REQ = DOUYIN_DIR / "requirements.txt"
@@ -65,7 +65,7 @@ fps_max = 5.0
 file_active_timeout_sec = 120
 
 [douyin]
-cookie_path = "~/.obsidian-librarian/cookie/douyin.txt"
+cookie_path = "~/.agent-wiki/cookie/douyin.txt"
 
 [vault]
 path = ""

@@ -310,10 +310,10 @@ def _check_size(path: Path) -> int:
 
 
 def _runtime_root() -> Path:
-    raw = os.environ.get("OBSIDIAN_LIBRARIAN_HOME")
+    raw = os.environ.get("AGENT_WIKI_HOME")
     if raw:
         return Path(raw).expanduser()
-    return Path.home() / ".obsidian-librarian"
+    return Path.home() / ".agent-wiki"
 
 
 def _safe_artifact_name(value: Any, *, default: str = "run") -> str:

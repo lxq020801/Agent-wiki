@@ -39,7 +39,7 @@ from ingest import (
 from status_writer import StatusWriter, write_terminal
 
 
-DEFAULT_BRIDGE_ROOT = Path.home() / ".obsidian-librarian"
+DEFAULT_BRIDGE_ROOT = Path.home() / ".agent-wiki"
 _AUDIT_ROOT_NAME = "run-artifacts"
 AUTO_MATCH_SCORE = 6
 AUTO_MATCH_MARGIN = 2
@@ -121,7 +121,7 @@ def _redact_value(value: Any) -> Any:
 
 
 def _runtime_root() -> Path:
-    raw = os.environ.get("OBSIDIAN_LIBRARIAN_HOME")
+    raw = os.environ.get("AGENT_WIKI_HOME")
     if raw:
         return Path(raw).expanduser()
     return DEFAULT_BRIDGE_ROOT

@@ -46,10 +46,10 @@ def _is_connection_closed(exc):
 
 
 def default_runtime_root():
-    raw = os.environ.get("OBSIDIAN_LIBRARIAN_HOME")
+    raw = os.environ.get("AGENT_WIKI_HOME")
     if raw:
         return Path(raw).expanduser()
-    return Path.home() / ".obsidian-librarian"
+    return Path.home() / ".agent-wiki"
 
 
 DEFAULT_TASK_CONCURRENCY = 2
@@ -119,7 +119,7 @@ def _normalize_chunk_concurrency(value, default=2):
 
 
 def default_task_concurrency(runtime_root=None):
-    raw = os.environ.get("OBSIDIAN_LIBRARIAN_TASK_CONCURRENCY")
+    raw = os.environ.get("AGENT_WIKI_TASK_CONCURRENCY")
     if raw:
         return _normalize_task_concurrency(raw)
     if runtime_root is not None:

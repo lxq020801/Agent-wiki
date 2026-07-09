@@ -78,7 +78,7 @@ frontmatter 必须同时记录 `asset_family`、`source_media`、`ingest_intent`
 当前运行态默认落在：
 
 ```text
-~/.obsidian-librarian/
+~/.agent-wiki/
 ├── config.toml      --- 扩展写入，Agent 读取
 ├── cookie/
 ├── cache/
@@ -158,7 +158,7 @@ python3 scripts/ingest_url.py "<douyin-url>" --intent knowledge_ingest
 它会自动：
 
 1. 跑 bootstrap
-2. 读 `~/.obsidian-librarian/config.toml`
+2. 读 `~/.agent-wiki/config.toml`
 3. 用 Cookie 下载视频
 4. 固定按 `quality` 档调 Ark 做视频分析
 5. 按 `SCHEMA.md` 写入 vault，并依据 `ingest_intent` 选择资产用途

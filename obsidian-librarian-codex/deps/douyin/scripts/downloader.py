@@ -600,7 +600,7 @@ def _cli_main() -> int:
     parser = argparse.ArgumentParser(description="抖音下载（debug 用）")
     parser.add_argument("url", help="抖音链接或分享口令文本")
     parser.add_argument(
-        "--cookie", default="~/.obsidian-librarian/cookie/douyin.txt"
+        "--cookie", default="~/.agent-wiki/cookie/douyin.txt"
     )
     parser.add_argument("--out-dir", default="/tmp/douyin-test")
     parser.add_argument("--meta-only", action="store_true", help="只取 metadata")

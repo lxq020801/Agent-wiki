@@ -18,7 +18,7 @@ download, analysis, vault writes, status, and git commits.
 | `scripts/ingest.py` | Orchestrate download, analysis, vault write, index update, git commit |
 | `scripts/downloader.py` | Resolve Douyin URL, inject Cookie in memory, download mp4 |
 | `scripts/analyzer.py` | Choose Ark video input path, call Responses API, return analysis text |
-| `scripts/config_loader.py` | Load `~/.obsidian-librarian/config.toml` |
+| `scripts/config_loader.py` | Load `~/.agent-wiki/config.toml` |
 | `scripts/status_writer.py` | Write diagnostic status JSON for Agent/debugging |
 | `scripts/cost_estimator.py` | Estimate RMB cost from model usage |
 | `scripts/derive_strategy.py` | Score, dedupe, and record bounded derivation candidates |
@@ -29,8 +29,8 @@ download, analysis, vault writes, status, and git commits.
 
 The WebSocket control server writes:
 
-- `~/.obsidian-librarian/config.toml`
-- `~/.obsidian-librarian/cookie/douyin.txt`
+- `~/.agent-wiki/config.toml`
+- `~/.agent-wiki/cookie/douyin.txt`
 
 `config_loader.py` must be able to read the TOML written by
 `server/websocket_server.py` without compatibility shims.
@@ -89,7 +89,7 @@ The WebSocket control server writes:
   not expose quality, fps, or target-frame settings.
 - Re-upload when fps/model preprocessing changes; do not cache `file_id`.
 - Responses memory is short-term only. Store returned `response_id` under
-  `~/.obsidian-librarian/responses-memory/` for 3 days; never write it into
+  `~/.agent-wiki/responses-memory/` for 3 days; never write it into
   vault Markdown, task status, or strategy logs.
 - Videos longer than 10 minutes first run a full-video overview at `1fps` when
   duration is `<= 1230s` (20m30s), leaving about 20 frames of margin below the
@@ -110,11 +110,11 @@ The WebSocket control server writes:
   fallback and fps adjustment are tracked separately. Text-only Responses then
   synthesizes the final asset body from the overview and chunk results.
 - Video ingest writes inspectable intermediate artifacts under
-  `~/.obsidian-librarian/run-artifacts/{task_id}/`: mini chunk overview
+  `~/.agent-wiki/run-artifacts/{task_id}/`: mini chunk overview
   prompts/outputs, strategy synthesis and repair artifacts, Lite chunk
   prompts/outputs, and final synthesis prompt/output.
 - Strategy fallbacks and JSON repair results are logged to
-  `~/.obsidian-librarian/logs/video-strategy-events.jsonl` without API keys,
+  `~/.agent-wiki/logs/video-strategy-events.jsonl` without API keys,
   Cookies, Bearer tokens, or `response_id`.
 
 ## Output Contract

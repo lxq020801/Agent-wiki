@@ -1,5 +1,5 @@
 """
-status_writer.py — 写 ~/.obsidian-librarian/status/{id}.json
+status_writer.py — 写 ~/.agent-wiki/status/{id}.json
 
 原子写入（临时文件 + rename），避免 Agent/调试工具读到半个文件。
 """

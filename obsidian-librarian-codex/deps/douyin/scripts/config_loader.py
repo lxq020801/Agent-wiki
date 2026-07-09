@@ -1,5 +1,5 @@
 """
-config_loader.py — 读取并校验 ~/.obsidian-librarian/config.toml
+config_loader.py — 读取并校验 ~/.agent-wiki/config.toml
 
 设计原则：
 - 缺配置时报错明确，告诉用户具体去填哪一行
@@ -32,13 +32,13 @@ except ImportError:
 def default_bridge_root() -> Path:
     """Runtime root for local state.
 
-    Tests can override this with OBSIDIAN_LIBRARIAN_HOME without touching the
+    Tests can override this with AGENT_WIKI_HOME without touching the
     user's real config/cookie files.
     """
-    raw = os.environ.get("OBSIDIAN_LIBRARIAN_HOME")
+    raw = os.environ.get("AGENT_WIKI_HOME")
     if raw:
         return Path(raw).expanduser()
-    return Path.home() / ".obsidian-librarian"
+    return Path.home() / ".agent-wiki"
 
 
 def default_config_path() -> Path:
@@ -375,7 +375,7 @@ chunk_concurrency = 2
 
 [douyin]
 # Cookie 文件路径（由 Chrome 扩展自动写入）
-cookie_path = "~/.obsidian-librarian/cookie/douyin.txt"
+cookie_path = "~/.agent-wiki/cookie/douyin.txt"
 
 [vault]
 # ⚠️ Obsidian 仓库根目录（必填）

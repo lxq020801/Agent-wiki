@@ -6,7 +6,7 @@
 #   2. 创建独立 venv（与 hermes 主 venv 隔离，因为 httpx 版本冲突）
 #   3. 安装 requirements.txt
 #   4. 检查 ffmpeg
-#   5. 初始化 ~/.obsidian-librarian/ 目录结构 + config.toml 模板
+#   5. 初始化 ~/.agent-wiki/ 目录结构 + config.toml 模板
 #
 # 用户视角：跑一次就完。Agent 首次激活也会自动跑这个。
 
@@ -14,7 +14,7 @@ set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="$SKILL_DIR/.venv"
-BRIDGE="$HOME/.obsidian-librarian"
+BRIDGE="$HOME/.agent-wiki"
 
 echo "[1/5] 检查 Python..."
 # 找一个 3.11+ 的 python
@@ -64,7 +64,7 @@ if ! command -v ffprobe >/dev/null 2>&1; then
 fi
 echo "  ✓ $(ffprobe -version 2>&1 | head -1)"
 
-echo "[5/5] 初始化 ~/.obsidian-librarian/..."
+echo "[5/5] 初始化 ~/.agent-wiki/..."
 mkdir -p "$BRIDGE"/{inbox,status,archive,failed,cookie,cache/videos,handshake}
 if [ ! -f "$BRIDGE/config.toml" ]; then
     "$VENV/bin/python" "$SKILL_DIR/scripts/config_loader.py" init

@@ -9,7 +9,7 @@ Supported lower-level modes:
   1. URL mode:
      python ingest.py --url "https://v.douyin.com/xxx/"
   2. Task-file compatibility mode:
-     python ingest.py --task ~/.obsidian-librarian/inbox/{id}.json
+     python ingest.py --task ~/.agent-wiki/inbox/{id}.json
 
 Flow:
   1. 加载 config（失败 -> status 报错退出）
@@ -1510,7 +1510,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
     # 默认 bridge 根（供 ConfigError 兜底写 status 用）
-    default_bridge = Path.home() / ".obsidian-librarian"
+    default_bridge = Path.home() / ".agent-wiki"
     default_status = default_bridge / "status"
 
     # ── 0. 先读 task 文件（如果是 --task 模式），拿到真 task_id ──
@@ -1535,7 +1535,7 @@ def main(argv: list[str] | None = None) -> int:
             "ok": False,
             "stage": "config_error",
             "error": str(e),
-            "hint": "请检查 ~/.obsidian-librarian/config.toml",
+            "hint": "请检查 ~/.agent-wiki/config.toml",
         })
         # config 错时不归档任务（用户改完 config 还能重试）
         print(f"✗ ConfigError: {e}", file=sys.stderr)
