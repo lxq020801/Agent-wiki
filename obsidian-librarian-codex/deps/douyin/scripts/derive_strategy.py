@@ -22,10 +22,12 @@ from typing import Any
 _AUDIT_ROOT_NAME = "run-artifacts"
 ALLOWED_TARGET_TYPES = {"github_project", "official_doc", "web_research"}
 MAX_RAW_CANDIDATES = 12
-MAX_RETAINED_CANDIDATES = 8
+MAX_RETAINED_CANDIDATES = 3
 MAX_AUTO_CANDIDATES = 3
 MAX_AUTO_PER_TYPE = 2
-CANDIDATE_THRESHOLD = 50
+CANDIDATE_THRESHOLD = 72
+VISIBLE_SCORE_THRESHOLD = 85
+VISIBLE_CONFIDENCE_THRESHOLD = 0.8
 AUTO_SCORE_THRESHOLD = 80
 AUTO_CONFIDENCE_THRESHOLD = 0.75
 
@@ -555,6 +557,160 @@ def _decision_from_score(
     return "candidate", reject_reasons
 
 
+def _candidate_context_text(item: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in (
+        "name",
+        "target_type",
+        "derived_kind",
+        "task_kind",
+        "target_url",
+        "search_query",
+        "reason",
+        "parent_context",
+        "relation_type",
+    ):
+        parts.append(str(item.get(key) or ""))
+    for key in ("evidence", "acceptance_criteria"):
+        value = item.get(key)
+        if isinstance(value, list):
+            parts.extend(str(part or "") for part in value)
+        else:
+            parts.append(str(value or ""))
+    return " ".join(parts).lower()
+
+
+def _has_operational_dependency_signal(item: dict[str, Any]) -> bool:
+    text = _candidate_context_text(item)
+    target_type = str(item.get("target_type") or "")
+    target_url = str(item.get("target_url") or "")
+
+    if target_type == "github_project":
+        if "github.com/" in target_url:
+            return True
+        return bool(
+            re.search(r"github|仓库|repo|repository|开源|readme", text, re.I)
+            or re.search(r"安装|配置|运行|调用|接入|实操|教程|代码|实现|部署|命令|cli|sdk", text, re.I)
+            or re.search(r"(用于|用它|依赖|构建|实现).{0,40}(状态图|工作流|编排|agent|插件|框架|库|组件|流程)", text, re.I)
+        )
+
+    if target_type == "official_doc":
+        return bool(
+            target_url
+            and re.search(r"api|接口|参数|官方文档|docs|documentation|接入|调用|限制|版本|配置|endpoint", text, re.I)
+        )
+
+    if target_type == "web_research":
+        return bool(
+            target_url
+            and re.search(r"官方报告|白皮书|标准|规范|论文|数据源|原始来源|primary source", text, re.I)
+            and re.search(r"父资产|父笔记|核心结论|必须核验|不可缺少|成立", text, re.I)
+        )
+
+    return False
+
+
+def _derivation_noise_reasons(item: dict[str, Any]) -> list[str]:
+    text = _candidate_context_text(item)
+    reasons: list[str] = []
+    if not _has_operational_dependency_signal(item):
+        reasons.append("missing_operational_dependency")
+    if re.search(
+        r"产品调研|融资|估值|争议|趋势|报告核验|行业调研|资金分布|发展历程|监管|商业化数据|"
+        r"背景|案例|收购|壁垒|切换成本|公司|市场|赛道|多源核验|checklist",
+        text,
+        re.I,
+    ):
+        reasons.append("background_research_noise")
+    if str(item.get("target_type") or "") == "web_research":
+        reasons.append("web_research_suppressed_by_default")
+    return sorted(set(reasons))
+
+
+def _visible_block_reasons(item: dict[str, Any]) -> list[str]:
+    """Return reasons a candidate should stay in audit only.
+
+    The model may produce broad follow-up ideas. This gate keeps the user-facing
+    list focused on derivations that are clearly useful and directly executable.
+    """
+    if item.get("decision") != "candidate":
+        return ["not_candidate"]
+
+    target_type = str(item.get("target_type") or "")
+    scores = item.get("scores") if isinstance(item.get("scores"), dict) else {}
+    score = int(item.get("score") or 0)
+    confidence = float(item.get("confidence") or 0.0)
+    downgrade_flags = set(item.get("downgrade_flags") or [])
+    reasons: list[str] = []
+
+    if score < VISIBLE_SCORE_THRESHOLD:
+        reasons.append("score_below_visible_threshold")
+    if confidence < VISIBLE_CONFIDENCE_THRESHOLD:
+        reasons.append("confidence_below_visible_threshold")
+
+    required_scores = {
+        "knowledge_value": 4,
+        "parent_dependency": 4,
+        "evidence_strength": 4,
+        "actionability": 4,
+        "asset_fit": 4,
+        "cost_risk_inverse": 4,
+        "ambiguity_inverse": 3,
+    }
+    for key, minimum in required_scores.items():
+        if int(scores.get(key) or 0) < minimum:
+            reasons.append(f"{key}_below_visible_{minimum}")
+
+    if target_type not in ALLOWED_TARGET_TYPES:
+        reasons.append("target_type_not_allowed")
+    elif target_type in {"official_doc", "web_research"} and not item.get("target_url"):
+        reasons.append("target_url_required_for_visible_candidate")
+    elif target_type == "github_project" and not (item.get("target_url") or item.get("name")):
+        reasons.append("github_name_or_url_required")
+
+    blocking_flags = {
+        "uncertain_evidence",
+        "missing_name_and_url",
+        "missing_explicit_url",
+        "missing_explicit_source",
+        "url_contains_credentials",
+        "non_https_target_url",
+        "local_target_url",
+        "private_target_url",
+        "missing_target_host",
+        "invalid_target_url",
+        "evidence_strength_below_4",
+        "asset_fit_below_3",
+        "ambiguity_inverse_below_3",
+        "cost_risk_inverse_below_3",
+        "novelty_below_3",
+    }
+    reasons.extend(sorted(blocking_flags & downgrade_flags))
+
+    if target_type in {"official_doc", "web_research"} and "requires_confirmation" in downgrade_flags:
+        reasons.append("manual_review_only_candidate_suppressed")
+    reasons.extend(_derivation_noise_reasons(item))
+
+    github_resolution_allowed = (
+        target_type == "github_project"
+        and bool(item.get("name"))
+        and _has_operational_dependency_signal(item)
+        and "background_research_noise" not in reasons
+        and int(scores.get("evidence_strength") or 0) >= 4
+        and int(scores.get("parent_dependency") or 0) >= 4
+        and int(scores.get("ambiguity_inverse") or 0) >= 3
+        and score >= VISIBLE_SCORE_THRESHOLD
+        and confidence >= VISIBLE_CONFIDENCE_THRESHOLD
+    )
+    if github_resolution_allowed:
+        reasons = [
+            reason for reason in reasons
+            if reason not in {"target_resolution_required", "requires_confirmation"}
+        ]
+
+    return sorted(set(reasons))
+
+
 def _task_kind(target_type: str, subtype: str = "") -> str:
     if target_type == "github_project":
         return "github_project_ingest"
@@ -853,14 +1009,30 @@ def derive_tasks_from_analysis(
     suppressed_items: list[dict[str, Any]] = []
     suppressed_count = 0
     for item in ranked:
-        if len(retained) >= MAX_RETAINED_CANDIDATES:
+        visible_block_reasons = _visible_block_reasons(item)
+        if visible_block_reasons:
             suppressed_count += 1
             item["execution_status"] = "suppressed"
-            item["reject_reasons"] = sorted(set(item.get("reject_reasons", []) + ["retained_limit_exceeded"]))
+            item["visible_block_reasons"] = visible_block_reasons
+            item["reject_reasons"] = sorted(set(item.get("reject_reasons", []) + visible_block_reasons))
             suppressed_items.append(item)
             _write_derive_log("derive_candidate_suppressed", {
                 "task_id": task_id,
                 "source_id": source_id,
+                "reason": "visible_gate",
+                "candidate": item,
+            })
+            continue
+        if len(retained) >= MAX_RETAINED_CANDIDATES:
+            suppressed_count += 1
+            item["execution_status"] = "suppressed"
+            item["reject_reasons"] = sorted(set(item.get("reject_reasons", []) + ["retained_limit_exceeded"]))
+            item["visible_block_reasons"] = ["retained_limit_exceeded"]
+            suppressed_items.append(item)
+            _write_derive_log("derive_candidate_suppressed", {
+                "task_id": task_id,
+                "source_id": source_id,
+                "reason": "retained_limit_exceeded",
                 "candidate": item,
             })
             continue
@@ -907,7 +1079,7 @@ def derive_tasks_from_analysis(
             })
     counts = {
         "candidate": sum(1 for item in retained if item.get("decision") == "candidate"),
-        "rejected": sum(1 for item in retained if item.get("decision") == "reject"),
+        "rejected": sum(1 for item in normalized_candidates if item.get("decision") == "reject"),
         "auto_ready": sum(1 for item in retained if item.get("auto_eligible")),
         "existing_related": sum(1 for item in retained if item.get("execution_status") == "existing_related"),
         "needs_target": sum(1 for item in retained if item.get("execution_status") == "needs_target"),

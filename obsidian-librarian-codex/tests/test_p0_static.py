@@ -501,7 +501,7 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
     )
 
     assert decision["enabled"] is True
-    assert len(decision["items"]) <= 8
+    assert len(decision["items"]) <= 3
     assert decision["counts"]["suppressed"] >= 1
     assert len({item["dedupe_key"] for item in decision["items"]}) == len(decision["items"])
     existing_items = [
@@ -516,7 +516,7 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
     assert all(item.get("execution_status") != "queued" for item in decision["items"])
 
     public = public_derived_tasks(decision)
-    assert len(public) <= 8
+    assert len(public) <= 3
     assert all(item["status"] in {"candidate", "existing_related"} for item in public)
     assert all(item["decision"] == "candidate" for item in public)
     log_text = (tmp / "derive-runtime" / "logs" / "derive-strategy-events.jsonl").read_text(encoding="utf-8")
@@ -598,14 +598,15 @@ def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp
     )
     public = public_derived_tasks(decision)
     langgraph = next(item for item in public if item["name"] == "LangGraph")
-    docs = next(item for item in public if item["name"] == "Some API Docs")
     assert langgraph["autoEligible"] is True
     assert langgraph["status"] == "auto_ready"
     assert "requires_confirmation" not in langgraph["autoBlockReasons"]
     assert "target_resolution_required" not in langgraph["autoBlockReasons"]
-    assert docs["autoEligible"] is False
-    assert docs["status"] == "needs_target"
-    assert "target_url_required" in docs["autoBlockReasons"]
+    assert not any(item["name"] == "Some API Docs" for item in public)
+    suppressed = decision["audit_artifacts"]["files"]["derive_scored_retained_candidates"]
+    suppressed_text = (tmp / "derive-auto-runtime" / suppressed).read_text(encoding="utf-8")
+    assert "Some API Docs" in suppressed_text
+    assert "target_url_required_for_visible_candidate" in suppressed_text
 
 
 def test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp: Path) -> None:
@@ -662,13 +663,14 @@ def test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp: Path) -> No
     )
     public = public_derived_tasks(decision)
     docs = next(item for item in public if item["name"] == "Official Docs")
-    repo = next(item for item in public if item["name"] == "Credential Repo")
     assert docs["targetUrl"] == "https://docs.example.com/api"
     assert docs["autoEligible"] is False
     assert "manual_review_required_for_target_type" in docs["autoBlockReasons"]
-    assert repo["targetUrl"] == ""
-    assert repo["autoEligible"] is False
-    assert "url_contains_credentials" in repo["autoBlockReasons"]
+    assert not any(item["name"] == "Credential Repo" for item in public)
+    suppressed = decision["audit_artifacts"]["files"]["derive_scored_retained_candidates"]
+    suppressed_text = (tmp / "derive-url-runtime" / suppressed).read_text(encoding="utf-8")
+    assert "Credential Repo" in suppressed_text
+    assert "url_contains_credentials" in suppressed_text
     log_text = (tmp / "derive-url-runtime" / "logs" / "derive-strategy-events.jsonl").read_text(encoding="utf-8")
     assert "pass@github.com" not in log_text
     assert "secret" not in log_text
@@ -679,6 +681,8 @@ def test_knowledge_prompts_do_not_force_github_manual_confirmation() -> None:
     image_prompt = (SCRIPTS / "prompts" / "image_post_knowledge_ingest.md").read_text(encoding="utf-8")
     for prompt in (video_prompt, image_prompt):
         assert '"requires_confirmation": false' in prompt
+        assert "最多给 `3` 个强候选" in prompt
+        assert "默认不要生成派生候选" in prompt
         assert "高置信 GitHub 项目候选可以设为 `false`" in prompt
         assert "由执行层通过 GitHub API + README 解析" in prompt
         assert '"evidence_strength": 5' in prompt

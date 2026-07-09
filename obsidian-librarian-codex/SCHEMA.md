@@ -108,7 +108,7 @@ vault/
 
 完整评分、证据、去重状态、执行建议、验收标准、父资产追溯信息必须留在系统记录 JSON，不得塞进资产 frontmatter。
 
-高置信、低风险、可解析的 GitHub 项目候选可以自动进入 `derived_ingest` 派生执行队列。`official_doc` 和 `web_research` 在官方性校验/多源核验能力完善前只进入候选或人工确认。派生工具执行完成后才生成正式资产，并回写真实存在的 Obsidian wikilink：
+高置信、低风险、可解析的 GitHub 项目候选可以自动进入 `derived_ingest` 派生执行队列。`official_doc` 和 `web_research` 只有在目标明确、证据强、父资产强依赖时才进入可见候选；普通补充研究只保留在审计记录。派生工具执行完成后才生成正式资产，并回写真实存在的 Obsidian wikilink：
 
 - `github_project` -> `type: github_project` / `asset_family: github_project` / `source_media: github`
 - `official_doc` / `web_research` -> `type: web_clip` / `asset_family: knowledge_asset` / `source_media: webpage`，并写 `derived_kind`
