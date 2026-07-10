@@ -1,6 +1,6 @@
 # vendor/ — 抖音爬虫库（内嵌副本）
 
-本目录是 [Evil0ctal/Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API) 项目的**部分源码内嵌副本**，专供 `obsidian-librarian` 的视频拆解工具调用。
+本目录是 [Evil0ctal/Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API) 项目的**部分源码内嵌副本**，专供 `agent-wiki` 的视频拆解工具调用。
 
 ---
 
@@ -51,7 +51,7 @@ vendor/crawlers/
 
 `vendor/crawlers/douyin/web/config.yaml` 自带一份默认 Cookie，但**会过期**。
 
-我们的 `scripts/downloader.py` 在 import 之后用 **monkey patch** 把 cookie 替换为用户当前的（从 `~/.obsidian-librarian/cookie/douyin.txt` 读取）：
+我们的 `scripts/downloader.py` 在 import 之后用 **monkey patch** 把 cookie 替换为用户当前的（从 `~/.agent-wiki/cookie/douyin.txt` 读取）：
 
 ```python
 from crawlers.douyin.web import web_crawler
@@ -74,7 +74,7 @@ web_crawler.config["TokenManager"]["douyin"]["headers"]["Cookie"] = fresh_cookie
 ```bash
 # 1. 从 GitHub 下载最新 zip 解压到 ~/Downloads/
 # 2. 跑同步脚本
-bash ~/.hermes/skills/obsidian-librarian/deps/douyin/vendor-sync.sh
+bash ~/.hermes/skills/agent-wiki/deps/douyin/vendor-sync.sh
 ```
 
 同步脚本会**只复制相关文件**，并保留我们自己加的 `__init__.py` 和 README。

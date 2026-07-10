@@ -27,13 +27,13 @@
 
 ## 重要临时例外
 
-改名过程中，这个 spec directory（规格目录）可以临时提到旧名称，用作 search target（搜索目标）和 migration target（迁移目标）。
+改名过程中，这个 spec directory（规格目录）曾临时记录旧身份，用作 search target（搜索目标）和 migration target（迁移目标）。
 
 在最终 merge（合并）到 `main`（主线）之前，这个目录必须做以下三选一：
 
 - 从 repository（仓库/版本库）中删除；
 - 移到 repository（仓库/版本库）外；
-- 改写到不再包含旧产品名。
+- 改写到不再包含旧产品身份字符串。
 
 否则最终的“没有旧名称残留”验证不能通过。
 
@@ -58,7 +58,7 @@
 
 改名适用于以下 active project files（当前有效项目文件）：
 
-- `obsidian-librarian-codex/`
+- `agent-wiki/`
 - 根目录项目元数据，例如 `.gitignore`
 - Chrome extension（Chrome 扩展）的元数据和 UI 文字
 - Python 脚本和 server code（服务端代码）
