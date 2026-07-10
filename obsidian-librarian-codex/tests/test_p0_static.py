@@ -15,7 +15,7 @@ SCRIPTS = ROOT / "deps" / "douyin" / "scripts"
 
 
 def test_config_loads(tmp: Path) -> None:
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "runtime")
     import sys
 
     sys.path.insert(0, str(SCRIPTS))
@@ -68,7 +68,7 @@ port = 8765
 def test_config_loader_rejects_invalid_ark_endpoints(tmp: Path) -> None:
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "endpoint-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "endpoint-runtime")
     sys.path.insert(0, str(SCRIPTS))
     from config_loader import ConfigError, load_config
 
@@ -406,7 +406,7 @@ def _derived_candidate_json(*, name: str = "LangGraph", url: str = "https://gith
 def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "derive-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "derive-runtime")
     sys.path.insert(0, str(SCRIPTS))
     from derive_strategy import derive_tasks_from_analysis, public_derived_tasks
 
@@ -547,7 +547,7 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
 def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp: Path) -> None:
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "derive-auto-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "derive-auto-runtime")
     sys.path.insert(0, str(SCRIPTS))
     from derive_strategy import derive_tasks_from_analysis, public_derived_tasks
 
@@ -612,7 +612,7 @@ def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp
 def test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp: Path) -> None:
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "derive-url-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "derive-url-runtime")
     sys.path.insert(0, str(SCRIPTS))
     from derive_strategy import derive_tasks_from_analysis, public_derived_tasks
 
@@ -1453,7 +1453,7 @@ def test_websocket_config_writer(tmp: Path) -> None:
     import asyncio
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "ws-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "ws-runtime")
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
     from config_loader import load_config
@@ -1550,7 +1550,7 @@ def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
     import sys
     import time
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "memory-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "memory-runtime")
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
@@ -1939,7 +1939,7 @@ def test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp: Path)
     import asyncio
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "strategy-repair-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "strategy-repair-runtime")
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
@@ -2058,7 +2058,7 @@ def test_prepare_long_video_strategy_chunks_unsafe_full_overview(tmp: Path) -> N
     import asyncio
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "strategy-too-long-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "strategy-too-long-runtime")
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
@@ -2189,7 +2189,7 @@ def test_prepare_long_video_strategy_chunks_unsafe_full_overview(tmp: Path) -> N
 def test_strategy_log_redacts_sensitive_values(tmp: Path) -> None:
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "strategy-log-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "strategy-log-runtime")
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
@@ -2241,7 +2241,7 @@ def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
     import asyncio
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "chunk-strategy-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "chunk-strategy-runtime")
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
@@ -2378,7 +2378,7 @@ def test_chunk_analysis_retries_transient_stream_failure(tmp: Path) -> None:
     import asyncio
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "chunk-retry-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "chunk-retry-runtime")
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
@@ -2472,7 +2472,7 @@ def test_chunk_analysis_reuses_existing_chunk_artifact_on_rerun(tmp: Path) -> No
     import asyncio
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "chunk-resume-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "chunk-resume-runtime")
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
@@ -2573,7 +2573,7 @@ def test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp: Path) 
     import asyncio
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "chunk-memory-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "chunk-memory-runtime")
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
@@ -2662,7 +2662,7 @@ def test_websocket_config_writer_rejects_agent_plan_payload_key(tmp: Path) -> No
     import sys
 
     runtime = tmp / "ws-runtime-plan"
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
+    os.environ["AGENT_WIKI_HOME"] = str(runtime)
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
 
@@ -2693,7 +2693,7 @@ def test_websocket_config_writer_rejects_invalid_explicit_endpoints(tmp: Path) -
     import asyncio
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "ws-runtime-invalid-endpoints")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "ws-runtime-invalid-endpoints")
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
 
@@ -2746,7 +2746,7 @@ def test_websocket_config_writer_rejects_invalid_explicit_endpoints(tmp: Path) -
     ]
     for index, (payload, expected) in enumerate(invalid_payloads):
         runtime = tmp / f"ws-runtime-invalid-endpoints-{index}"
-        os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
+        os.environ["AGENT_WIKI_HOME"] = str(runtime)
         server = LibrarianServer()
         try:
             asyncio.run(server.handle_config_update(payload))
@@ -2762,7 +2762,7 @@ def test_websocket_config_writer_uses_explicit_ark_key_when_old_provider_present
     import sys
 
     runtime = tmp / "ws-runtime-plan-fallback"
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
+    os.environ["AGENT_WIKI_HOME"] = str(runtime)
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
     from config_loader import load_config
@@ -2793,7 +2793,7 @@ def test_config_loader_does_not_use_agent_plan_section(tmp: Path) -> None:
     import sys
 
     runtime = tmp / "dual-key-runtime"
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
+    os.environ["AGENT_WIKI_HOME"] = str(runtime)
     sys.path.insert(0, str(SCRIPTS))
     from config_loader import load_config
 
@@ -2853,7 +2853,7 @@ port = 8765
 def test_model_health_check_ignores_old_agent_plan_provider(tmp: Path) -> None:
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "health-plan-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "health-plan-runtime")
     sys.path.insert(0, str(ROOT / "server"))
     import websocket_server
     from websocket_server import LibrarianServer
@@ -2912,7 +2912,7 @@ def test_vault_discovery_is_strict(tmp: Path) -> None:
 
     skill_pkg = tmp / "skill-package"
     skill_pkg.mkdir()
-    (skill_pkg / "SKILL.md").write_text("---\nname: obsidian-librarian\n---\n", encoding="utf-8")
+    (skill_pkg / "SKILL.md").write_text("---\nname: agent-wiki\n---\n", encoding="utf-8")
     (skill_pkg / "chrome-extension").mkdir()
     (skill_pkg / "server").mkdir()
     (skill_pkg / "install").mkdir()
@@ -3246,7 +3246,7 @@ def test_analyzer_wait_and_stream_protocol(tmp: Path) -> None:
 def test_model_health_check_redacts_secret(tmp: Path) -> None:
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "health-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "health-runtime")
     sys.path.insert(0, str(ROOT / "server"))
     import websocket_server
     from websocket_server import LibrarianServer
@@ -3302,7 +3302,7 @@ def test_model_health_status_persists(tmp: Path) -> None:
     import sys
 
     runtime = tmp / "health-persist-runtime"
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
+    os.environ["AGENT_WIKI_HOME"] = str(runtime)
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
 
@@ -3353,7 +3353,7 @@ def test_websocket_accepts_task_request(tmp: Path) -> None:
     import json
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "ws-runtime-task")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "ws-runtime-task")
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
 
@@ -3381,8 +3381,8 @@ def test_websocket_accepts_task_request(tmp: Path) -> None:
     assert reply["requestId"] == "req-1"
     task_id = reply["task"]["id"]
 
-    task_file = Path(os.environ["OBSIDIAN_LIBRARIAN_HOME"]) / "inbox" / f"{task_id}.json"
-    status_file = Path(os.environ["OBSIDIAN_LIBRARIAN_HOME"]) / "status" / f"{task_id}.json"
+    task_file = Path(os.environ["AGENT_WIKI_HOME"]) / "inbox" / f"{task_id}.json"
+    status_file = Path(os.environ["AGENT_WIKI_HOME"]) / "status" / f"{task_id}.json"
     assert task_file.exists()
     task = json.loads(task_file.read_text(encoding="utf-8"))
     assert task["type"] == "douyin_ingest"
@@ -3407,7 +3407,7 @@ def test_websocket_public_task_status_exposes_derived_candidates(tmp: Path) -> N
     import sys
 
     runtime = tmp / "ws-runtime-derived"
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
+    os.environ["AGENT_WIKI_HOME"] = str(runtime)
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
 
@@ -3463,7 +3463,7 @@ def test_websocket_auto_enqueues_derived_ingest_task(tmp: Path) -> None:
     import asyncio
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "ws-runtime-derived-auto")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "ws-runtime-derived-auto")
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
 
@@ -3513,7 +3513,7 @@ def test_websocket_derived_actions_require_ready_parent_and_valid_state(tmp: Pat
     import sys
 
     runtime = tmp / "ws-runtime-derived-action"
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
+    os.environ["AGENT_WIKI_HOME"] = str(runtime)
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
 
@@ -3573,7 +3573,7 @@ def test_websocket_derived_enqueue_is_idempotent_and_redacts_urls(tmp: Path) -> 
     import sys
 
     runtime = tmp / "ws-runtime-derived-idempotent"
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
+    os.environ["AGENT_WIKI_HOME"] = str(runtime)
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
 
@@ -3875,7 +3875,7 @@ def test_derive_executor_sanitizes_leading_h1() -> None:
 def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> None:
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "derive-exec-runtime")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "derive-exec-runtime")
     sys.path.insert(0, str(SCRIPTS))
     import derive_executor
     from config_loader import Config
@@ -4043,7 +4043,7 @@ def test_websocket_auto_enqueue_respects_ignored_candidate(tmp: Path) -> None:
     import sys
 
     runtime = tmp / "ws-runtime-derived-ignore"
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(runtime)
+    os.environ["AGENT_WIKI_HOME"] = str(runtime)
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
 
@@ -4083,7 +4083,7 @@ def test_websocket_rejects_invalid_ingest_intent(tmp: Path) -> None:
     import asyncio
     import sys
 
-    os.environ["OBSIDIAN_LIBRARIAN_HOME"] = str(tmp / "ws-runtime-task-invalid")
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "ws-runtime-task-invalid")
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
 
