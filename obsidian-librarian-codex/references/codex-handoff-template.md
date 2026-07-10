@@ -62,6 +62,6 @@
 
 ## 参考
 
-- 本次交接包位置：`/Users/lixinqi/.hermes/skills/obsidian-librarian/codex-handoff/`
+- 本次交接包位置：`/Users/lixinqi/.hermes/skills/agent-wiki/codex-handoff/`
 - 文件数：11 个
 - 总大小：207K

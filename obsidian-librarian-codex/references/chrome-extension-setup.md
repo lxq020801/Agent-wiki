@@ -30,14 +30,14 @@ chrome-extension/
 ### 扩展端（popup.js）
 
 ```javascript
-const BRIDGE_PREFIX = 'obsidian-librarian.';  // 注意：不能以 . 开头，Chrome 拒绝
+const BRIDGE_PREFIX = 'agent-wiki.';  // 注意：不能以 . 开头，Chrome 拒绝
 
 async function writeBridgeFile(filename, content) {
   const blob = new Blob([content], { type: 'text/plain' });
   const url = URL.createObjectURL(blob);
   await chrome.downloads.download({
     url: url,
-    filename: filename,           // 如 'obsidian-librarian.config.json'
+    filename: filename,           // 如 'agent-wiki.config.json'
     conflictAction: 'overwrite',
     saveAs: false
   });
@@ -48,13 +48,13 @@ async function writeBridgeFile(filename, content) {
 ### Python 端（bridge_poller.py）
 
 ```python
-BRIDGE_PREFIX = "obsidian-librarian."
+BRIDGE_PREFIX = "agent-wiki."
 DOWNLOADS = Path.home() / "Downloads"
 
 # 轮询 Downloads 目录
 for f in DOWNLOADS.iterdir():
     if f.name.startswith(BRIDGE_PREFIX):
-        # 识别类型 → 移到 ~/.obsidian-librarian/
+        # 识别类型 → 移到 ~/.agent-wiki/
         # 处理成功后删除源文件
 ```
 
@@ -62,9 +62,9 @@ for f in DOWNLOADS.iterdir():
 
 | 扩展写入 | Python 识别 | 目标位置 |
 |----------|-------------|----------|
-| `obsidian-librarian.config.json` | `config` | `~/.obsidian-librarian/config.toml` |
-| `obsidian-librarian.cookie.douyin.txt` | `cookie` | `~/.obsidian-librarian/cookie/douyin.txt` |
-| `obsidian-librarian.task.{id}.json` | `task` | `~/.obsidian-librarian/inbox/{id}.json` |
+| `agent-wiki.config.json` | `config` | `~/.agent-wiki/config.toml` |
+| `agent-wiki.cookie.douyin.txt` | `cookie` | `~/.agent-wiki/cookie/douyin.txt` |
+| `agent-wiki.task.{id}.json` | `task` | `~/.agent-wiki/inbox/{id}.json` |
 
 ## manifest.json 关键配置
 
@@ -93,7 +93,7 @@ for f in DOWNLOADS.iterdir():
 |------|------|------|
 | `Could not load icon 'icons/icon-16.png'` | 图标文件缺失 | 用 PIL 生成 4 个尺寸 PNG |
 | `Cannot read properties of undefined (reading 'getAll')` | 未声明 `cookies` 权限 | manifest.json 加 `"cookies"` |
-| `Invalid filename` | 文件名以 `.` 开头 | 前缀改为 `obsidian-librarian.` |
+| `Invalid filename` | 文件名以 `.` 开头 | 前缀改为 `agent-wiki.` |
 | 扩展刷新后配置丢失 | 正常——配置在 storage 里，文件桥是持久化手段 | 点「保存配置」触发文件桥写入 |
 
 ## 图标生成（macOS/Linux）
@@ -117,7 +117,7 @@ for size in [16, 32, 48, 128]:
 1. Chrome 地址栏输入：`chrome://extensions/`
 2. 右上角打开「开发者模式」
 3. 点击「加载已解压的扩展程序」
-4. 选择：`~/.hermes/skills/obsidian-librarian/chrome-extension/`
+4. 选择：`~/.hermes/skills/agent-wiki/chrome-extension/`
 5. 刷新扩展（🔄）应用代码更新
 
 ## 扩展刷新 vs 重装
@@ -131,25 +131,25 @@ for size in [16, 32, 48, 128]:
 ```
 用户点「保存配置」
   → 扩展写 chrome.storage.local（临时）
-  → 扩展调 chrome.downloads.download → ~/Downloads/obsidian-librarian.config.json
-  → Python bridge_poller.py 轮询 → 识别 → 移到 ~/.obsidian-librarian/config.toml
+  → 扩展调 chrome.downloads.download → ~/Downloads/agent-wiki.config.json
+  → Python bridge_poller.py 轮询 → 识别 → 移到 ~/.agent-wiki/config.toml
   → 删除 Downloads 源文件
 
 用户点「抓取 Cookie」
   → 扩展调 chrome.cookies.getAll({domain: '.douyin.com'})
-  → 扩展写 ~/Downloads/obsidian-librarian.cookie.douyin.txt
-  → Python bridge_poller.py 处理 → 移到 ~/.obsidian-librarian/cookie/douyin.txt
+  → 扩展写 ~/Downloads/agent-wiki.cookie.douyin.txt
+  → Python bridge_poller.py 处理 → 移到 ~/.agent-wiki/cookie/douyin.txt
 ```
 
 ## 状态看板数据来源
 
-当前版本从 `chrome.storage.local` 读任务历史（简化）。v0.x 应改为读取 `~/.obsidian-librarian/status/` 下的 JSON 文件，与 Python 端共享状态。
+当前版本从 `chrome.storage.local` 读任务历史（简化）。v0.x 应改为读取 `~/.agent-wiki/status/` 下的 JSON 文件，与 Python 端共享状态。
 
 ## 架构澄清（2026-06-27 最终对齐）
 
 **扩展角色 = 配置工具**，不直接触发拆解：
-- 抓 cookie → 写到 `~/.obsidian-librarian/cookie/douyin.txt`
-- 填配置 → 写到 `~/.obsidian-librarian/config.toml`
+- 抓 cookie → 写到 `~/.agent-wiki/cookie/douyin.txt`
+- 填配置 → 写到 `~/.agent-wiki/config.toml`
 - **不直接调 ingest.py**，拆解由 Agent 触发
 
 **用户流程**：

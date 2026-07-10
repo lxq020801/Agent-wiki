@@ -1,4 +1,4 @@
-# obsidian-librarian 架构决策记录
+# agent-wiki 架构决策记录
 
 > 给未来读这个项目的 AI 看。这些决策是**已锁定的**，除非用户明确说「重新评估」，否则不要动摇。
 > 这是历史决策记录；如果与当前 `SKILL.md` 冲突，以 `SKILL.md` 和 `SCHEMA.md` 为准。
@@ -33,7 +33,7 @@
 
 ### 通信契约
 
-文件桥目录 `~/.obsidian-librarian/`：
+文件桥目录 `~/.agent-wiki/`：
 
 | 子目录 | 写入方 | 读取方 | 用途 |
 |--------|-------|-------|------|
@@ -48,7 +48,7 @@
 ### 用户物理动作总数
 
 **全生命周期 = 2 个**：
-1. 第一次在 Hermes 里随便用一次 obsidian-librarian（任何指令）
+1. 第一次在 Hermes 里随便用一次 agent-wiki（任何指令）
 2. 拖一次扩展到 chrome://extensions/
 
 之后零物理动作，永久无感。
@@ -76,7 +76,7 @@
 - 打开命令行 / 终端
 - 编辑配置文件 / yaml / json
 - 输入路径
-- 跟 Agent 说「装一下 obsidian-librarian」（破坏心流）
+- 跟 Agent 说「装一下 agent-wiki」（破坏心流）
 - 看 README 学使用方法
 
 ### 用户路径

@@ -9,7 +9,7 @@
 ### 方式 1：自动启动器（推荐）
 
 ```bash
-cd ~/.hermes/skills/obsidian-librarian
+cd ~/.hermes/skills/agent-wiki
 python3 server/launcher.py
 ```
 
@@ -22,7 +22,7 @@ python3 server/launcher.py
 ### 方式 2：手动启动
 
 ```bash
-cd ~/.hermes/skills/obsidian-librarian
+cd ~/.hermes/skills/agent-wiki
 python3 server/websocket_server.py
 ```
 
@@ -105,26 +105,26 @@ macOS 可能会弹窗询问是否允许 Python 接受传入连接。点击「允
 ### 创建 plist
 
 ```bash
-cat > ~/Library/LaunchAgents/com.obsidian-librarian.plist << 'EOF'
+cat > ~/Library/LaunchAgents/com.agent-wiki.plist << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.obsidian-librarian</string>
+    <string>com.agent-wiki</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>~/.hermes/skills/obsidian-librarian/server/launcher.py</string>
+        <string>~/.hermes/skills/agent-wiki/server/launcher.py</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>~/.obsidian-librarian/logs/server.log</string>
+    <string>~/.agent-wiki/logs/server.log</string>
     <key>StandardErrorPath</key>
-    <string>~/.obsidian-librarian/logs/server.error.log</string>
+    <string>~/.agent-wiki/logs/server.error.log</string>
 </dict>
 </plist>
 EOF
@@ -133,22 +133,22 @@ EOF
 ### 加载服务
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.obsidian-librarian.plist
-launchctl start com.obsidian-librarian
+launchctl load ~/Library/LaunchAgents/com.agent-wiki.plist
+launchctl start com.agent-wiki
 ```
 
 ### 查看状态
 
 ```bash
-launchctl list | grep obsidian-librarian
+launchctl list | grep agent-wiki
 ```
 
 ---
 
 ## 日志位置
 
-- 服务器日志：`~/.obsidian-librarian/logs/server.log`
-- 错误日志：`~/.obsidian-librarian/logs/server.error.log`
+- 服务器日志：`~/.agent-wiki/logs/server.log`
+- 错误日志：`~/.agent-wiki/logs/server.error.log`
 - 扩展日志：Chrome DevTools → Console
 
 ---

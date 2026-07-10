@@ -44,7 +44,7 @@ class LibrarianServer:
     
     async def handle_config_update(self, config_data):
         # 保存到文件
-        config_path = os.path.expanduser('~/.obsidian-librarian/config.toml')
+        config_path = os.path.expanduser('~/.agent-wiki/config.toml')
         # 注意：这里曾用 import toml，但 toml 包未安装导致崩溃
         # 已降级为字符串写入
         config_text = f"""[ark]

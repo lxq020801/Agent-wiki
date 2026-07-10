@@ -17,7 +17,7 @@
 ```json
 {
   "type": "handshake",
-  "client": "obsidian-librarian-extension",
+  "client": "agent-wiki-extension",
   "version": "0.1.0"
 }
 ```
@@ -127,14 +127,14 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 ### `task_request`
 
 提交一个抖音入库任务。扩展只发送入库意图、URL 和页面线索，不发送 Cookie/API Key。
-服务端写入 `~/.obsidian-librarian/inbox/{task_id}.json`，再由本地任务队列调用
+服务端写入 `~/.agent-wiki/inbox/{task_id}.json`，再由本地任务队列调用
 `deps/douyin/scripts/ingest.py --task ...`。
 任务执行支持有限并发，默认同时处理 `2` 个任务；扩展可通过
 `config_update.server.taskConcurrency` 调整，范围 `1-4`。也可用旧字段
 `config_update.taskConcurrency` / `config_update.serverTaskConcurrency` 兼容调整。
 长视频内部切片并发通过 `config_update.videoAnalysis.chunkConcurrency` 调整，范围 `1-4`。
 也可用
-`OBSIDIAN_LIBRARIAN_TASK_CONCURRENCY` 作为启动时覆盖值。
+`AGENT_WIKI_TASK_CONCURRENCY` 作为启动时覆盖值。
 
 `ingest_intent` 是资产用途意图：
 
@@ -162,7 +162,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 
 长视频状态会额外带：
 
-- `audit_artifacts`：本次任务的审计产物目录和文件索引，实际文件位于 `~/.obsidian-librarian/run-artifacts/{task_id}/`
+- `audit_artifacts`：本次任务的审计产物目录和文件索引，实际文件位于 `~/.agent-wiki/run-artifacts/{task_id}/`
 - `overview_strategy_decided.fps_plan[].validation_fallback`：JSON/结构问题导致的兜底
 - `overview_strategy_decided.fps_plan[].fps_adjusted`：程序根据置信度、安全帧数或视觉证据规则调整 fps
 - `overview_strategy_decided.fps_plan[].lite_brief`：mini 给 Lite 的本段精拆说明摘要
@@ -199,7 +199,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 允许动作：
 
 - `confirm`：确认执行派生。只有 `candidate` / `auto_ready` / `needs_target` 且父资产已写入时可执行。
-- `ignore`：忽略候选。忽略动作不校验输入框 URL，也不会创建子任务；结果写入 `~/.obsidian-librarian/derived-actions/{parent_task_id}.json`，后续自动派生不会再次入队。
+- `ignore`：忽略候选。忽略动作不校验输入框 URL，也不会创建子任务；结果写入 `~/.agent-wiki/derived-actions/{parent_task_id}.json`，后续自动派生不会再次入队。
 
 `official_doc` / `web_research` 或其他缺目标候选必须提供公开 HTTPS URL。URL 不能包含账号密码、localhost/private IP，也会删除 token/key/secret/signature 等敏感 query。
 

@@ -45,9 +45,9 @@
 
 **现象**：`chrome.downloads.download` 拒绝以 `.` 开头的文件名。
 
-**原因**：`BRIDGE_PREFIX = ".obsidian-librarian."` 以点开头，被 Chrome 拒绝。
+**原因**：`BRIDGE_PREFIX = ".agent-wiki."` 以点开头，被 Chrome 拒绝。
 
-**修复**：改为 `obsidian-librarian.`（去掉开头点）。
+**修复**：改为 `agent-wiki.`（去掉开头点）。
 
 ---
 

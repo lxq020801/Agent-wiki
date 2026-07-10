@@ -28,8 +28,8 @@
 
 - **文件数**: 10
 - **总大小**: 205K
-- **项目路径**: `~/.hermes/skills/obsidian-librarian/`
-- **交接包路径**: `~/.hermes/skills/obsidian-librarian/codex-handoff/`
+- **项目路径**: `~/.hermes/skills/agent-wiki/`
+- **交接包路径**: `~/.hermes/skills/agent-wiki/codex-handoff/`
 
 ## 快速开始
 

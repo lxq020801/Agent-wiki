@@ -43,7 +43,7 @@
 **Agent 职责：**
 1. 自动检测/配置环境（venv、依赖、目录）
 2. 自动扫描 Downloads 目录，发现扩展写入的文件
-3. 自动移动到 ~/.obsidian-librarian/
+3. 自动移动到 ~/.agent-wiki/
 4. 执行拆解任务
 
 ## 文件清单
@@ -63,7 +63,7 @@ chrome-extension/
 
 - manifest.json：保留 downloads 权限，包含 cookies/storage
 - popup.js：包含 writeBridgeFile、grabCookie、saveConfig，使用 chrome.downloads.download
-- background.js：监听下载事件，识别 obsidian-librarian 文件，包含方案 C 注释
+- background.js：监听下载事件，识别 agent-wiki 文件，包含方案 C 注释
 - bridge_poller.py：已删除
 
 ## 后续工作

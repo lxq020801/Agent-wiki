@@ -116,7 +116,7 @@ wget -O install.sh https://raw.githubusercontent.com/Evil0ctal/Douyin_TikTok_Dow
 | 批量 | 单视频 CLI | Web 批量 + REST API |
 | 增值功能 | 豆包转录+分析+派生 | 无（纯数据爬取） |
 
-## obsidian-librarian 的内嵌复用方案（决议 2026-06-26）
+## agent-wiki 的内嵌复用方案（决议 2026-06-26）
 
 `deps/douyin/scripts/ingest.py` 的下载部分**内嵌 vendor 整目录复用**，不依赖 PyPI、不依赖 Docker。
 
@@ -133,7 +133,7 @@ wget -O install.sh https://raw.githubusercontent.com/Evil0ctal/Douyin_TikTok_Dow
 ### 目标目录结构
 
 ```
-~/.hermes/skills/obsidian-librarian/deps/douyin/
+~/.hermes/skills/agent-wiki/deps/douyin/
 ├── SKILL.md
 ├── vendor/                        ← 整目录复制自上游 crawlers/
 │   ├── README.md                  ← 记录上游版本、commit SHA、同步方法
@@ -166,7 +166,7 @@ VENDOR_DIR = Path(__file__).parent.parent / "vendor"
 sys.path.insert(0, str(VENDOR_DIR))
 
 # 1. 读 cookie 文件桥
-cookie_path = Path("~/.obsidian-librarian/cookie/douyin.txt").expanduser()
+cookie_path = Path("~/.agent-wiki/cookie/douyin.txt").expanduser()
 cookie = cookie_path.read_text().strip()
 
 # 2. import vendor 并在内存 patch config（不动文件）

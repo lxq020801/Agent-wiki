@@ -22,14 +22,14 @@ start ingest jobs.
 ```json
 {
   "type": "handshake",
-  "client": "obsidian-librarian-extension",
+  "client": "agent-wiki-extension",
   "version": "0.1.0"
 }
 ```
 
 ### `config_update`
 
-The server writes `~/.obsidian-librarian/config.toml` in the format consumed by
+The server writes `~/.agent-wiki/config.toml` in the format consumed by
 `deps/douyin/scripts/config_loader.py`.
 
 ```json
@@ -46,7 +46,7 @@ The server writes `~/.obsidian-librarian/config.toml` in the format consumed by
 
 ### `cookie_update`
 
-The server writes `~/.obsidian-librarian/cookie/douyin.txt` with user-only file
+The server writes `~/.agent-wiki/cookie/douyin.txt` with user-only file
 permissions.
 
 ```json

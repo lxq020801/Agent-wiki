@@ -42,7 +42,7 @@
 
 ```bash
 # 1. 创建归档目录
-mkdir -p obsidian-librarian-archive/{project-code,chat-history,memories,docs,references}
+mkdir -p agent-wiki-archive/{project-code,chat-history,memories,docs,references}
 
 # 2. 复制项目代码（排除敏感文件）
 cp -r project/* project-code/
@@ -63,7 +63,7 @@ cat > CODEX-HANDOFF.md << 'EOF'
 EOF
 
 # 5. 打包
-zip -r obsidian-librarian-archive.zip . -x "*.DS_Store" -x "*__pycache__*"
+zip -r agent-wiki-archive.zip . -x "*.DS_Store" -x "*__pycache__*"
 ```
 
 ## 交接包验证
@@ -75,5 +75,5 @@ zip -r obsidian-librarian-archive.zip . -x "*.DS_Store" -x "*__pycache__*"
 
 ## 参考
 
-- 本次归档位置：`/Users/lixinqi/obsidian-librarian-archive/`
-- 本次交接包：`/Users/lixinqi/.hermes/skills/obsidian-librarian/codex-handoff/`
+- 本次归档位置：`/Users/lixinqi/agent-wiki-archive/`
+- 本次交接包：`/Users/lixinqi/.hermes/skills/agent-wiki/codex-handoff/`

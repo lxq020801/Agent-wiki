@@ -74,7 +74,7 @@
 **Agent 调试**：
 1. 前台运行 `python3 server/websocket_server.py` 看日志
 2. 用 `websockets` CLI 测试连接
-3. 检查 `~/.obsidian-librarian/logs/` 日志
+3. 检查 `~/.agent-wiki/logs/` 日志
 
 ## 7. 常见坑
 

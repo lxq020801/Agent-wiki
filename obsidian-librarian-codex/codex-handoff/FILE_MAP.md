@@ -8,7 +8,7 @@
 ## 项目根目录
 
 ```
-obsidian-librarian/
+agent-wiki/
 ├── chrome-extension/     # Chrome 扩展（控制塔）
 ├── server/               # Agent 服务
 ├── deps/                 # 依赖工具

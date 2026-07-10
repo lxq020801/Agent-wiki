@@ -3,25 +3,25 @@
 > **历史归档 / 非权威资料**
 >
 > 本文件记录旧交接包的脱敏说明。当前敏感信息处理以当前代码、`docs/websocket-protocol.md`
-> 和运行时 `~/.obsidian-librarian/` 的实际行为为准。
+> 和运行时 `~/.agent-wiki/` 的实际行为为准。
 
 ## 已排除的敏感信息类型
 
 ### 1. Cookie 数据
 - **类型**: 浏览器 Cookie（抖音登录凭证）
-- **位置**: `~/.obsidian-librarian/cookie/douyin.txt`
+- **位置**: `~/.agent-wiki/cookie/douyin.txt`
 - **状态**: 已排除，交接包中不包含
 - **说明**: 包含 sessionid、ttwid、msToken 等登录凭证
 
 ### 2. API Key
 - **类型**: 火山方舟 API Key
-- **位置**: `~/.obsidian-librarian/config.toml` 中的 `api_key`
+- **位置**: `~/.agent-wiki/config.toml` 中的 `api_key`
 - **状态**: 已排除，交接包中显示为空字符串
 - **说明**: 用户私有密钥，用于调用火山方舟 API
 
 ### 3. Endpoint 地址
 - **类型**: 火山方舟 API 端点
-- **位置**: `~/.obsidian-librarian/config.toml` 中的 `endpoint`
+- **位置**: `~/.agent-wiki/config.toml` 中的 `endpoint`
 - **状态**: 已泛化，交接包中显示为示例地址
 - **说明**: 实际地址为 `https://ark.cn-beijing.volces.com/api/v3`
 
@@ -45,7 +45,7 @@
 
 ### 7. 日志中的敏感信息
 - **类型**: 运行时日志
-- **位置**: `deps/douyin/logs/`, `~/.obsidian-librarian/logs/`
+- **位置**: `deps/douyin/logs/`, `~/.agent-wiki/logs/`
 - **状态**: 已排除，交接包中不包含日志文件
 - **说明**: 日志可能包含 URL、错误堆栈等
 

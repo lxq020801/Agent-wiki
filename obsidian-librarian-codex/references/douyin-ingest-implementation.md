@@ -1,7 +1,7 @@
 # 抖音视频拆解工具实现参考
 
 > 实现日期: 2026-06-26  
-> 对应 Task 5 (obsidian-librarian spec)  
+> 对应 Task 5 (agent-wiki spec)
 > 状态: v0.1 完成，端到端冒烟通过
 
 ## 架构概览
@@ -34,7 +34,7 @@ vendor锁定httpx 0.27（0.28删了proxies参数），hermes主体锁定httpx 0.
 
 ```bash
 # setup.sh 自动创建
-~/.hermes/skills/obsidian-librarian/deps/douyin/.venv/
+~/.hermes/skills/agent-wiki/deps/douyin/.venv/
 ```
 
 ### 2. Cookie注入方式（内存patch，不改vendor文件）

@@ -17,7 +17,7 @@
 ### 方式 A：自动启动（推荐）
 
 ```bash
-cd ~/.hermes/skills/obsidian-librarian
+cd ~/.hermes/skills/agent-wiki
 python3 server/launcher.py
 ```
 
@@ -30,7 +30,7 @@ python3 server/launcher.py
 ### 方式 B：手动启动
 
 ```bash
-cd ~/.hermes/skills/obsidian-librarian
+cd ~/.hermes/skills/agent-wiki
 python3 server/websocket_server.py
 ```
 
@@ -47,7 +47,7 @@ python3 server/websocket_server.py
 1. 打开 Chrome → 设置 → 扩展程序
 2. 开启「开发者模式」（右上角）
 3. 点击「加载未打包的扩展程序」
-4. 选择 `~/.hermes/skills/obsidian-librarian/chrome-extension/` 目录
+4. 选择 `~/.hermes/skills/agent-wiki/chrome-extension/` 目录
 5. 扩展图标应出现在工具栏
 
 ---
@@ -102,7 +102,7 @@ async def test():
         
         # 检查文件是否写入
         import os
-        config_path = os.path.expanduser('~/.obsidian-librarian/config.toml')
+        config_path = os.path.expanduser('~/.agent-wiki/config.toml')
         if os.path.exists(config_path):
             print('✓ 配置文件已写入')
             with open(config_path) as f:
@@ -158,8 +158,8 @@ asyncio.run(test())
    - 期望：显示「✓ Cookie 已同步」
 6. **检查文件**
    ```bash
-   cat ~/.obsidian-librarian/config.toml
-   cat ~/.obsidian-librarian/cookie/douyin.txt
+   cat ~/.agent-wiki/config.toml
+   cat ~/.agent-wiki/cookie/douyin.txt
    ```
 
 ---
@@ -167,7 +167,7 @@ asyncio.run(test())
 ## 5. 视频拆解测试
 
 ```bash
-cd ~/.hermes/skills/obsidian-librarian/deps/douyin
+cd ~/.hermes/skills/agent-wiki/deps/douyin
 source .venv/bin/activate
 
 # 测试拆解（需要真实 API key 和 cookie）
@@ -185,7 +185,7 @@ python3 scripts/ingest.py "https://v.douyin.com/xxxxx"
 python3 server/websocket_server.py
 
 # 后台启动时看日志文件
-tail -f ~/.obsidian-librarian/logs/server.log
+tail -f ~/.agent-wiki/logs/server.log
 ```
 
 ### 扩展日志
@@ -196,8 +196,8 @@ tail -f ~/.obsidian-librarian/logs/server.log
 ### 任务日志
 
 ```bash
-ls ~/.obsidian-librarian/logs/tasks/
-cat ~/.obsidian-librarian/logs/tasks/2026-06-27-xxxxx.log
+ls ~/.agent-wiki/logs/tasks/
+cat ~/.agent-wiki/logs/tasks/2026-06-27-xxxxx.log
 ```
 
 ---
@@ -225,10 +225,10 @@ cat ~/.obsidian-librarian/logs/tasks/2026-06-27-xxxxx.log
 |------|------|
 | `python3 server/launcher.py` | 自动启动服务 |
 | `python3 server/websocket_server.py` | 手动启动服务器 |
-| `tail -f ~/.obsidian-librarian/logs/server.log` | 查看服务器日志 |
-| `cat ~/.obsidian-librarian/config.toml` | 查看配置 |
-| `cat ~/.obsidian-librarian/cookie/douyin.txt` | 查看 cookie |
-| `ls ~/.obsidian-librarian/status/` | 查看任务状态 |
+| `tail -f ~/.agent-wiki/logs/server.log` | 查看服务器日志 |
+| `cat ~/.agent-wiki/config.toml` | 查看配置 |
+| `cat ~/.agent-wiki/cookie/douyin.txt` | 查看 cookie |
+| `ls ~/.agent-wiki/status/` | 查看任务状态 |
 | `chrome://extensions/` | 管理扩展 |
 
 ---

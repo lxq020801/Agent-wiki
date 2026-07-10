@@ -1,4 +1,4 @@
-{"role": "user", "timestamp": "2026-06-26T13:25:00", "content_summary": "开始讨论 Obsidian Librarian 项目形态，提出方案 C（文件桥 + Agent 自动初始化）"}
+{"role": "user", "timestamp": "2026-06-26T13:25:00", "content_summary": "开始讨论 Agent-wiki 项目形态，提出方案 C（文件桥 + Agent 自动初始化）"}
 {"role": "assistant", "timestamp": "2026-06-26T13:30:00", "content_summary": "确认方案 C 核心：扩展只抓 cookie + 写配置，不直接触发拆解，Agent 自动初始化环境"}
 {"role": "user", "timestamp": "2026-06-26T13:56:00", "content_summary": "方案 C 定稿：电灯哲学，用户按开关就用，零操作"}
 {"role": "user", "timestamp": "2026-06-27T09:00:00", "content_summary": "开始实现文件桥通信（Downloads API）"}

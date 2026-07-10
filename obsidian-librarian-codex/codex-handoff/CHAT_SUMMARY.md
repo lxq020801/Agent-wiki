@@ -70,7 +70,7 @@
 
 ## 敏感信息排除
 
-- cookie 内容（~/.obsidian-librarian/cookie/）
+- cookie 内容（~/.agent-wiki/cookie/）
 - API key（config.toml 中的 api_key）
 - 火山方舟 endpoint
 - 用户 home 路径（已泛化）

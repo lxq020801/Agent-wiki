@@ -34,7 +34,7 @@
   1. 修复服务器
   2. 登录抖音
   3. 点击扩展"抓取 Cookie"
-  4. 检查 ~/.obsidian-librarian/cookie/douyin.txt
+  4. 检查 ~/.agent-wiki/cookie/douyin.txt
 
 ---
 
