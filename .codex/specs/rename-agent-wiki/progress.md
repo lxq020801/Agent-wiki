@@ -3,7 +3,7 @@
 ## Current State（当前状态）
 
 - Controller branch（控制分支）：`codex/rename-agent-wiki`
-- Current phase（当前阶段）：Stage 6 Full Repository Legacy-Name Sweep（全仓库旧名称清扫）进行中
+- Current phase（当前阶段）：Stage 6 Full Repository Legacy-Name Sweep（全仓库旧名称清扫）已提交；准备派发 Stage 7 Runtime Data Migration（运行数据迁移）
 - Active project directory（当前项目目录）：`agent-wiki/`
 - Runtime migration started（运行数据迁移是否开始）：否
 - Final merge completed（最终合并是否完成）：否
@@ -26,7 +26,7 @@
 | 3 | Runtime Directory and Environment Variables（运行数据目录和环境变量） | completed（已完成） | `3122d43` | 改默认 runtime 目录和 env var；未迁移真实运行数据 |
 | 4 | Active Documentation and Reference Rewrite（有效文档和参考资料重写） | completed（已完成） | `fff9c9c` | 改 docs/references/codex-handoff 文档旧名；未改真实 runtime 数据 |
 | 5 | Tests and Fixtures（测试和测试夹具） | completed（已完成） | `321f62d` | 改测试 env var、fixture skill name、运行路径引用；`pytest` 当前环境不可用 |
-| 6 | Full Repository Legacy-Name Sweep（全仓库旧名称清扫） | in progress（进行中） |  | 清理剩余旧身份字符串，并把项目目录改为 `agent-wiki/` |
+| 6 | Full Repository Legacy-Name Sweep（全仓库旧名称清扫） | completed（已完成） | `1698b0f` | 清理剩余旧身份字符串，并把项目目录改为 `agent-wiki/` |
 | 7 | Runtime Data Migration（运行数据迁移） | pending（待处理） |  | 仅在 Stage 7 开始真实数据备份和迁移 |
 | 8 | Final Validation and Merge Readiness（最终验证和合并准备） | pending（待处理） |  | 合并前最终验收 |
 
@@ -56,6 +56,9 @@
 - 临时 spec（规格）旧身份明细已消毒为摘要，以免最终旧身份搜索失败。
 - ignored local historical workspace（被忽略的本地历史工作区）只报告，不修改、不删除。
 - Stage 7 前不创建、复制、移动或删除真实 runtime data（运行数据）。
+- Tracked-file legacy search（被跟踪文件旧身份搜索）-> 无命中。
+- Ignored local historical workspace（被忽略的本地历史工作区）仍有 120 行旧身份命中；按约束只报告，不修改、不删除。
+- Syntax checks（语法检查）：Python py_compile、Node `--check`、Shell `bash -n`、Chrome manifest JSON 检查均通过。
 
 ## Blockers（阻塞点）
 
