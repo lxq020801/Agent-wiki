@@ -3,7 +3,7 @@
 ## Current State（当前状态）
 
 - Controller branch（控制分支）：`codex/rename-agent-wiki`
-- Current phase（当前阶段）：Stage 4 Active Documentation and Reference Rewrite（有效文档和参考资料重写）已提交；准备派发 Stage 5 Tests and Fixtures（测试和测试夹具）
+- Current phase（当前阶段）：Stage 5 Tests and Fixtures（测试和测试夹具）已提交；准备派发 Stage 6 Full Repository Legacy-Name Sweep（全仓库旧名称清扫）
 - Execution started（执行是否开始）：是，Stage 1-3 已开始并提交产品代码改名
 - Runtime migration started（运行数据迁移是否开始）：否
 - Final merge completed（最终合并是否完成）：否
@@ -28,7 +28,7 @@
 | 2 | Internal Slug and Protocol Identifiers（内部短名和协议标识） | completed（已完成） | `019f47f0-396d-7343-a60c-9eb846be87fb` | `5f3c6d0` | 改内部短名、协议/client id、User-Agent、本地 Git bot；未改 runtime/env |
 | 3 | Runtime Directory and Environment Variables（运行数据目录和环境变量） | completed（已完成） | `019f47f7-ef2f-7ca2-a3aa-52548ac01dfd` + controller verification（控制会话验证） | `3122d43` | 改默认 runtime 目录和 env var；未迁移真实运行数据 |
 | 4 | Active Documentation and Reference Rewrite（有效文档和参考资料重写） | completed（已完成） | `019f47fd-f69a-7283-bac1-8d63d9b81466` + controller takeover（控制会话接手） | `fff9c9c` | 改 docs/references/codex-handoff 文档旧名；未改代码、测试、真实 runtime 数据 |
-| 5 | Tests and Fixtures（测试和测试夹具） | pending（待处理） |  |  |  |
+| 5 | Tests and Fixtures（测试和测试夹具） | completed（已完成） | controller（控制会话） | `321f62d` | 改测试 env var、fixture skill name、运行路径引用；`pytest` 当前环境不可用 |
 | 6 | Full Repository Legacy-Name Sweep（全仓库旧名称清扫） | pending（待处理） |  |  |  |
 | 7 | Runtime Data Migration（运行数据迁移） | pending（待处理） |  |  |  |
 | 8 | Final Validation and Merge Readiness（最终验证和合并准备） | pending（待处理） |  |  |  |
@@ -43,6 +43,7 @@
 - Stage 2 已由任务会话完成，并由 controller 提交为 `5f3c6d0`（`Rename internal protocol identifiers to agent-wiki`）。
 - Stage 3 retry 任务会话留下 runtime/env 改名结果，controller 验证并提交为 `3122d43`（`Rename runtime defaults and env vars to Agent-wiki`）。
 - Stage 4 初始任务会话只做了前置检查，controller 接手文档改写，并提交为 `fff9c9c`（`Rewrite active docs for Agent-wiki rename`）。
+- Stage 5 由 controller 直接完成测试和夹具改名，并提交为 `321f62d`（`Update tests for Agent-wiki identity`）。
 
 ## Inventory Notes（盘点记录）
 
@@ -174,6 +175,12 @@ High-hit tracked files（高命中文件，供后续阶段拆分）：
   - `git diff --check` -> 通过，无输出
   - Stage 4 scope legacy search（阶段范围旧名搜索）：`obsidian-librarian-codex|Obsidian Librarian Codex|Obsidian Librarian|obsidian-librarian|OBSIDIAN_LIBRARIAN|~/.obsidian-librarian` -> 无命中
   - runtime migration（运行数据迁移）：未开始，未创建/复制/删除真实 runtime 目录
+- Stage 5:
+  - Changed files（变更文件）：仅 `obsidian-librarian-codex/tests/test_p0_static.py`
+  - `git diff --check` -> 通过，无输出
+  - `python3 -m py_compile obsidian-librarian-codex/tests/test_p0_static.py obsidian-librarian-codex/tests/test_douyin_image_post_static.py` -> 通过，无输出
+  - tests legacy search（测试旧名搜索）：`obsidian-librarian-codex|Obsidian Librarian Codex|Obsidian Librarian|obsidian-librarian|OBSIDIAN_LIBRARIAN|~/.obsidian-librarian|\.obsidian-librarian` -> 无命中
+  - `python3 -m pytest obsidian-librarian-codex/tests/test_p0_static.py` -> 未运行成功；当前环境报 `No module named pytest`
 
 ## Blockers（阻塞点）
 
