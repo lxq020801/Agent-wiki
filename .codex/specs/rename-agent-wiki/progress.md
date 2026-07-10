@@ -3,7 +3,7 @@
 ## Current State（当前状态）
 
 - Controller branch（控制分支）：`codex/rename-agent-wiki`
-- Current phase（当前阶段）：Stage 7 Runtime Data Migration（运行数据迁移）已完成；准备进入 Stage 8 Final Validation and Merge Readiness（最终验证和合并准备）
+- Current phase（当前阶段）：Stage 8 Final Validation and Merge Readiness（最终验证和合并准备）已完成；等待用户批准 merge（合并）到 `main`（主线）
 - Active project directory（当前项目目录）：`agent-wiki/`
 - Runtime migration started（运行数据迁移是否开始）：是
 - Runtime migration completed（运行数据迁移是否完成）：是
@@ -28,8 +28,8 @@
 | 4 | Active Documentation and Reference Rewrite（有效文档和参考资料重写） | completed（已完成） | `fff9c9c` | 改 docs/references/codex-handoff 文档旧名；未改真实 runtime 数据 |
 | 5 | Tests and Fixtures（测试和测试夹具） | completed（已完成） | `321f62d` | 改测试 env var、fixture skill name、运行路径引用；`pytest` 当前环境不可用 |
 | 6 | Full Repository Legacy-Name Sweep（全仓库旧名称清扫） | completed（已完成） | `1698b0f` | 清理剩余旧身份字符串，并把项目目录改为 `agent-wiki/` |
-| 7 | Runtime Data Migration（运行数据迁移） | completed（已完成，待记录提交号） |  | 已创建备份，并把运行数据复制到 `~/.agent-wiki/`；改名前运行目录保留 |
-| 8 | Final Validation and Merge Readiness（最终验证和合并准备） | pending（待处理） |  | 合并前最终验收 |
+| 7 | Runtime Data Migration（运行数据迁移） | completed（已完成） | `ce41d8a` | 已创建备份，并把运行数据复制到 `~/.agent-wiki/`；改名前运行目录保留 |
+| 8 | Final Validation and Merge Readiness（最终验证和合并准备） | completed（已完成，待记录提交号） |  | 合并前最终验收已完成；等待用户批准 merge（合并） |
 
 ## Validation Notes（验证记录）
 
@@ -69,6 +69,18 @@
 - Migration method（迁移方式）：先备份，再复制到新运行目录。
 - Verified migrated items（已验证迁移项目）：`config.toml`、`cookie/douyin.txt`、`status/`、`inbox/`、`logs/`、`run-artifacts/`、`responses-memory/`、`extension/`、`service/`。
 - Pre-rename runtime directory retained（改名前运行数据目录保留）：是；未获得用户明确批准前不删除。
+
+## Stage 8 Notes（Stage 8 记录）
+
+- `git diff --check` -> 通过。
+- Tracked-file legacy identity search（被跟踪文件旧身份搜索）-> 无命中。
+- Python tracked source compile check（被跟踪 Python 源码编译检查）-> 通过。
+- JavaScript tracked source syntax check（被跟踪 JavaScript 源码语法检查）-> 通过。
+- Shell tracked script syntax check（被跟踪 Shell 脚本语法检查）-> 通过。
+- Chrome manifest JSON validation（Chrome manifest JSON 校验）-> 通过。
+- `python3 -m pytest agent-wiki/tests/test_p0_static.py agent-wiki/tests/test_douyin_image_post_static.py` -> 未运行成功；当前环境报 `No module named pytest`。
+- `git status --short --branch` -> clean（干净），当前 branch（分支）为 `codex/rename-agent-wiki`。
+- Merge readiness（合并准备状态）：已准备好等待用户批准；尚未 merge（合并）到 `main`（主线）。
 
 ## Blockers（阻塞点）
 
