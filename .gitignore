@@ -1,4 +1,25 @@
 .DS_Store
 
-# Adjacent historical workspace. The active project is agent-wiki/.
+# Local-only historical workspace kept outside the open-source project.
 obsidian-[l]ibrarian/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime state
+status/
+inbox/
+archive/
+failed/
+cache/
+cookie/
+logs/
+
+# Dependency/runtime folders
+deps/douyin/.venv/
+deps/douyin/logs/
+
+# Local test config
+test.toml
