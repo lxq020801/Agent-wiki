@@ -16,11 +16,12 @@ Agent-wiki 是一个本地优先的个人知识资产系统。它把抖音视频
 
 ```text
 .
+├── AGENTS.md             # 开发 AI 的入口和文档权威边界
 ├── chrome-extension/     # Chrome 扩展，负责配置、Cookie 和任务入口
 ├── deps/douyin/          # 抖音内容解析与 Ark 分析工具链
 ├── docs/                 # 当前技术说明和协议文档
 ├── install/              # 本地初始化脚本
-├── references/           # 设计参考和历史材料
+├── PROJECT_INTENT.md     # 唯一长期产品基准
 ├── rules/                # Obsidian 笔记规则
 ├── scripts/              # 命令行入口
 ├── server/               # 本地 WebSocket 控制服务
@@ -104,6 +105,8 @@ node --check chrome-extension/content/douyin-current-video.js
 
 ## 更多文档
 
+- [产品基准线](PROJECT_INTENT.md)
+- [开发 AI 入口](AGENTS.md)
 - [技术总览](docs/technical-overview.md)
 - [WebSocket 协议](docs/websocket-protocol.md)
 - [Ark 视频理解链路](docs/ark-video-understanding.md)

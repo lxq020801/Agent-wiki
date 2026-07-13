@@ -1,49 +1,23 @@
 ---
 name: agent-wiki
-description: "给 Agent 看的中文项目说明书：定义 Agent-wiki 的 harness、工具、扩展三层形态、vault 宪法、当前运行口径与红线；用于抖音入库、配置/Cookie 同步和知识库维护。"
+description: "给 Agent 看的当前运行说明：记录已经实现的抖音入库、配置与 Cookie 同步、知识库写入方式和安全边界；产品方向以 PROJECT_INTENT.md 为准。"
 ---
 
 # Agent-wiki
 
-> 这是给 AI 看的项目说明书，不是开发计划书，也不是项目回顾。
+> 这是给 Agent 看的当前工具运行说明，不是产品基准线、开发计划或项目回顾。
 
-Agent-wiki 是一个面向 Agent 的本地知识库系统。项目只有三个产物：
+产品方向先读 `PROJECT_INTENT.md`，开发文档的权威边界先读 `AGENTS.md`。本文只说明当前已经实现的工具怎样运行；其中的现有行为不能自动变成未来路线。
 
-- **harness**：给 AI 的说明书、约束、边界、入库规则、失败处理
-- **工具**：真正执行下载、分析、写库、索引、提交的脚本
-- **扩展**：只负责把配置和 Cookie 这类辅助信息送进来，降低用户操作门槛
+当前实现以 Agent 为主要执行面，工具负责下载、分析、写库、索引和提交，Chrome 扩展负责提供配置、Cookie、任务入口和状态等辅助能力。
 
-AI 是主执行面；Chrome 扩展只是辅助控制台。
+## 文档职责和阅读顺序
 
-## 这个项目是什么
-
-Agent-wiki 是一个 Agent 驱动的个人知识资产系统。它把外部内容、个人灵感、项目经验和表达样本沉淀成 Obsidian 中可维护、可召回、可复用的资产，让未来 AI 工作从本地资产出发。
-
-用户可以在 Agent 会话里发链接，也可以在扩展里点页面入口。无论入口在哪里，Agent/工具链都负责最终分类、下载、分析、写入知识库、更新索引、提交 git，再把结果回给用户。
-
-## harness 的四层
-
-这层是“给 AI 的脑子”：
-
-| 层 | 名称 | 作用 | 主要文件 |
-|---|---|---|---|
-| L1 | 宪法层 | 定义 vault 的法律、红线、目录、frontmatter | `SCHEMA.md` |
-| L2 | 说明书层 | 告诉 AI 这个项目是什么、能做什么、不能做什么 | `SKILL.md`、`docs/` |
-| L3 | 操作层 | 定义具体工具怎么跑、输入输出怎么对齐 | `deps/douyin/SKILL.md`、`scripts/`、`templates/`、`rules/` |
-| L4 | 校验层 | 定义检查、静态验证、提交前自检 | `tests/`、git 提交规则、secret 扫描 |
-
-旧的中文 harness 思路以这四层为骨架；现在新增的 WebSocket、bootstrap、Ark 配置同步，只是把这个骨架落到可执行层。
-
-## 权威顺序
-
-按这个顺序理解项目，后面的文档只做补充，不抢主位：
-
-1. `SCHEMA.md` - vault 宪法，定义能写什么、怎么写、什么不能碰。
-2. `SKILL.md` - 本文档，定义 AI 如何理解这个项目、如何使用它、如何守边界。
-3. `deps/douyin/SKILL.md` - 视频拆解工具层说明。
-4. `templates/` 和 `rules/` - 输出骨架与校验规则。
-5. `docs/` - 当前技术说明和协议文档。
-6. `references/` - 设计参考、排障材料和外部工具说明，只用于参考。
+1. `PROJECT_INTENT.md`：唯一长期产品基准。
+2. `AGENTS.md`：开发 AI 的入口和文档权威边界。
+3. 本文与 `deps/douyin/SKILL.md`：当前工具的运行说明。
+4. `SCHEMA.md`、`templates/` 和 `rules/`：当前知识资产的结构与写入契约。
+5. `docs/`、代码和测试：当前技术事实；发生差异时以代码和测试核实实际行为。
 
 ## 当前标准工作流
 
@@ -183,28 +157,17 @@ python3 scripts/ingest_url.py "<douyin-url>" --intent knowledge_ingest
 4. 不要把扩展写成主产品
 5. 不要把历史资料当当前口径
 
-## 预留位
-
-先留位置，不在当前阶段承诺实现：
-
-- 网页入库 / 网页剪藏
-- 多平台来源
-- 快捷指令
-- 知识库召回 / 搜索增强
-
 ## 已经被替代的旧说法
 
 历史上的文件桥、Downloads 轮询、扩展直接执行入库，属于旧演进记录，不是当前实现口径。
 如果看到这类内容，把它当历史资料，不要当成现在的正确答案。
 
-## 需要时再读的资料
+## 需要时再读的当前资料
 
-- `SCHEMA.md`：vault 宪法
+- `SCHEMA.md`：当前知识资产结构和字段契约
+- `deps/douyin/SKILL.md`：当前抖音视频与图文工具说明
+- `docs/technical-overview.md`：当前技术结构概览
 - `docs/websocket-protocol.md`：当前控制面协议
-- `docs/CODEX_PROJECT_DIRECTION.md`：当前实现附录
-- `references/agent-harness-framework.md`：四层 harness 理论
-- `references/agent-harness-research.md`：Anthropic / OpenAI / 业界调研
-- `references/2026-06-27-design-decisions.md`：为什么当前口径会变成这样
 
 ## 验证
 

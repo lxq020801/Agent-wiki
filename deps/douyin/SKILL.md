@@ -39,7 +39,7 @@ The WebSocket control server writes:
 
 1. `scripts/ingest_url.py` runs `install/bootstrap.py`.
 2. `ingest.py --url` loads config and validates Ark API key, vault path, and
-   Cookie path. P0 always uses the `quality` analysis profile.
+   Cookie path. The current runtime always uses the `quality` analysis profile.
 3. `downloader.py` converts the extension's Netscape Cookie file into a header
    string and monkey-patches the vendor crawler in memory.
 4. `analyzer.py` uses the ordinary Ark API path only: upload the local video
@@ -85,7 +85,7 @@ The WebSocket control server writes:
   error.
 - Ordinary Ark Responses content uses `{"type": "input_video", "file_id": ...}`
   plus an `input_text` prompt.
-- P0 fixes analysis to `quality` (1250 target frames). The Chrome extension must
+- The current runtime fixes analysis to `quality` (1250 target frames). The Chrome extension must
   not expose quality, fps, or target-frame settings.
 - Re-upload when fps/model preprocessing changes; do not cache `file_id`.
 - Responses memory is short-term only. Store returned `response_id` under
