@@ -1,0 +1,155 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+
+function extensionEvent() {
+  return { addListener() {} };
+}
+
+class FakeWebSocket {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSED = 3;
+  static instances = [];
+
+  constructor(url) {
+    this.url = url;
+    this.readyState = FakeWebSocket.CONNECTING;
+    this.sent = [];
+    FakeWebSocket.instances.push(this);
+  }
+
+  send(message) {
+    this.sent.push(JSON.parse(message));
+  }
+
+  open() {
+    this.readyState = FakeWebSocket.OPEN;
+    this.onopen?.();
+  }
+
+  close() {
+    this.readyState = FakeWebSocket.CLOSED;
+    this.onclose?.();
+  }
+}
+
+async function main() {
+  const stored = {};
+  const chrome = {
+    alarms: {
+      create() {},
+      onAlarm: extensionEvent()
+    },
+    notifications: { create() {} },
+    runtime: {
+      lastError: null,
+      onInstalled: extensionEvent(),
+      onMessage: extensionEvent(),
+      onStartup: extensionEvent()
+    },
+    scripting: { async executeScript() {} },
+    storage: {
+      local: {
+        async get(keys) {
+          return Object.fromEntries(keys.filter((key) => key in stored).map((key) => [key, stored[key]]));
+        },
+        async set(values) {
+          Object.assign(stored, values);
+        }
+      }
+    },
+    tabs: {
+      async query() { return []; },
+      sendMessage() {}
+    }
+  };
+  const context = vm.createContext({
+    chrome,
+    console,
+    Date,
+    Math,
+    Promise,
+    URL,
+    WebSocket: FakeWebSocket,
+    clearInterval,
+    clearTimeout,
+    setInterval,
+    setTimeout
+  });
+  const backgroundPath = path.resolve(__dirname, '..', 'chrome-extension', 'background.js');
+  vm.runInContext(fs.readFileSync(backgroundPath, 'utf8'), context, { filename: backgroundPath });
+
+  vm.runInContext('connectWebSocket()', context);
+  assert.equal(FakeWebSocket.instances.length, 1);
+  const socket = FakeWebSocket.instances[0];
+  assert.equal(socket.url, 'ws://127.0.0.1:8765');
+  socket.open();
+  assert.deepEqual(socket.sent[0], {
+    type: 'handshake',
+    client: 'agent-wiki-background',
+    version: '0.1.0'
+  });
+
+  const candidate = {
+    url: 'https://www.douyin.com/video/7390000000000000000',
+    awemeId: '7390000000000000000',
+    type: 'video',
+    title: 'Contract test',
+    coverUrl: '',
+    pageTitle: 'Douyin page',
+    pageUrl: 'https://www.douyin.com/',
+    method: 'integration-test'
+  };
+  const submission = vm.runInContext(
+    `submitDouyinIngestTask(${JSON.stringify(candidate)}, { source: 'extension_popup' }, {})`,
+    context
+  );
+  await Promise.resolve();
+  const payload = socket.sent.at(-1);
+  assert.equal(payload.type, 'task_request');
+  assert.equal(payload.taskType, 'douyin_ingest');
+  assert.equal(payload.source, 'extension_popup');
+  assert.equal(payload.url, candidate.url);
+  assert.equal(payload.awemeId, candidate.awemeId);
+  assert.equal(payload.pageTitle, candidate.pageTitle);
+  assert.equal(payload.pageUrl, candidate.pageUrl);
+  assert.equal(payload.detectedBy, candidate.method);
+  assert.equal(typeof payload.requestId, 'string');
+  assert.ok(!('ingest_intent' in payload));
+  assert.ok(!('ingestIntent' in payload));
+
+  vm.runInContext(`handleAgentMessage(${JSON.stringify({
+    type: 'task_accepted',
+    requestId: payload.requestId,
+    task: { id: 'task-contract', ingestIntent: 'knowledge_ingest' },
+    message: '任务已进入队列'
+  })})`, context);
+  const result = await submission;
+  assert.equal(result.ok, true);
+  assert.equal(result.task.id, 'task-contract');
+  assert.equal(stored.lastDouyinTaskRequest.taskId, 'task-contract');
+  assert.equal(stored.lastDouyinTaskRequest.url, candidate.url);
+
+  vm.runInContext(`handleAgentMessage(${JSON.stringify({
+    type: 'status_snapshot',
+    status: {
+      llm: { state: 'ready', provider: 'doubao' },
+      videoAnalysis: { modelPreset: 'lite', chunkConcurrency: 2 },
+      tasks: { taskConcurrency: 3 }
+    }
+  })})`, context);
+  assert.equal(stored.modelStatus.provider, 'doubao');
+  assert.equal(stored.videoAnalysisModelPreset, 'lite');
+  assert.equal(stored.serverTaskConcurrency, 3);
+
+  console.log('Extension contract checks passed');
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
