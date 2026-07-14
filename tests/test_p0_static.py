@@ -1008,8 +1008,10 @@ def test_analyzer_image_post_payload(tmp: Path) -> None:
             )
 
     fake_responses = FakeResponses()
-    old_build_client = analyzer._build_client
-    analyzer._build_client = lambda api_key, endpoint: SimpleNamespace(responses=fake_responses)
+    old_build_response_client = analyzer._build_response_client
+    analyzer._build_response_client = (
+        lambda api_key, endpoint, timeout_sec: SimpleNamespace(responses=fake_responses)
+    )
     try:
         result = asyncio.run(analyzer.analyze_images(
             [image1, image2],
@@ -1019,7 +1021,7 @@ def test_analyzer_image_post_payload(tmp: Path) -> None:
             model="doubao-seed-2-0-lite-260428",
         ))
     finally:
-        analyzer._build_client = old_build_client
+        analyzer._build_response_client = old_build_response_client
 
     assert result.text == "图文分析结果"
     assert result.image_count == 2

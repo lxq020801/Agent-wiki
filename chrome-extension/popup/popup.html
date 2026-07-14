@@ -111,6 +111,13 @@
         </div>
         <button class="secondary small" id="refresh-status" type="button">刷新</button>
       </div>
+      <dl class="runtime-details" aria-label="运行版本">
+        <div><dt>扩展</dt><dd id="extension-version">待读取</dd></div>
+        <div><dt>服务</dt><dd id="service-version">待连接</dd></div>
+        <div><dt>协议</dt><dd id="runtime-protocol-version">待校验</dd></div>
+        <div><dt>源码</dt><dd id="runtime-source-version">待校验</dd></div>
+      </dl>
+      <div class="hint" id="runtime-version-hint" role="status" aria-live="polite"></div>
     </section>
 
     <section class="settings-group detail-section" id="api-settings" data-title="API 设置" tabindex="-1" hidden>
@@ -234,6 +241,7 @@
     </section>
   </main>
 
+  <script src="../runtime-version.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

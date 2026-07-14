@@ -58,6 +58,7 @@ frontmatter 必须同时记录 `asset_family`、`source_media`、`ingest_intent`
 ├── config.toml      --- 扩展写入，Agent 读取
 ├── cookie/
 ├── cache/
+├── run/             --- 托管服务 PID 与进程身份元数据
 ├── status/
 ├── logs/
 └── extension/
@@ -77,8 +78,11 @@ frontmatter 必须同时记录 `asset_family`、`source_media`、`ingest_intent`
 需要配置同步或 Cookie 同步时，启动 WebSocket 控制服务：
 
 ```bash
-python3 server/launcher.py
+python3.11 server/launcher.py start
+python3.11 server/launcher.py status
 ```
+
+停止或重启服务时使用 `stop` / `restart`。launcher 只有在 PID、私有元数据、进程启动标识、Python 路径和服务入口全部一致时才发送信号；端口被未知进程占用时只报告，不尝试清理。`python3.11 server/launcher.py doctor` 可检查本地环境，且不会读取 Cookie 内容或 `.obsidian/` 内容。缓存命令只提供报告与 `cache clean --dry-run` 预览，不执行删除。
 
 控制面接受这几类消息：
 

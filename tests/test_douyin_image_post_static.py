@@ -161,9 +161,11 @@ class DouyinImagePostStaticTests(unittest.TestCase):
                     )
 
             responses = FakeResponses()
-            old_build_client = analyzer._build_client
+            old_build_response_client = analyzer._build_response_client
             try:
-                analyzer._build_client = lambda api_key, endpoint: SimpleNamespace(responses=responses)
+                analyzer._build_response_client = (
+                    lambda api_key, endpoint, timeout_sec: SimpleNamespace(responses=responses)
+                )
                 result = asyncio.run(analyzer.analyze_images(
                     [first, second],
                     "请分析这组图文",
@@ -172,7 +174,7 @@ class DouyinImagePostStaticTests(unittest.TestCase):
                     model="doubao-seed-2-0-lite-260428",
                 ))
             finally:
-                analyzer._build_client = old_build_client
+                analyzer._build_response_client = old_build_response_client
 
         self.assertEqual(result.file_id, "inline-images")
         self.assertEqual(result.image_count, 2)

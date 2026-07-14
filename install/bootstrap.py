@@ -65,7 +65,7 @@ fps_max = 5.0
 file_active_timeout_sec = 120
 
 [douyin]
-cookie_path = "~/.agent-wiki/cookie/douyin.txt"
+cookie_path = "__AGENT_WIKI_COOKIE_PATH__"
 
 [vault]
 path = ""
@@ -185,7 +185,10 @@ def ensure_config_template(result: CheckResult) -> None:
         return
 
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(BOOTSTRAP_CONFIG_TEMPLATE, encoding="utf-8")
+    cookie_path = str(RUNTIME_ROOT / "cookie" / "douyin.txt")
+    cookie_path = cookie_path.replace("\\", "\\\\").replace('"', '\\"')
+    config_text = BOOTSTRAP_CONFIG_TEMPLATE.replace("__AGENT_WIKI_COOKIE_PATH__", cookie_path)
+    CONFIG_PATH.write_text(config_text, encoding="utf-8")
     os.chmod(CONFIG_PATH, 0o600)
     result.actions.append(f"config template created: {CONFIG_PATH}")
     result.missing_user_actions.append(

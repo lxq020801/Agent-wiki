@@ -31,6 +31,7 @@
 # - https://github.com/Johnserf-Seed
 #
 # ==============================================================================
+# Modified by Agent-wiki on 2026-07-05: replaced upstream example identifiers and tokens with placeholders.
 
 
 import time

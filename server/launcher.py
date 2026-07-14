@@ -1,112 +1,62 @@
 #!/usr/bin/env python3
-"""
-Agent-wiki 启动器
+"""Agent-wiki control-plane launcher and runtime operations CLI."""
 
-职责：
-  1. 检查环境（venv、依赖、目录）
-  2. 启动 WebSocket 服务器
-  3. 保持常驻运行
-
-使用方法：
-  python3 server/launcher.py
-
-或作为后台服务：
-  nohup python3 server/launcher.py > logs/server.log 2>&1 &
-"""
+from __future__ import annotations
 
 import os
 import shutil
-import sys
 import subprocess
+import sys
 from pathlib import Path
 
-# 项目根目录
-PROJECT_ROOT = Path(__file__).parent.parent.resolve()
-sys.path.insert(0, str(PROJECT_ROOT))
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_bootstrap():
-    """Run Scheme C bootstrap before starting the WebSocket control plane."""
-    from install.bootstrap import bootstrap
-
-    result = bootstrap(install_deps=False)
-    for item in result.actions:
-        print(f"[Launcher] ✓ {item}")
-    for item in result.warnings:
-        print(f"[Launcher] ⚠ {item}")
-    for item in result.missing_user_actions:
-        print(f"[Launcher] 用户动作: {item}")
-    return result.ok
-
-
-def _can_import(python: Path, module: str) -> bool:
-    result = subprocess.run(
-        [str(python), "-c", f"import {module}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+def _python_is_supported(executable: str) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "-c",
+                "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
     return result.returncode == 0
 
 
-def select_websocket_python() -> Path:
-    """Pick an interpreter that can run the control-plane server."""
-    candidates: list[Path] = []
-    for raw in [sys.executable, shutil.which("python3.13"), shutil.which("python3.12"), shutil.which("python3.11"), shutil.which("python3")]:
-        if raw:
-            path = Path(raw).resolve()
-            if path not in candidates:
-                candidates.append(path)
+def _reexec_with_supported_python() -> None:
+    if sys.version_info >= (3, 11):
+        return
 
-    for python in candidates:
-        if _can_import(python, "websockets"):
-            return python
+    candidates = [
+        PROJECT_ROOT / "deps" / "douyin" / ".venv" / "bin" / "python",
+        *(Path(value) for value in [
+            shutil.which("python3.13"),
+            shutil.which("python3.12"),
+            shutil.which("python3.11"),
+        ] if value),
+    ]
+    for candidate in candidates:
+        if candidate.exists() and _python_is_supported(str(candidate)):
+            os.execv(str(candidate), [str(candidate), str(Path(__file__).resolve()), *sys.argv[1:]])
 
-    raise RuntimeError("No Python interpreter with the websockets package was found. Run: python3 -m pip install -r requirements.txt")
-
-
-def start_server():
-    """启动 WebSocket 服务器"""
-    python = select_websocket_python()
-    server_script = PROJECT_ROOT / "server" / "websocket_server.py"
-    
-    print(f"[Launcher] 启动 WebSocket 服务器: {python}")
-    
-    # Inherit stdout/stderr instead of piping them. A long-running server with a
-    # dead stdout pipe can crash on the next log write.
-    process = subprocess.Popen(
-        [str(python), str(server_script)],
-        cwd=str(PROJECT_ROOT),
-    )
-    
-    print(f"[Launcher] 服务器 PID: {process.pid}")
-    print(f"[Launcher] 按 Ctrl+C 停止")
-    
-    try:
-        return process.wait() == 0
-    except KeyboardInterrupt:
-        print("\n[Launcher] 停止服务器...")
-        process.terminate()
-        process.wait()
-        return True
+    print("[Launcher] Python 3.11+ is required. Install it before running Agent-wiki.", file=sys.stderr)
+    raise SystemExit(2)
 
 
-def main():
-    """主入口"""
-    print("=" * 50)
-    print("Agent-wiki 启动器")
-    print("=" * 50)
-    
-    # 1. 自动初始化
-    if not run_bootstrap():
-        print("[Launcher] 自初始化有警告，继续启动 WebSocket 以便扩展配置可用")
-        
-    # 2. 启动服务器
-    if not start_server():
-        print("[Launcher] 服务器启动失败")
-        return 1
-        
-    return 0
+def main(argv: list[str] | None = None) -> int:
+    _reexec_with_supported_python()
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from server.runtime_manager import main as runtime_main
+
+    return runtime_main(argv, project_root=PROJECT_ROOT)
 
 
-if __name__ == '__main__':
-    sys.exit(main())
+if __name__ == "__main__":
+    raise SystemExit(main())

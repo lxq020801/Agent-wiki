@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
@@ -14,8 +15,12 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-# 添加项目路径
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# Keep the launch spelling for deployment-risk checks, but use canonical paths
+# for imports, manifests, Git metadata, and source hashing.
+VISIBLE_SERVER_SOURCE = Path(os.path.abspath(__file__))
+VISIBLE_PROJECT_ROOT = VISIBLE_SERVER_SOURCE.parents[1]
+SERVER_SOURCE = VISIBLE_SERVER_SOURCE.resolve()
+PROJECT_ROOT = SERVER_SOURCE.parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "deps" / "douyin" / "scripts"))
 
@@ -24,6 +29,134 @@ from install.vault_discovery import (
     score_vault,
     write_vault_path_to_config,
 )
+
+
+PRODUCT_ID = "agent-wiki"
+PROTOCOL_VERSION = 1
+LEGACY_SOURCE_DIR_NAMES = {
+    "obsidian-librarian",
+    "obsidian-librarian-codex",
+}
+CONTROL_MUTATION_TYPES = {
+    "config_update",
+    "cookie_update",
+    "vault_discover",
+    "vault_pick",
+    "model_check",
+    "task_request",
+    "derived_task_action",
+}
+
+
+def _read_product_version(project_root=None):
+    canonical_root = Path(project_root).resolve() if project_root is not None else PROJECT_ROOT
+    try:
+        manifest = json.loads((canonical_root / "chrome-extension" / "manifest.json").read_text(encoding="utf-8"))
+        version = str(manifest.get("version") or "").strip()
+    except (OSError, ValueError, TypeError):
+        version = ""
+    return version if re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version) else ""
+
+
+PRODUCT_VERSION = _read_product_version()
+
+
+def _source_revision(project_root):
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    revision = result.stdout.strip().lower() if result.returncode == 0 else ""
+    return revision if re.fullmatch(r"[0-9a-f]{7,40}", revision) else ""
+
+
+def _source_build_id(server_source):
+    digest = hashlib.sha256()
+    try:
+        digest.update(Path(server_source).read_bytes())
+    except OSError:
+        digest.update(f"{PRODUCT_ID}:{PRODUCT_VERSION}:{PROTOCOL_VERSION}".encode("ascii"))
+    return f"src-{digest.hexdigest()[:16]}"
+
+
+def _deployment_identity(project_root):
+    # Keep the visible launch path so a legacy-path symlink cannot hide the risk.
+    root = Path(os.path.abspath(Path(project_root).expanduser()))
+    names = {part.lower() for part in root.parts}
+    if names & LEGACY_SOURCE_DIR_NAMES:
+        return {"state": "legacy_path", "code": "legacy_source_path"}
+    code = "source_checkout" if (root / ".git").exists() else "packaged_source"
+    return {"state": "current", "code": code}
+
+
+def build_runtime_identity(
+    project_root=None,
+    server_source=None,
+    visible_project_root=None,
+):
+    canonical_project_root = Path(project_root).resolve() if project_root is not None else PROJECT_ROOT
+    canonical_server_source = Path(server_source).resolve() if server_source is not None else SERVER_SOURCE
+    if visible_project_root is not None:
+        launch_project_root = Path(visible_project_root)
+    elif project_root is not None:
+        launch_project_root = Path(project_root)
+    else:
+        launch_project_root = VISIBLE_PROJECT_ROOT
+    return {
+        "product": PRODUCT_ID,
+        "productVersion": _read_product_version(canonical_project_root),
+        "protocolVersion": PROTOCOL_VERSION,
+        "sourceRevision": _source_revision(canonical_project_root),
+        "buildId": _source_build_id(canonical_server_source),
+        "deployment": _deployment_identity(launch_project_root),
+    }
+
+
+def _safe_client_version(value):
+    version = str(value or "").strip()
+    return version if re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version) else ""
+
+
+def _handshake_compatibility(
+    message,
+    product_version=PRODUCT_VERSION,
+    expected_protocol_version=PROTOCOL_VERSION,
+):
+    product = str(message.get("product") or "").strip().lower()
+    version = _safe_client_version(message.get("version"))
+    try:
+        client_protocol_version = int(message.get("protocolVersion"))
+    except (TypeError, ValueError):
+        client_protocol_version = None
+
+    state = "compatible"
+    message_text = "扩展、服务与协议版本一致。"
+    if not product or not version or client_protocol_version is None:
+        state = "legacy_client"
+        message_text = "扩展未提供完整版本身份，请重新同步并加载当前扩展。"
+    elif product != PRODUCT_ID:
+        state = "product_mismatch"
+        message_text = "客户端产品身份与 Agent-wiki 服务不一致。"
+    elif client_protocol_version != int(expected_protocol_version):
+        state = "protocol_mismatch"
+        message_text = f"扩展协议 v{client_protocol_version} 与服务协议 v{expected_protocol_version} 不一致。"
+    elif version != product_version:
+        state = "version_mismatch"
+        message_text = f"扩展 v{version} 与服务 v{product_version or 'unknown'} 不一致。"
+
+    return {
+        "state": state,
+        "canOperate": state == "compatible",
+        "message": message_text,
+        "clientVersion": version,
+        "clientProtocolVersion": client_protocol_version,
+    }
 
 
 def _toml_escape(value):
@@ -420,10 +553,20 @@ class LibrarianServer:
     Agent 本地执行层调用 deps/douyin/scripts/ingest.py 完成。
     """
     
-    def __init__(self, host='127.0.0.1', port=8765, *, enable_task_runner=True, task_concurrency=None):
+    def __init__(
+        self,
+        host='127.0.0.1',
+        port=8765,
+        *,
+        enable_task_runner=True,
+        task_concurrency=None,
+        runtime_identity=None,
+    ):
         self.host = host
         self.port = port
         self.clients = set()  # 所有连接的扩展客户端
+        self.client_compatibility = {}
+        self.runtime_identity = dict(runtime_identity or build_runtime_identity())
         self.config = None  # 当前配置
         self.cookie = None  # 当前 cookie
         self.runtime_root = default_runtime_root()
@@ -448,6 +591,11 @@ class LibrarianServer:
             return
 
         self.clients.add(websocket)
+        self.client_compatibility[websocket] = {
+            "state": "handshake_required",
+            "canOperate": False,
+            "message": "等待扩展版本握手。",
+        }
         client_info = f"{websocket.remote_address}"
         log(f"[Server] 客户端连接: {client_info}")
         
@@ -455,7 +603,9 @@ class LibrarianServer:
             # 发送就绪消息
             await websocket.send(json.dumps({
                 'type': 'agent_ready',
-                'version': '0.1.0',
+                'version': self.runtime_identity['productVersion'],
+                'protocolVersion': self.runtime_identity['protocolVersion'],
+                'runtime': self.runtime_identity,
                 'capabilities': [
                     'config_sync',
                     'cookie_sync',
@@ -499,13 +649,46 @@ class LibrarianServer:
         finally:
             log(f"[Server] 客户端断开: {client_info}")
             self.clients.discard(websocket)
+            self.client_compatibility.pop(websocket, None)
             
     async def handle_message(self, websocket, msg):
         """处理客户端消息"""
         msg_type = msg.get('type')
+
+        if (
+            msg_type in CONTROL_MUTATION_TYPES
+            and websocket in self.clients
+            and not self.client_compatibility.get(websocket, {}).get("canOperate")
+        ):
+            compatibility = self.client_compatibility.get(websocket, {})
+            await websocket.send(json.dumps({
+                'type': 'protocol_rejected',
+                'reason': compatibility.get('state') or 'handshake_required',
+                'message': compatibility.get('message') or '版本握手未通过，已拒绝写操作。',
+                'runtime': self.runtime_identity,
+                'timestamp': datetime.now().isoformat(),
+            }, ensure_ascii=False))
+            return
         
         if msg_type == 'handshake':
-            log(f"[Server] 握手: {msg.get('client')} v{msg.get('version')}")
+            compatibility = _handshake_compatibility(
+                msg,
+                self.runtime_identity.get("productVersion") or "",
+                self.runtime_identity.get("protocolVersion") or PROTOCOL_VERSION,
+            )
+            if websocket in self.clients:
+                self.client_compatibility[websocket] = compatibility
+            log(
+                f"[Server] 握手: {msg.get('client')} "
+                f"v{compatibility.get('clientVersion') or 'unknown'} "
+                f"({compatibility['state']})"
+            )
+            await websocket.send(json.dumps({
+                'type': 'handshake_ack',
+                'runtime': self.runtime_identity,
+                'compatibility': compatibility,
+                'timestamp': datetime.now().isoformat(),
+            }, ensure_ascii=False))
             
         elif msg_type == 'config_update':
             try:
@@ -1851,6 +2034,7 @@ task_concurrency = {int(task_concurrency)}
 
     def status_snapshot(self):
         return {
+            'runtime': self.runtime_identity,
             'vault': self.vault_status(),
             'model': self.model_config_status(),
             'llm': self.model_config_status(),

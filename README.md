@@ -49,11 +49,13 @@ Agent-wiki/       # Git 仓库源码
 
 - macOS 或 Linux
 - Python 3.11+
-- Node.js（只用于检查扩展脚本语法）
+- Git
 - Chrome 或 Chromium 系浏览器
 - Obsidian vault
 - 火山方舟 Ark API Key
 - `ffmpeg` / `ffprobe`
+
+Node.js 不是运行依赖；贡献者只在执行扩展脚本语法检查时需要它。
 
 ## 快速开始
 
@@ -67,14 +69,27 @@ cd Agent-wiki
 初始化本地运行环境：
 
 ```bash
-python3 install/bootstrap.py
+python3.11 install/bootstrap.py
 ```
 
-启动本地控制服务：
+启动托管的本地控制服务：
 
 ```bash
-python3 server/launcher.py
+python3.11 server/launcher.py start
+python3.11 server/launcher.py status
 ```
+
+`start` 会先检查 Python、控制面依赖、配置中的回环地址、端口占用、旧部署和已有服务的源码位置。它不会按进程名杀进程；`stop` 只停止由 Agent-wiki 私有状态完整确认的进程。需要前台运行时使用 `python3.11 server/launcher.py foreground`，无参数调用仍兼容此前的前台行为。
+
+环境诊断和缓存占用预览：
+
+```bash
+python3.11 server/launcher.py doctor
+python3.11 server/launcher.py cache report
+python3.11 server/launcher.py cache clean --dry-run
+```
+
+缓存命令不实现真实删除。完整说明见 [本地运行与诊断](docs/runtime-operations.md)。
 
 安装 Chrome 扩展：
 
@@ -108,12 +123,26 @@ python3 scripts/ingest_url.py "https://v.douyin.com/..."
 常用检查：
 
 ```bash
-python3 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py install/bootstrap.py
-python3 tests/test_p0_static.py
-python3 tests/test_douyin_image_post_static.py
+python3.11 scripts/release_audit.py
+python3.11 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py server/runtime_manager.py server/service_entry.py server/launcher.py install/bootstrap.py scripts/release_audit.py
+python3.11 tests/test_runtime_manager.py
+python3.11 tests/test_p0_static.py
+python3.11 tests/test_douyin_image_post_static.py
+python3.11 tests/test_runtime_version_protocol.py
+python3.11 tests/test_ci_integration.py
+python3.11 tests/test_release_audit.py
+node tests/test_extension_runtime_version.js
+node tests/test_extension_contract.js
 node --check chrome-extension/background.js
+node --check chrome-extension/runtime-version.js
 node --check chrome-extension/popup/popup.js
 node --check chrome-extension/content/douyin-current-video.js
+```
+
+准备公开发布时，再运行包含 Git 历史的只读扫描：
+
+```bash
+python3.11 scripts/release_audit.py --history
 ```
 
 ## 更多文档
@@ -121,13 +150,16 @@ node --check chrome-extension/content/douyin-current-video.js
 - [产品基准线](PROJECT_INTENT.md)
 - [开发 AI 入口](AGENTS.md)
 - [技术总览](docs/technical-overview.md)
+- [本地运行与诊断](docs/runtime-operations.md)
 - [WebSocket 协议](docs/websocket-protocol.md)
 - [Ark 视频理解链路](docs/ark-video-understanding.md)
 - [抖音工具说明](deps/douyin/SKILL.md)
 - [知识库结构约束](SCHEMA.md)
+- [第三方依赖与归属](THIRD_PARTY_NOTICES.md)
+- [发布检查清单](RELEASE_CHECKLIST.md)
 
 ## 许可证
 
 本项目使用 Apache License 2.0，见 [LICENSE](LICENSE)。
 
-`deps/douyin/vendor/` 内嵌了 [Evil0ctal/Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API) 的部分源码快照；该部分遵循其上游 Apache-2.0 许可证。
+`deps/douyin/vendor/` 内嵌了 [Evil0ctal/Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API) 的部分源码快照；该部分遵循其上游 Apache-2.0 许可证。完整来源、版本和本地修改见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
