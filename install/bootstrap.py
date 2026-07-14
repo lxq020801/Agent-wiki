@@ -469,12 +469,11 @@ def check_vault(result: CheckResult) -> None:
         "templates",
         "raw/videos",
         "知识资产/知识入库",
-        "知识资产/创作模式",
         "系统记录/维护报告",
     ]:
         (vault / rel).mkdir(parents=True, exist_ok=True)
     if not (vault / "index.md").exists():
-        (vault / "index.md").write_text("# 知识库索引\n> 最后更新：未开始 | 资产总数：0\n\n## 知识入库\n\n## 创作模式\n", encoding="utf-8")
+        (vault / "index.md").write_text("# 知识库索引\n> 最后更新：未开始 | 资产总数：0\n\n## 知识入库\n", encoding="utf-8")
     result.actions.append(f"vault structure ready: {vault}")
 
 

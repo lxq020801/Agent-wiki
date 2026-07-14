@@ -222,6 +222,7 @@ body[data-view="settings-detail-view"] #open-settings {
 }
 
 .ingest-card .button-row {
+  grid-template-columns: 1fr;
   margin-bottom: 9px;
 }
 

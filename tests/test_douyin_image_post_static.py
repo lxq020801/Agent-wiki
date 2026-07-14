@@ -220,13 +220,14 @@ class DouyinImagePostStaticTests(unittest.TestCase):
                 self.assertEqual(out_dir, cache_dir.parent / "images")
                 return image_paths
 
-            async def fake_analyze_images_many(paths_arg, prompts, **kwargs):
+            async def fake_analyze_images(paths_arg, prompt, **kwargs):
                 calls.append("analyze_images")
                 self.assertEqual(paths_arg, image_paths)
-                self.assertEqual(list(prompts), ["knowledge_ingest"])
+                self.assertTrue(prompt.strip())
                 self.assertIn("api_key", kwargs)
                 self.assertEqual(kwargs["model"], cfg.analyzer_model)
-                return {"knowledge_ingest": FakeImageResult()}
+                self.assertEqual(kwargs["analysis_key"], "knowledge_ingest")
+                return FakeImageResult()
 
             def fake_cost(model, usage):
                 calls.append("estimate_cost")
@@ -285,7 +286,7 @@ class DouyinImagePostStaticTests(unittest.TestCase):
                 name: getattr(ingest, name, None)
                 for name in [
                     "download", "analyze_video", "fetch_metadata", "download_images",
-                    "analyze_images", "analyze_images_many", "estimate_cost_rmb", "write_to_vault",
+                    "analyze_images", "estimate_cost_rmb", "write_to_vault",
                     "write_image_post_to_vault", "derive_tasks_from_analysis",
                 ]
             }
@@ -294,7 +295,7 @@ class DouyinImagePostStaticTests(unittest.TestCase):
                 ingest.analyze_video = fail_video_analysis
                 ingest.fetch_metadata = fake_fetch_metadata
                 ingest.download_images = fake_download_images
-                ingest.analyze_images_many = fake_analyze_images_many
+                ingest.analyze_images = fake_analyze_images
                 ingest.estimate_cost_rmb = fake_cost
                 ingest.write_to_vault = fake_write
                 ingest.write_image_post_to_vault = fake_write

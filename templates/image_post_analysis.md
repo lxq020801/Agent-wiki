@@ -1,9 +1,9 @@
 ---
 id: ""
 type: image_post_analysis
-asset_family: knowledge_asset  # knowledge_asset | creative_pattern
+asset_family: knowledge_asset
 source_media: douyin_image_post
-ingest_intent: knowledge_ingest # knowledge_ingest | viral_breakdown
+ingest_intent: knowledge_ingest
 title: ""
 source_url: ""          # 原始来源URL，无则填 "manual"
 platform: ""            # douyin | xiaohongshu | other
@@ -37,9 +37,9 @@ derived_candidate_ids: []    # 只放 dt-...，不放完整候选对象
 [agent 用一句话概括图文的核心内容，不超过 80 字]
 
 ## 资产化方向
-- **资产用途**：[knowledge_asset / creative_pattern]
+- **资产用途**：knowledge_asset
 - **来源形态**：[douyin_image_post / other]
-- **入库意图**：[knowledge_ingest / viral_breakdown]
+- **入库意图**：knowledge_ingest
 
 ## 派生候选
 [若有派生候选，只展示摘要；完整评分、证据、去重和验收标准见系统记录 JSON]
@@ -51,11 +51,10 @@ derived_candidate_ids: []    # 只放 dt-...，不放完整候选对象
 - [关键信息 1：图文提出的核心观点]
 - [关键信息 2：可复用的方法、模板或流程]
 - [关键信息 3：提到的工具、产品、人名或项目]
-- [关键信息 4：设计/表达上值得复刻的做法]
+- [关键信息 4：理解原意所需的表达方式或上下文]
 
 ## 可迁移价值
 - [知识入库：提炼方法、步骤、工具、风险]
-- [爆款拆解：提炼封面、文案、节奏、排版和创作模式]
 
 ## 关联资产
 - [[相关笔记名称]]：[说明与当前图文的关系]

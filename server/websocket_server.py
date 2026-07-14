@@ -152,9 +152,7 @@ DOUYIN_HOST_SUFFIXES = (
     "douyin.com",
     "iesdouyin.com",
 )
-INGEST_INTENTS = {"knowledge_ingest", "viral_breakdown"}
 DEFAULT_INGEST_INTENT = "knowledge_ingest"
-ALL_INGEST_INTENTS = ("knowledge_ingest", "viral_breakdown")
 TASK_STAGES = {
     "queued": "排队中",
     "started": "已开始",
@@ -667,33 +665,7 @@ class LibrarianServer:
         if raw is None and isinstance(msg.get('data'), dict):
             raw = msg['data'].get('ingest_intent') or msg['data'].get('ingestIntent')
         intent = str(raw or '').strip() or DEFAULT_INGEST_INTENT
-        return intent if intent in INGEST_INTENTS else ''
-
-    def _extract_ingest_intents(self, msg):
-        raw = msg.get('ingest_intents') or msg.get('ingestIntents')
-        if raw is None and isinstance(msg.get('data'), dict):
-            raw = msg['data'].get('ingest_intents') or msg['data'].get('ingestIntents')
-        if raw is None:
-            intent = self._extract_ingest_intent(msg)
-            return [intent] if intent else []
-        if isinstance(raw, str):
-            text = raw.strip()
-            if text in {'both', 'all', 'knowledge_and_viral'}:
-                items = list(ALL_INGEST_INTENTS)
-            else:
-                items = [item.strip() for item in text.split(',')]
-        elif isinstance(raw, (list, tuple)):
-            items = list(raw)
-        else:
-            items = []
-        out = []
-        for item in items:
-            intent = str(item or '').strip()
-            if intent not in INGEST_INTENTS:
-                return []
-            if intent not in out:
-                out.append(intent)
-        return out or [DEFAULT_INGEST_INTENT]
+        return intent if intent == DEFAULT_INGEST_INTENT else ''
 
     def _write_task_status(self, task_id, payload):
         status_dir = self._task_dirs()['status']
@@ -1048,7 +1020,6 @@ class LibrarianServer:
             'source': source,
             'source_url': candidate.get('targetUrl') or candidate.get('target_url') or parent_status.get('source_url') or '',
             'ingest_intent': 'derived_ingest',
-            'ingest_intents': ['derived_ingest'],
             'title': candidate.get('name') or '派生任务',
             'parent_task_id': parent_task_id,
             'derived_candidate_id': candidate_id,
@@ -1120,16 +1091,15 @@ class LibrarianServer:
                 'message': '没有识别到可拆解的抖音链接',
                 'timestamp': datetime.now().isoformat(),
             }
-        ingest_intents = self._extract_ingest_intents(msg)
-        if not ingest_intents:
+        ingest_intent = self._extract_ingest_intent(msg)
+        if not ingest_intent:
             return {
                 'type': 'task_rejected',
                 'requestId': request_id,
                 'reason': 'invalid_ingest_intent',
-                'message': '未知入库类型，请选择“知识入库”或“爆款拆解”',
+                'message': '当前只支持知识入库',
                 'timestamp': datetime.now().isoformat(),
             }
-        ingest_intent = ingest_intents[0]
 
         task_id = self._task_id()
         created_at = datetime.now().isoformat()
@@ -1141,7 +1111,6 @@ class LibrarianServer:
             'url': url,
             'type': 'douyin_ingest',
             'ingest_intent': ingest_intent,
-            'ingest_intents': ingest_intents,
             'source': msg.get('source') or 'extension',
             'page_title': msg.get('pageTitle') or '',
             'page_url': msg.get('pageUrl') or '',
@@ -1161,7 +1130,6 @@ class LibrarianServer:
             'source': task['source'],
             'source_url': url,
             'ingest_intent': ingest_intent,
-            'ingest_intents': ingest_intents,
             'page_url': task['page_url'],
             'page_title': task['page_title'],
             'aweme_id': task['aweme_id'],
@@ -1183,7 +1151,6 @@ class LibrarianServer:
                 'stage': 'queued',
                 'source': task['source'],
                 'ingestIntent': ingest_intent,
-                'ingestIntents': ingest_intents,
                 'createdAt': created_at,
             },
             'message': '任务已进入队列',
@@ -1483,7 +1450,6 @@ class LibrarianServer:
             'url': status.get('source_url') or status.get('url') or '',
             'source': status.get('source') or 'agent',
             'ingestIntent': status.get('ingest_intent') or DEFAULT_INGEST_INTENT,
-            'ingestIntents': status.get('ingest_intents') or [status.get('ingest_intent') or DEFAULT_INGEST_INTENT],
             'assetFamily': status.get('asset_family') or '',
             'startedAt': started,
             'updatedAt': updated,

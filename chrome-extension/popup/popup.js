@@ -29,11 +29,6 @@ const SETTINGS_DETAIL_TITLES = {
   'cookie-settings': '抖音 Cookie',
   'task-settings': '任务状态'
 };
-const INGEST_INTENT_LABELS = {
-  knowledge_ingest: '知识入库',
-  viral_breakdown: '爆款拆解',
-  knowledge_and_viral: '完整入库'
-};
 const PENDING_COOKIE_KEYS = [
   'pendingCookieText',
   'pendingCookieCount',
@@ -618,9 +613,7 @@ function renderTaskList(targetId, items) {
     if (task.ok === false) {
       detail.textContent = task.error || task.hint || '任务失败';
     } else if (task.ok === true && (task.stage === 'done' || task.displayStage === 'done')) {
-      detail.textContent = Array.isArray(task.assets) && task.assets.length > 1
-        ? `已写入 ${task.assets.length} 篇资产`
-        : (task.vaultPath ? compactPath(task.vaultPath) : '已写入知识库');
+      detail.textContent = task.vaultPath ? compactPath(task.vaultPath) : '已写入知识库';
     } else {
       detail.textContent = task.url || '任务已进入队列';
     }
@@ -777,11 +770,8 @@ function compactTaskTitle(value) {
 function taskMetaText(task) {
   const stage = task.stageLabel || stageLabel(task.displayStage || task.stage);
   const elapsed = formatElapsed(task.elapsedSec);
-  const intent = task.ingestIntents?.length > 1
-    ? '完整入库'
-    : (INGEST_INTENT_LABELS[task.ingestIntent] || '');
   const source = task.source === 'extension_popup' ? '扩展' : 'Agent';
-  return [stage, elapsed, intent, source].filter(Boolean).join(' · ');
+  return [stage, elapsed, source].filter(Boolean).join(' · ');
 }
 
 function stageLabel(stage) {
@@ -1098,14 +1088,11 @@ async function handleProviderChange() {
   await saveApiConfig();
 }
 
-async function submitDouyinIngestFromPopup(ingestIntent) {
+async function submitDouyinIngestFromPopup() {
   const shareInput = document.getElementById('douyin-share-text');
   const shareText = shareInput?.value.trim() || '';
-  const label = INGEST_INTENT_LABELS[ingestIntent] || '入库';
   const hintId = 'ingest-hint';
-  const buttons = [
-    'share-knowledge', 'share-viral'
-  ].map(id => document.getElementById(id)).filter(Boolean);
+  const buttons = [document.getElementById('share-knowledge')].filter(Boolean);
   if (!isAgentConnected) {
     showHint(hintId, '请先启动 Agent 服务', 'warning', { persist: true });
     openSettingsDetail('agent-settings');
@@ -1116,11 +1103,10 @@ async function submitDouyinIngestFromPopup(ingestIntent) {
   try {
     const response = await chrome.runtime.sendMessage({
       action: 'submitDouyinIngestFromPopup',
-      ingestIntent,
       shareText
     });
     if (response?.ok) {
-      showHint(hintId, `${label}任务已进入队列`, 'success');
+      showHint(hintId, '知识入库任务已进入队列', 'success');
       requestTaskStatus();
     } else {
       showHint(hintId, response?.message || '没有识别到可入库的抖音链接', 'warning', { persist: true });
@@ -1450,8 +1436,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('detect-vault').addEventListener('click', discoverVault);
   document.getElementById('pick-vault').addEventListener('click', pickVault);
   document.getElementById('grab-cookie').addEventListener('click', grabCookie);
-  bindClick('share-knowledge', () => submitDouyinIngestFromPopup('knowledge_ingest'));
-  bindClick('share-viral', () => submitDouyinIngestFromPopup('viral_breakdown'));
+  bindClick('share-knowledge', submitDouyinIngestFromPopup);
   document.getElementById('refresh-status').addEventListener('click', requestStatus);
   document.getElementById('refresh-tasks').addEventListener('click', requestTaskStatus);
   document.getElementById('toggle-key').addEventListener('click', () => {

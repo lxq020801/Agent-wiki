@@ -1,9 +1,9 @@
 ---
 id: ""
 type: video_analysis
-asset_family: knowledge_asset  # knowledge_asset | creative_pattern
+asset_family: knowledge_asset
 source_media: douyin_video
-ingest_intent: knowledge_ingest # knowledge_ingest | viral_breakdown
+ingest_intent: knowledge_ingest
 title: ""
 source_url: ""          # 原始来源URL，无则填 "manual"
 platform: ""            # douyin | bilibili | youtube | other
@@ -34,9 +34,9 @@ derived_candidate_ids: []    # 只放 dt-...，不放完整候选对象
 [agent 用一句话概括视频的核心内容，不超过 80 字]
 
 ## 🧭 资产化方向
-- **资产用途**：[knowledge_asset / creative_pattern]
+- **资产用途**：knowledge_asset
 - **来源形态**：[douyin_video / other]
-- **入库意图**：[knowledge_ingest / viral_breakdown]
+- **入库意图**：knowledge_ingest
 
 ## 🧩 派生候选
 [若有派生候选，只展示摘要；完整评分、证据、去重和验收标准见系统记录 JSON]

@@ -7,7 +7,7 @@ Agent-wiki 是一个本地优先的个人知识资产系统。它把抖音视频
 ## 能做什么
 
 - 从抖音视频或图文链接创建知识笔记。
-- 支持两种入库意图：`knowledge_ingest`（知识入库）和 `viral_breakdown`（爆款拆解）。
+- 通过 `knowledge_ingest` 将抖音来源整理为可长期复用的知识资产。
 - 调用火山方舟 Ark 视频理解能力，把内容拆成结构化 Obsidian Markdown。
 - 通过 Chrome 扩展同步 Cookie、模型配置、任务状态和 Obsidian vault 路径。
 - 对高置信的 GitHub 项目线索生成派生候选，方便继续沉淀项目资料。
@@ -75,12 +75,12 @@ python3 server/launcher.py
 - 填入 Ark API Key
 - 同步抖音 Cookie
 - 选择或识别 Obsidian vault
-- 在抖音页面提交“知识入库”或“爆款拆解”任务
+- 在抖音页面提交“知识入库”任务
 
 也可以用命令行提交链接：
 
 ```bash
-python3 scripts/ingest_url.py "https://v.douyin.com/..." --intent knowledge_ingest
+python3 scripts/ingest_url.py "https://v.douyin.com/..."
 ```
 
 ## 隐私和安全

@@ -352,7 +352,7 @@ api_key = ""
 endpoint = "https://ark.cn-beijing.volces.com/api/v3"
 
 [models]
-# 拆解模型（Seed 2.0 Lite，复刻信息量最强）
+# 拆解模型（Seed 2.0 Lite，信息提取能力更强）
 analyzer = "doubao-seed-2-0-lite-260428"
 # 长视频概览与分段策略模型（Mini，成本低；只做粗看、决策和 JSON 修复）
 strategy = "doubao-seed-2-0-mini-260428"
@@ -380,8 +380,7 @@ cookie_path = "~/.agent-wiki/cookie/douyin.txt"
 [vault]
 # ⚠️ Obsidian 仓库根目录（必填）
 path = ""
-# 默认知识资产相对路径。当前 Douyin 工具会按 ingest_intent 写入
-# 知识资产/知识入库 或 知识资产/创作模式。
+# 默认知识资产相对路径。
 relative_root = "知识资产/知识入库"
 
 [server]

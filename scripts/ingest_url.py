@@ -15,17 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Bootstrap and ingest one Douyin URL")
     parser.add_argument("url", help="Douyin share URL or share text")
-    parser.add_argument(
-        "--intent",
-        default="knowledge_ingest",
-        choices=["knowledge_ingest", "viral_breakdown", "both"],
-        help="入库意图：知识入库或爆款拆解",
-    )
-    parser.add_argument(
-        "--intents",
-        default=None,
-        help="多个入库意图，逗号分隔；可用 both 同时产出知识入库和爆款拆解",
-    )
     args = parser.parse_args(argv)
 
     sys.path.insert(0, str(ROOT))
@@ -48,11 +37,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.url,
         "--quality",
         "quality",
-        "--intent",
-        args.intent,
     ]
-    if args.intents:
-        cmd.extend(["--intents", args.intents])
     return subprocess.run(cmd, cwd=ROOT / "deps" / "douyin").returncode
 
 

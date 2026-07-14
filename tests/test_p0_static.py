@@ -303,7 +303,9 @@ def test_ingest_url_preserves_share_text_argument() -> None:
     assert calls
     cmd, cwd = calls[0]
     assert cmd[3] == share_text
-    assert cmd[4:] == ["--quality", "quality", "--intent", "knowledge_ingest"]
+    assert cmd[4:] == ["--quality", "quality"]
+    assert "--intent" not in cmd
+    assert "--intents" not in cmd
     assert cwd == ROOT / "deps" / "douyin"
 
 
@@ -785,29 +787,20 @@ def test_derive_strategy_ignores_candidates_json_outside_derived_section(tmp: Pa
     assert any(item["name"] == "LangGraph" for item in decision["items"])
 
 
-def test_derived_status_prefers_knowledge_decision_even_when_second() -> None:
+def test_normalize_ingest_intent_rejects_removed_viral_intent() -> None:
     import sys
 
     sys.path.insert(0, str(SCRIPTS))
-    from ingest import _status_derived_decision
+    from ingest import normalize_ingest_intent
 
-    viral = {
-        "enabled": False,
-        "items": [],
-        "counts": {"candidate": 0, "rejected": 0, "suppressed": 0},
-    }
-    knowledge = {
-        "enabled": True,
-        "items": [{"id": "dt-knowledge", "decision": "candidate"}],
-        "counts": {"candidate": 1, "rejected": 0, "suppressed": 0},
-    }
-
-    selected = _status_derived_decision(
-        {"viral_breakdown": viral, "knowledge_ingest": knowledge},
-        "viral_breakdown",
-    )
-
-    assert selected is knowledge
+    assert normalize_ingest_intent(None) == "knowledge_ingest"
+    assert normalize_ingest_intent("knowledge_ingest") == "knowledge_ingest"
+    try:
+        normalize_ingest_intent("viral_breakdown")
+    except ValueError as exc:
+        assert "只支持知识入库" in str(exc)
+    else:
+        raise AssertionError("removed viral intent must be rejected")
 
 
 def test_vault_write_includes_derived_tasks_and_record(tmp: Path) -> None:
@@ -1144,7 +1137,7 @@ def test_summary_skips_markdown_section_headings() -> None:
     assert _summary_from_text(text, "fallback") == "博主分享Codex操控剪映的高效方法，解答观众疑问。"
 
 
-def test_vault_write_uses_intent_relative_root(tmp: Path) -> None:
+def test_vault_write_uses_knowledge_root_and_rejects_removed_intent(tmp: Path) -> None:
     import sys
 
     sys.path.insert(0, str(SCRIPTS))
@@ -1185,16 +1178,29 @@ def test_vault_write_uses_intent_relative_root(tmp: Path) -> None:
         video,
         FakeResult(),
         {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3, "cost_rmb_estimate": 0.1},
-        "viral_breakdown",
     )
 
-    assert md_path.parent == vault / "知识资产" / "创作模式"
+    assert md_path.parent == vault / "知识资产" / "知识入库"
     text = md_path.read_text(encoding="utf-8")
-    assert "asset_family: creative_pattern" in text
-    assert "ingest_intent: viral_breakdown" in text
+    assert "asset_family: knowledge_asset" in text
+    assert "ingest_intent: knowledge_ingest" in text
+
+    try:
+        write_to_vault(
+            cfg,
+            FakeMeta(),
+            video,
+            FakeResult(),
+            {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3, "cost_rmb_estimate": 0.1},
+            "viral_breakdown",
+        )
+    except ValueError as exc:
+        assert "只支持知识入库" in str(exc)
+    else:
+        raise AssertionError("writer must reject the removed viral intent")
 
 
-def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Path) -> None:
+def test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp: Path) -> None:
     import asyncio
     import sys
 
@@ -1202,9 +1208,9 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
     import ingest
     from config_loader import Config
 
-    vault = tmp / "multi-intent-vault"
+    vault = tmp / "single-ingest-vault"
     vault.mkdir()
-    runtime = tmp / "multi-intent-runtime"
+    runtime = tmp / "single-ingest-runtime"
     runtime.mkdir()
     cache = tmp / "cache"
     cache.mkdir()
@@ -1235,7 +1241,7 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
 
     class FakeStatusWriter:
         def update(self, **fields):
-            calls.append(("status", fields.get("stage"), fields.get("ingest_intents")))
+            calls.append(("status", fields.get("stage"), fields.get("ingest_intent")))
             if fields.get("stage") == "derived_candidates_ready":
                 calls.append((
                     "derived_status",
@@ -1255,23 +1261,33 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
         calls.append(("download_video", meta.aweme_id))
         return video
 
-    async def fake_analyze_video_many(video_path, prompts, **kwargs):
-        calls.append(("analyze_video_many", tuple(prompts), kwargs.get("strategy_model")))
-        return {
-            intent: SimpleNamespace(
-                text=f"{intent} 输出",
-                file_id="file-one-upload",
-                fps_used=1.0,
-                quality="quality",
-                model=cfg.analyzer_model,
-                duration_sec=61,
-                target_frames=1250,
-                actual_frames_estimate=61,
-                usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
-                truncated=False,
-            )
-            for intent in prompts
-        }
+    analysis_audit_artifacts = {
+        "dir": "run-artifacts/single-ingest",
+        "files": {"run_manifest": "run-artifacts/single-ingest/00-run-manifest.json"},
+    }
+
+    async def fake_analyze_video(video_path_arg, prompt, **kwargs):
+        calls.append((
+            "analyze_video",
+            video_path_arg,
+            kwargs.get("strategy_model"),
+            kwargs.get("analysis_key"),
+        ))
+        assert video_path_arg == video
+        assert prompt.strip()
+        return SimpleNamespace(
+            text="knowledge_ingest 输出",
+            file_id="file-one-upload",
+            fps_used=1.0,
+            quality="quality",
+            model=cfg.analyzer_model,
+            duration_sec=61,
+            target_frames=1250,
+            actual_frames_estimate=61,
+            usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+            truncated=False,
+            audit_artifacts=analysis_audit_artifacts,
+        )
 
     def fake_cost(model, usage):
         return {
@@ -1282,13 +1298,13 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
             "model": model,
         }
 
-    primary_derived_decision = {
+    derived_decision = {
         "enabled": True,
         "source": "json",
         "counts": {"candidate": 1, "rejected": 0, "suppressed": 0},
         "audit_artifacts": {
-            "dir": "run-artifacts/multi-intent",
-            "files": {"derive_public_candidates": "run-artifacts/multi-intent/05-derive/05-public-candidates.json"},
+            "dir": "run-artifacts/single-ingest",
+            "files": {"derive_public_candidates": "run-artifacts/single-ingest/05-derive/05-public-candidates.json"},
         },
         "items": [{
             "id": "dt-primary",
@@ -1305,24 +1321,20 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
     def fake_derive_tasks(text, *, source_id, source_url, source_media, ingest_intent, vault_path,
                           task_id=""):
         calls.append(("derive_tasks", ingest_intent, source_media, task_id))
-        if ingest_intent != "knowledge_ingest":
-            return {
-                "enabled": False,
-                "reason": "derivation_only_runs_for_knowledge_ingest",
-                "items": [],
-                "counts": {"candidate": 0, "rejected": 0, "suppressed": 0},
-            }
+        assert text == "knowledge_ingest 输出"
+        assert ingest_intent == "knowledge_ingest"
         assert source_id == FakeMeta.aweme_id
         assert source_url == FakeMeta.source_url
         assert source_media == "douyin_video"
         assert vault_path == cfg.vault_path
-        return primary_derived_decision
+        assert task_id == "single-ingest"
+        return derived_decision
 
     def fake_write(config, meta, video_path, result, cost, ingest_intent,
                    derived_decision=None, task_id=""):
         calls.append(("write_to_vault", ingest_intent))
         calls.append(("write_derived", ingest_intent, derived_decision, task_id))
-        md_path = config.vault_path / "知识资产" / ingest_intent / "fake.md"
+        md_path = config.vault_path / "知识资产" / "知识入库" / "fake.md"
         md_path.parent.mkdir(parents=True, exist_ok=True)
         md_path.write_text("# fake", encoding="utf-8")
         return md_path, "committed"
@@ -1332,7 +1344,7 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
         for name in [
             "fetch_metadata",
             "download_video",
-            "analyze_video_many",
+            "analyze_video",
             "estimate_cost_rmb",
             "derive_tasks_from_analysis",
             "write_to_vault",
@@ -1341,16 +1353,16 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
     try:
         ingest.fetch_metadata = fake_fetch_metadata
         ingest.download_video = fake_download_video
-        ingest.analyze_video_many = fake_analyze_video_many
+        ingest.analyze_video = fake_analyze_video
         ingest.estimate_cost_rmb = fake_cost
         ingest.derive_tasks_from_analysis = fake_derive_tasks
         ingest.write_to_vault = fake_write
         sw = FakeStatusWriter()
         summary = asyncio.run(ingest.run_task(
-            task_id="multi-intent",
+            task_id="single-ingest",
             url="https://v.douyin.com/test/",
             quality="quality",
-            ingest_intents=("knowledge_ingest", "viral_breakdown"),
+            ingest_intent="knowledge_ingest",
             config=cfg,
             sw=sw,
             cache_dir=cache,
@@ -1361,15 +1373,17 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
 
     assert sum(1 for call in calls if call[0] == "download_video") == 1
     assert (
-        "analyze_video_many",
-        ("knowledge_ingest", "viral_breakdown"),
+        "analyze_video",
+        video,
         "doubao-seed-2-0-mini-260428",
+        "knowledge_ingest",
     ) in calls
-    assert ("write_to_vault", "knowledge_ingest") in calls
-    assert ("write_to_vault", "viral_breakdown") in calls
-    assert len(summary["assets"]) == 2
-    assert summary["ingest_intents"] == ["knowledge_ingest", "viral_breakdown"]
+    assert sum(1 for call in calls if call == ("write_to_vault", "knowledge_ingest")) == 1
+    assert len(summary["assets"]) == 1
+    assert summary["ingest_intent"] == "knowledge_ingest"
+    assert "ingest_intents" not in summary
     assert summary["analysis"]["file_id"] == "file-one-upload"
+    assert summary["analysis"]["audit_artifacts"] == analysis_audit_artifacts
     assert summary["derived_summary"] == {"candidate": 1, "rejected": 0, "suppressed": 0}
     assert len(summary["derived_tasks"]) == 1
     expected_public = {
@@ -1386,17 +1400,87 @@ def test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp: Pa
         assert summary["derived_tasks"][0][key] == value
     assert summary["assets"][0]["derived_tasks"] == summary["derived_tasks"]
     assert summary["assets"][0]["derived_summary"] == summary["derived_summary"]
-    assert summary["assets"][0]["derived_audit_artifacts"] == primary_derived_decision["audit_artifacts"]
-    assert summary["assets"][1]["derived_tasks"] == []
-    assert summary["assets"][1]["derived_audit_artifacts"] == {}
-    assert summary["derived_audit_artifacts"] == primary_derived_decision["audit_artifacts"]
+    assert summary["assets"][0]["derived_audit_artifacts"] == derived_decision["audit_artifacts"]
+    assert summary["assets"][0]["audit_artifacts"] == analysis_audit_artifacts
+    assert summary["derived_audit_artifacts"] == derived_decision["audit_artifacts"]
     assert (
         "derived_status",
         summary["derived_tasks"],
         summary["derived_summary"],
         summary["derived_audit_artifacts"],
     ) in calls
-    assert ("write_derived", "knowledge_ingest", primary_derived_decision, "multi-intent") in calls
+    assert ("derive_tasks", "knowledge_ingest", "douyin_video", "single-ingest") in calls
+    assert ("write_derived", "knowledge_ingest", derived_decision, "single-ingest") in calls
+
+
+def test_analyzer_single_wrappers_preserve_analysis_key() -> None:
+    import asyncio
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    calls = []
+
+    async def fake_video_many(video_path, prompts, **kwargs):
+        calls.append(("video", tuple(prompts)))
+        return {"knowledge_ingest": "video-result"}
+
+    async def fake_images_many(image_paths, prompts, **kwargs):
+        calls.append(("images", tuple(prompts)))
+        return {"knowledge_ingest": "image-result"}
+
+    original_video_many = analyzer.analyze_video_many
+    original_images_many = analyzer.analyze_images_many
+    try:
+        analyzer.analyze_video_many = fake_video_many
+        analyzer.analyze_images_many = fake_images_many
+        video_result = asyncio.run(analyzer.analyze_video(
+            Path("unused.mp4"),
+            "video prompt",
+            api_key="test",
+            endpoint="https://ark.cn-beijing.volces.com/api/v3",
+            model="test-model",
+            analysis_key="knowledge_ingest",
+        ))
+        image_result = asyncio.run(analyzer.analyze_images(
+            [Path("unused.jpg")],
+            "image prompt",
+            api_key="test",
+            endpoint="https://ark.cn-beijing.volces.com/api/v3",
+            model="test-model",
+            analysis_key="knowledge_ingest",
+        ))
+    finally:
+        analyzer.analyze_video_many = original_video_many
+        analyzer.analyze_images_many = original_images_many
+
+    assert video_result == "video-result"
+    assert image_result == "image-result"
+    assert calls == [
+        ("video", ("knowledge_ingest",)),
+        ("images", ("knowledge_ingest",)),
+    ]
+
+
+def test_long_overview_prompt_uses_single_ingest_placeholder() -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from analyzer import _build_long_overview_prompt
+
+    prompt = _build_long_overview_prompt(
+        duration_sec=601,
+        chunk_plan=[{
+            "part_index": 1,
+            "start_sec": 0,
+            "end_sec": 240,
+            "overlap_sec": 0,
+        }],
+        intents=["knowledge_ingest"],
+    )
+    assert "当前入库意图：`knowledge_ingest`" in prompt
+    assert "{ingest_intent}" not in prompt
 
 
 def test_analyzer_rejects_empty_response_text(tmp: Path) -> None:
@@ -1573,31 +1657,35 @@ def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
         source_id="aweme-1",
         ingest_intent="knowledge_ingest",
         model="model-a",
-        response_id="resp-knowledge",
+        prompt_hash="prompt-a",
+        response_id="resp-a",
         file_id="file-a",
     )
     analyzer.save_response_memory(
         media_type="douyin_video",
         source_id="aweme-1",
-        ingest_intent="viral_breakdown",
+        ingest_intent="knowledge_ingest",
         model="model-a",
-        response_id="resp-viral",
+        prompt_hash="prompt-b",
+        response_id="resp-b",
         file_id="file-a",
     )
-    knowledge = analyzer.load_response_memory(
+    first = analyzer.load_response_memory(
         media_type="douyin_video",
         source_id="aweme-1",
         ingest_intent="knowledge_ingest",
         model="model-a",
+        prompt_hash="prompt-a",
     )
-    viral = analyzer.load_response_memory(
+    second = analyzer.load_response_memory(
         media_type="douyin_video",
         source_id="aweme-1",
-        ingest_intent="viral_breakdown",
+        ingest_intent="knowledge_ingest",
         model="model-a",
+        prompt_hash="prompt-b",
     )
-    assert knowledge and knowledge["response_id"] == "resp-knowledge"
-    assert viral and viral["response_id"] == "resp-viral"
+    assert first and first["response_id"] == "resp-a"
+    assert second and second["response_id"] == "resp-b"
     files = list((tmp / "memory-runtime" / "responses-memory").glob("*.json"))
     assert len(files) == 2
     text = "\n".join(path.read_text(encoding="utf-8") for path in files)
@@ -1613,6 +1701,9 @@ def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
         source_id=payload["source_id"],
         ingest_intent=payload["ingest_intent"],
         model=payload["model"],
+        prompt_hash=payload["prompt_hash"],
+        flow_version=payload["flow_version"],
+        chunked=payload["chunked"],
         ttl_sec=1,
     ) is None
 
@@ -3112,9 +3203,9 @@ def test_analyzer_rejects_invalid_image_endpoint(tmp: Path) -> None:
     ]
     for endpoint, expected in invalid_cases:
         try:
-            asyncio.run(analyzer.analyze_images_many(
+            asyncio.run(analyzer.analyze_images(
                 [image],
-                {"knowledge_ingest": "prompt"},
+                "prompt",
                 api_key="key",
                 endpoint=endpoint,
                 model="doubao-seed-2-0-lite-260428",
@@ -3364,7 +3455,6 @@ def test_websocket_accepts_task_request(tmp: Path) -> None:
         "requestId": "req-1",
         "source": "extension_popup",
         "taskType": "douyin_ingest",
-        "ingest_intents": ["knowledge_ingest", "viral_breakdown"],
         "url": "https://www.douyin.com/video/7390000000000000000",
         "pageTitle": "测试视频",
     }))
@@ -3380,20 +3470,22 @@ def test_websocket_accepts_task_request(tmp: Path) -> None:
     task = json.loads(task_file.read_text(encoding="utf-8"))
     assert task["type"] == "douyin_ingest"
     assert task["ingest_intent"] == "knowledge_ingest"
-    assert task["ingest_intents"] == ["knowledge_ingest", "viral_breakdown"]
+    assert "ingest_intents" not in task
     assert status_file.exists()
     status = json.loads(status_file.read_text(encoding="utf-8"))
     assert status["stage"] == "queued"
     assert status["source"] == "extension_popup"
     assert status["ingest_intent"] == "knowledge_ingest"
-    assert status["ingest_intents"] == ["knowledge_ingest", "viral_breakdown"]
+    assert "ingest_intents" not in status
+    assert reply["task"]["ingestIntent"] == "knowledge_ingest"
+    assert "ingestIntents" not in reply["task"]
 
     snapshot = server.task_status_snapshot()
     assert snapshot["running"] == 1
     assert snapshot["items"][0]["id"] == task_id
     assert snapshot["items"][0]["stageLabel"] == "排队中"
     assert snapshot["items"][0]["ingestIntent"] == "knowledge_ingest"
-    assert snapshot["items"][0]["ingestIntents"] == ["knowledge_ingest", "viral_breakdown"]
+    assert "ingestIntents" not in snapshot["items"][0]
 
 
 def test_websocket_public_task_status_exposes_derived_candidates(tmp: Path) -> None:
@@ -3430,7 +3522,6 @@ def test_websocket_public_task_status_exposes_derived_candidates(tmp: Path) -> N
         "updated_at": 105.0,
         "source_url": "https://v.douyin.com/status/",
         "ingest_intent": "knowledge_ingest",
-        "ingest_intents": ["knowledge_ingest"],
         "derived_tasks": derived_tasks,
         "derived_summary": derived_summary,
         "derived_audit_artifacts": audit_artifacts,
@@ -3438,6 +3529,8 @@ def test_websocket_public_task_status_exposes_derived_candidates(tmp: Path) -> N
 
     server = LibrarianServer(enable_task_runner=False)
     item = server._public_task_status(status_file)
+    assert item["ingestIntent"] == "knowledge_ingest"
+    assert "ingestIntents" not in item
     assert item["derivedTasks"] == derived_tasks
     for key, value in derived_summary.items():
         assert item["derivedSummary"][key] == value
@@ -3601,7 +3694,6 @@ def test_websocket_derived_enqueue_is_idempotent_and_redacts_urls(tmp: Path) -> 
     first_status = json.loads(status_file.read_text(encoding="utf-8"))
     assert first_status["source_url"] == "https://github.com/langchain-ai/langgraph?utm_source=x"
     assert first_status["ingest_intent"] == "derived_ingest"
-    assert first_status["ingest_intents"] == ["derived_ingest"]
     assert "secret" not in status_file.read_text(encoding="utf-8")
 
     status_file.write_text(json.dumps({"id": child_id, "ok": True, "stage": "done"}), encoding="utf-8")
@@ -4031,6 +4123,49 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
     assert summary["git_status"] == "committed"
 
 
+def test_derive_executor_main_preserves_derived_ingest_status(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    sys.path.insert(0, str(ROOT / "server"))
+    import derive_executor
+    from websocket_server import LibrarianServer
+
+    runtime = tmp / "derived-main-runtime"
+    task_file = runtime / "inbox" / "derived-main.json"
+    task_file.parent.mkdir(parents=True)
+    task_file.write_text(json.dumps({
+        "id": "derived-main",
+        "type": "derived_ingest",
+        "parent_task_id": "parent-main",
+        "parent_source_url": "https://v.douyin.com/parent-main/",
+        "candidate": {"id": "dt-main"},
+    }), encoding="utf-8")
+
+    original_load_config = derive_executor.load_config
+    original_execute = derive_executor.execute_derived_task
+    try:
+        derive_executor.load_config = lambda: SimpleNamespace()
+        derive_executor.execute_derived_task = lambda task, config, sw: {
+            "vault_path": str(tmp / "derived.md"),
+            "git_status": "committed",
+        }
+        assert derive_executor.main(["--task", str(task_file)]) == 0
+    finally:
+        derive_executor.load_config = original_load_config
+        derive_executor.execute_derived_task = original_execute
+
+    status_file = runtime / "status" / "derived-main.json"
+    status = json.loads(status_file.read_text(encoding="utf-8"))
+    assert status["type"] == "derived_ingest"
+    assert status["ingest_intent"] == "derived_ingest"
+    assert status["stage"] == "done"
+    assert status["ok"] is True
+
+    public = LibrarianServer(enable_task_runner=False)._public_task_status(status_file)
+    assert public["ingestIntent"] == "derived_ingest"
+
+
 def test_websocket_auto_enqueue_respects_ignored_candidate(tmp: Path) -> None:
     import asyncio
     import sys
@@ -4072,7 +4207,7 @@ def test_websocket_auto_enqueue_respects_ignored_candidate(tmp: Path) -> None:
     assert not (runtime / "status" / f"{child_id}.json").exists()
 
 
-def test_websocket_rejects_invalid_ingest_intent(tmp: Path) -> None:
+def test_websocket_rejects_removed_viral_intent(tmp: Path) -> None:
     import asyncio
     import sys
 
@@ -4084,7 +4219,7 @@ def test_websocket_rejects_invalid_ingest_intent(tmp: Path) -> None:
     reply = asyncio.run(server.handle_task_request({
         "type": "task_request",
         "requestId": "req-bad",
-        "ingest_intent": "copywriting_only",
+        "ingest_intent": "viral_breakdown",
         "url": "https://www.douyin.com/video/7390000000000000000",
     }))
     assert reply["type"] == "task_rejected"
@@ -4105,7 +4240,7 @@ def main() -> int:
         test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp)
         test_knowledge_prompts_do_not_force_github_manual_confirmation()
         test_derive_strategy_ignores_candidates_json_outside_derived_section(tmp)
-        test_derived_status_prefers_knowledge_decision_even_when_second()
+        test_normalize_ingest_intent_rejects_removed_viral_intent()
         test_vault_write_schema(tmp)
         test_vault_write_includes_derived_tasks_and_record(tmp)
         test_image_post_metadata_detection_from_image_infos()
@@ -4113,8 +4248,10 @@ def main() -> int:
         test_analyzer_image_post_payload(tmp)
         test_image_post_vault_write_schema(tmp)
         test_summary_skips_markdown_section_headings()
-        test_vault_write_uses_intent_relative_root(tmp)
-        test_run_task_multi_intent_reuses_one_download_and_writes_two_assets(tmp)
+        test_vault_write_uses_knowledge_root_and_rejects_removed_intent(tmp)
+        test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp)
+        test_analyzer_single_wrappers_preserve_analysis_key()
+        test_long_overview_prompt_uses_single_ingest_placeholder()
         test_analyzer_rejects_empty_response_text(tmp)
         test_websocket_config_writer(tmp)
         test_quality_fps_stays_5_until_safe_frame_target()
@@ -4154,8 +4291,9 @@ def main() -> int:
         test_derive_executor_existing_child_backlink_is_cleaned(tmp)
         test_derive_executor_sanitizes_leading_h1()
         test_derive_executor_execute_task_writes_child_and_backlinks(tmp)
+        test_derive_executor_main_preserves_derived_ingest_status(tmp)
         test_websocket_auto_enqueue_respects_ignored_candidate(tmp)
-        test_websocket_rejects_invalid_ingest_intent(tmp)
+        test_websocket_rejects_removed_viral_intent(tmp)
     print("P0 static checks passed")
     return 0
 

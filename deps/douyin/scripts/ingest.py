@@ -45,7 +45,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 from analyzer import (  # noqa: E402
     AnalyzerError, FileNotActiveError, FileTooLargeError, FFprobeError,
     ResponseTimeoutError,
-    analyze_images, analyze_images_many, analyze_video, analyze_video_many,
+    analyze_images, analyze_video,
 )
 from config_loader import Config, ConfigError, load_config  # noqa: E402
 from cost_estimator import estimate_cost_rmb  # noqa: E402
@@ -62,67 +62,28 @@ from status_writer import StatusWriter, write_terminal  # noqa: E402
 _PROJECT_ROOT = _SCRIPTS_DIR.parents[2]
 
 DEFAULT_INGEST_INTENT = "knowledge_ingest"
-ALL_INGEST_INTENTS = ("knowledge_ingest", "viral_breakdown")
-INGEST_INTENT_PROFILES = {
-    "knowledge_ingest": {
-        "asset_family": "knowledge_asset",
-        "relative_root": "知识资产/知识入库",
-        "section": "知识入库",
-        "id_kind": "knowledge",
-        "tags": ("douyin", "knowledge-asset", "case-study"),
-    },
-    "viral_breakdown": {
-        "asset_family": "creative_pattern",
-        "relative_root": "知识资产/创作模式",
-        "section": "创作模式",
-        "id_kind": "creative",
-        "tags": ("douyin", "creative-pattern", "case-study"),
-    },
+INGEST_PROFILE = {
+    "asset_family": "knowledge_asset",
+    "relative_root": "知识资产/知识入库",
+    "section": "知识入库",
+    "id_kind": "knowledge",
+    "tags": ("douyin", "knowledge-asset", "case-study"),
 }
 
 
 def normalize_ingest_intent(value: Any) -> str:
-    """Return the supported asset-purpose intent, defaulting only for empty input."""
+    """Return the only supported source-ingest intent."""
     intent = str(value or "").strip()
     if not intent:
         return DEFAULT_INGEST_INTENT
-    if intent not in INGEST_INTENT_PROFILES:
-        raise ValueError(
-            f"未知 ingest_intent: {intent}；只支持 "
-            f"{', '.join(INGEST_INTENT_PROFILES)}"
-        )
+    if intent != DEFAULT_INGEST_INTENT:
+        raise ValueError(f"不支持的 ingest_intent: {intent}；只支持知识入库")
     return intent
 
 
-def normalize_ingest_intents(value: Any) -> tuple[str, ...]:
-    """Normalize one or many asset-purpose intents.
-
-    Accepts a list/tuple, a comma-separated string, or aliases like "both".
-    Empty input keeps the default single knowledge ingest path.
-    """
-    if value is None or value == "":
-        raw_items: list[Any] = [DEFAULT_INGEST_INTENT]
-    elif isinstance(value, (list, tuple, set)):
-        raw_items = list(value)
-    else:
-        text = str(value).strip()
-        if text in {"both", "all", "knowledge_and_viral"}:
-            raw_items = list(ALL_INGEST_INTENTS)
-        elif "," in text:
-            raw_items = [item.strip() for item in text.split(",")]
-        else:
-            raw_items = [text]
-
-    normalized: list[str] = []
-    for item in raw_items:
-        intent = normalize_ingest_intent(item)
-        if intent not in normalized:
-            normalized.append(intent)
-    return tuple(normalized or [DEFAULT_INGEST_INTENT])
-
-
 def _intent_profile(ingest_intent: str) -> dict[str, Any]:
-    return INGEST_INTENT_PROFILES[normalize_ingest_intent(ingest_intent)]
+    normalize_ingest_intent(ingest_intent)
+    return INGEST_PROFILE
 
 
 def _source_media(meta: VideoMeta) -> str:
@@ -253,20 +214,6 @@ def _write_derived_decision_record(
     tmp_path.write_text(json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp_path.replace(path)
     return path
-
-
-def _status_derived_decision(
-    decisions: dict[str, dict[str, Any]],
-    primary_intent: str,
-) -> dict[str, Any]:
-    for intent in (primary_intent, DEFAULT_INGEST_INTENT):
-        decision = decisions.get(intent)
-        if isinstance(decision, dict) and decision.get("items"):
-            return decision
-    for decision in decisions.values():
-        if isinstance(decision, dict) and decision.get("items"):
-            return decision
-    return decisions.get(primary_intent, {})
 
 
 def _derived_audit_artifacts(decision: dict[str, Any] | None) -> dict[str, Any]:
@@ -582,33 +529,6 @@ def _chunk_strategy_summary(result: Any) -> str:
     return "；".join(pieces)
 
 
-def _combine_costs(costs: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    if not costs:
-        return {}
-    total = {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-        "cost_rmb_estimate": 0.0,
-        "by_intent": costs,
-    }
-    model = ""
-    note = ""
-    for cost in costs.values():
-        total["input_tokens"] += int(cost.get("input_tokens", 0) or 0)
-        total["output_tokens"] += int(cost.get("output_tokens", 0) or 0)
-        total["total_tokens"] += int(cost.get("total_tokens", 0) or 0)
-        total["cost_rmb_estimate"] += float(cost.get("cost_rmb_estimate", 0) or 0)
-        model = model or str(cost.get("model", "") or "")
-        note = note or str(cost.get("note", "") or "")
-    total["cost_rmb_estimate"] = round(total["cost_rmb_estimate"], 4)
-    if model:
-        total["model"] = model
-    if note:
-        total["note"] = note
-    return total
-
-
 def _ensure_vault_structure(vault_path: Path) -> list[Path]:
     """Create the minimal SCHEMA.md directory structure required for writes."""
     touched: list[Path] = []
@@ -619,7 +539,6 @@ def _ensure_vault_structure(vault_path: Path) -> list[Path]:
         "raw/web",
         "raw/github",
         "知识资产/知识入库",
-        "知识资产/创作模式",
         "知识资产/GitHub项目",
         "知识资产/网页剪藏",
         "知识资产/代码模块",
@@ -633,7 +552,7 @@ def _ensure_vault_structure(vault_path: Path) -> list[Path]:
     if not index.exists():
         today = datetime.now().strftime("%Y-%m-%d")
         index.write_text(
-            f"# 知识库索引\n> 最后更新：{today} | 资产总数：0\n\n## 知识入库\n\n## 创作模式\n",
+            f"# 知识库索引\n> 最后更新：{today} | 资产总数：0\n\n## 知识入库\n",
             encoding="utf-8",
         )
         touched.append(index)
@@ -683,7 +602,7 @@ def _update_index(
     if index.exists():
         text = index.read_text(encoding="utf-8")
     else:
-        text = "# 知识库索引\n\n## 知识入库\n\n## 创作模式\n"
+        text = "# 知识库索引\n\n## 知识入库\n"
 
     rel_stem = md_path.stem
     tag_text = " ".join(f"`#{tag}`" for tag in tags)
@@ -1070,22 +989,19 @@ async def run_task(
     url: str,
     quality: str,
     ingest_intent: str | None = None,
-    ingest_intents: tuple[str, ...] | list[str] | None = None,
     config: Config,
     sw: StatusWriter,
     cache_dir: Path,
 ) -> dict[str, Any]:
     """执行一个任务，返回最终 state 摘要。"""
-    intents = normalize_ingest_intents(ingest_intents or ingest_intent)
-    primary_intent = intents[0]
-    profile = _intent_profile(primary_intent)
+    ingest_intent = normalize_ingest_intent(ingest_intent)
+    profile = _intent_profile(ingest_intent)
 
     # ── 阶段 1：取 metadata 并按内容形态下载 ──
     sw.update(
         stage="downloading",
         url=url,
-        ingest_intent=primary_intent,
-        ingest_intents=list(intents),
+        ingest_intent=ingest_intent,
         asset_family=profile["asset_family"],
     )
     try:
@@ -1137,7 +1053,7 @@ async def run_task(
                 meta=meta,
                 image_paths=image_paths,
                 quality=quality,
-                ingest_intents=intents,
+                ingest_intent=ingest_intent,
             )
 
         async def dl_progress(got: int, total: int) -> None:
@@ -1178,18 +1094,17 @@ async def run_task(
     )
 
     # ── 阶段 2：拆解 ──
-    prompts = {
-        intent: (_SCRIPTS_DIR / "prompts" / _prompt_for("douyin_video", intent)).read_text(encoding="utf-8")
-        for intent in intents
-    }
+    prompt = (
+        _SCRIPTS_DIR / "prompts" / _prompt_for("douyin_video", ingest_intent)
+    ).read_text(encoding="utf-8")
 
     async def an_progress(stage: str, info: dict) -> None:
         sw.progress(stage, info)
 
     try:
-        results = await analyze_video_many(
+        result = await analyze_video(
             video_path,
-            prompts,
+            prompt,
             api_key=config.ark_api_key,
             endpoint=config.ark_endpoint,
             model=config.analyzer_model,
@@ -1207,6 +1122,7 @@ async def run_task(
             },
             source_id=meta.aweme_id,
             audit_id=task_id,
+            analysis_key=ingest_intent,
             file_active_timeout_sec=config.file_active_timeout_sec,
             response_timeout_sec=config.response_timeout_sec,
             chunk_concurrency=config.chunk_concurrency,
@@ -1227,85 +1143,71 @@ async def run_task(
     except AnalyzerError as e:
         raise IngestError("analyzer_error", str(e)) from e
 
-    primary_result = results[primary_intent]
-    primary_chunked = bool(getattr(primary_result, "chunked", False))
-    primary_chunk_count = int(getattr(primary_result, "chunk_count", 1) or 1)
+    chunked = bool(getattr(result, "chunked", False))
+    chunk_count = int(getattr(result, "chunk_count", 1) or 1)
     sw.update(
         stage="analyzed",
-        file_id=primary_result.file_id,
-        fps_used=primary_result.fps_used,
-        chunked=primary_chunked,
-        chunk_count=primary_chunk_count,
-        ingest_intents=list(intents),
-        audit_artifacts=getattr(primary_result, "audit_artifacts", {}),
+        file_id=result.file_id,
+        fps_used=result.fps_used,
+        chunked=chunked,
+        chunk_count=chunk_count,
+        audit_artifacts=getattr(result, "audit_artifacts", {}),
     )
 
     # ── 阶段 3：成本估算 ──
-    costs = {
-        intent: estimate_cost_rmb(result.model, result.usage)
-        for intent, result in results.items()
-    }
-    total_cost = _combine_costs(costs)
-    sw.update(cost_estimate=total_cost)
+    cost = estimate_cost_rmb(result.model, result.usage)
+    sw.update(cost_estimate=cost)
 
     # ── 阶段 4：派生候选决策（高置信候选后续由服务端自动入队） ──
-    derived_decisions: dict[str, dict[str, Any]] = {}
-    for intent, result in results.items():
-        decision = derive_tasks_from_analysis(
-            result.text,
-            source_id=meta.aweme_id,
-            source_url=meta.source_url,
-            source_media="douyin_video",
-            ingest_intent=intent,
-            vault_path=config.vault_path,
-            task_id=task_id,
-        )
-        derived_decisions[intent] = decision
-    primary_derived = _status_derived_decision(derived_decisions, primary_intent)
+    derived_decision = derive_tasks_from_analysis(
+        result.text,
+        source_id=meta.aweme_id,
+        source_url=meta.source_url,
+        source_media="douyin_video",
+        ingest_intent=ingest_intent,
+        vault_path=config.vault_path,
+        task_id=task_id,
+    )
     sw.update(
         stage="derived_candidates_ready",
-        derived_tasks=public_derived_tasks(primary_derived),
-        derived_summary=primary_derived.get("counts", {}),
-        derived_audit_artifacts=_derived_audit_artifacts(primary_derived),
+        derived_tasks=public_derived_tasks(derived_decision),
+        derived_summary=derived_decision.get("counts", {}),
+        derived_audit_artifacts=_derived_audit_artifacts(derived_decision),
     )
 
     # ── 阶段 5：写 vault ──
     sw.update(stage="writing_vault")
-    assets: list[dict[str, Any]] = []
     try:
-        for intent in intents:
-            md_path, git_status = write_to_vault(
-                config,
-                meta,
-                video_path,
-                results[intent],
-                costs[intent],
-                intent,
-                derived_decisions.get(intent),
-                task_id,
-            )
-            assets.append({
-                "ingest_intent": intent,
-                "asset_family": _intent_profile(intent)["asset_family"],
-                "title": meta.title,
-                "vault_path": str(md_path),
-                "git_status": git_status,
-                "derived_tasks": public_derived_tasks(derived_decisions.get(intent, {})),
-                "derived_summary": derived_decisions.get(intent, {}).get("counts", {}),
-                "derived_audit_artifacts": _derived_audit_artifacts(derived_decisions.get(intent)),
-                "audit_artifacts": getattr(results[intent], "audit_artifacts", {}),
-            })
+        md_path, git_status = write_to_vault(
+            config,
+            meta,
+            video_path,
+            result,
+            cost,
+            ingest_intent,
+            derived_decision,
+            task_id,
+        )
     except Exception as e:
         raise IngestError("vault_write_error", str(e)) from e
-    primary_asset = assets[0]
+    asset = {
+        "ingest_intent": ingest_intent,
+        "asset_family": profile["asset_family"],
+        "title": meta.title,
+        "vault_path": str(md_path),
+        "git_status": git_status,
+        "derived_tasks": public_derived_tasks(derived_decision),
+        "derived_summary": derived_decision.get("counts", {}),
+        "derived_audit_artifacts": _derived_audit_artifacts(derived_decision),
+        "audit_artifacts": getattr(result, "audit_artifacts", {}),
+    }
 
     return {
-        "vault_path": primary_asset["vault_path"],
-        "git_status": primary_asset["git_status"],
-        "assets": assets,
+        "vault_path": asset["vault_path"],
+        "git_status": asset["git_status"],
+        "assets": [asset],
         "video_path": str(video_path),
-        "ingest_intent": primary_intent,
-        "ingest_intents": list(intents),
+        "ingest_intent": ingest_intent,
         "asset_family": profile["asset_family"],
         "source_media": "douyin_video",
         "meta": {
@@ -1315,22 +1217,22 @@ async def run_task(
             "duration_sec": meta.duration_sec,
         },
         "analysis": {
-            "file_id": primary_result.file_id,
-            "fps_used": primary_result.fps_used,
-            "quality": primary_result.quality,
-            "model": primary_result.model,
-            "target_frames": primary_result.target_frames,
-            "actual_frames_estimate": primary_result.actual_frames_estimate,
-            "truncated": primary_result.truncated,
-            "chunked": primary_chunked,
-            "chunk_count": primary_chunk_count,
-            "chunks": getattr(primary_result, "chunks", []),
-            "audit_artifacts": getattr(primary_result, "audit_artifacts", {}),
+            "file_id": result.file_id,
+            "fps_used": result.fps_used,
+            "quality": result.quality,
+            "model": result.model,
+            "target_frames": result.target_frames,
+            "actual_frames_estimate": result.actual_frames_estimate,
+            "truncated": result.truncated,
+            "chunked": chunked,
+            "chunk_count": chunk_count,
+            "chunks": getattr(result, "chunks", []),
+            "audit_artifacts": getattr(result, "audit_artifacts", {}),
         },
-        "cost": total_cost,
-        "derived_tasks": public_derived_tasks(primary_derived),
-        "derived_summary": primary_derived.get("counts", {}),
-        "derived_audit_artifacts": _derived_audit_artifacts(primary_derived),
+        "cost": cost,
+        "derived_tasks": public_derived_tasks(derived_decision),
+        "derived_summary": derived_decision.get("counts", {}),
+        "derived_audit_artifacts": _derived_audit_artifacts(derived_decision),
     }
 
 
@@ -1342,28 +1244,27 @@ async def run_image_post_task(
     meta: VideoMeta,
     image_paths: list[Path],
     quality: str,
-    ingest_intents: tuple[str, ...] | list[str] | str,
+    ingest_intent: str = DEFAULT_INGEST_INTENT,
 ) -> dict[str, Any]:
     """执行抖音图文拆解分支。"""
-    intents = normalize_ingest_intents(ingest_intents)
-    primary_intent = intents[0]
-    profile = _intent_profile(primary_intent)
-    prompts = {
-        intent: (_SCRIPTS_DIR / "prompts" / _prompt_for("douyin_image_post", intent)).read_text(encoding="utf-8")
-        for intent in intents
-    }
+    ingest_intent = normalize_ingest_intent(ingest_intent)
+    profile = _intent_profile(ingest_intent)
+    prompt = (
+        _SCRIPTS_DIR / "prompts" / _prompt_for("douyin_image_post", ingest_intent)
+    ).read_text(encoding="utf-8")
 
     async def an_progress(stage: str, info: dict) -> None:
         sw.progress(stage, info)
 
     try:
-        results = await analyze_images_many(
+        result = await analyze_images(
             image_paths,
-            prompts,
+            prompt,
             api_key=config.ark_api_key,
             endpoint=config.ark_endpoint,
             model=config.analyzer_model,
             quality=quality,
+            analysis_key=ingest_intent,
             response_timeout_sec=config.response_timeout_sec,
             on_progress=an_progress,
         )
@@ -1376,77 +1277,63 @@ async def run_image_post_task(
     except AnalyzerError as e:
         raise IngestError("analyzer_error", str(e)) from e
 
-    primary_result = results[primary_intent]
     sw.update(
         stage="analyzed",
-        file_id=primary_result.file_id,
-        image_count=primary_result.image_count,
+        file_id=result.file_id,
+        image_count=result.image_count,
         media_type="image_post",
-        ingest_intents=list(intents),
     )
 
-    costs = {
-        intent: estimate_cost_rmb(result.model, result.usage)
-        for intent, result in results.items()
-    }
-    total_cost = _combine_costs(costs)
-    sw.update(cost_estimate=total_cost)
+    cost = estimate_cost_rmb(result.model, result.usage)
+    sw.update(cost_estimate=cost)
 
-    derived_decisions: dict[str, dict[str, Any]] = {}
-    for intent, result in results.items():
-        decision = derive_tasks_from_analysis(
-            result.text,
-            source_id=meta.aweme_id,
-            source_url=meta.source_url,
-            source_media="douyin_image_post",
-            ingest_intent=intent,
-            vault_path=config.vault_path,
-            task_id=task_id,
-        )
-        derived_decisions[intent] = decision
-    primary_derived = _status_derived_decision(derived_decisions, primary_intent)
+    derived_decision = derive_tasks_from_analysis(
+        result.text,
+        source_id=meta.aweme_id,
+        source_url=meta.source_url,
+        source_media="douyin_image_post",
+        ingest_intent=ingest_intent,
+        vault_path=config.vault_path,
+        task_id=task_id,
+    )
     sw.update(
         stage="derived_candidates_ready",
-        derived_tasks=public_derived_tasks(primary_derived),
-        derived_summary=primary_derived.get("counts", {}),
-        derived_audit_artifacts=_derived_audit_artifacts(primary_derived),
+        derived_tasks=public_derived_tasks(derived_decision),
+        derived_summary=derived_decision.get("counts", {}),
+        derived_audit_artifacts=_derived_audit_artifacts(derived_decision),
     )
 
     sw.update(stage="writing_vault")
-    assets: list[dict[str, Any]] = []
     try:
-        for intent in intents:
-            md_path, git_status = write_image_post_to_vault(
-                config,
-                meta,
-                image_paths,
-                results[intent],
-                costs[intent],
-                intent,
-                derived_decisions.get(intent),
-                task_id,
-            )
-            assets.append({
-                "ingest_intent": intent,
-                "asset_family": _intent_profile(intent)["asset_family"],
-                "title": meta.title,
-                "vault_path": str(md_path),
-                "git_status": git_status,
-                "derived_tasks": public_derived_tasks(derived_decisions.get(intent, {})),
-                "derived_summary": derived_decisions.get(intent, {}).get("counts", {}),
-                "derived_audit_artifacts": _derived_audit_artifacts(derived_decisions.get(intent)),
-            })
+        md_path, git_status = write_image_post_to_vault(
+            config,
+            meta,
+            image_paths,
+            result,
+            cost,
+            ingest_intent,
+            derived_decision,
+            task_id,
+        )
     except Exception as e:
         raise IngestError("vault_write_error", str(e)) from e
-    primary_asset = assets[0]
+    asset = {
+        "ingest_intent": ingest_intent,
+        "asset_family": profile["asset_family"],
+        "title": meta.title,
+        "vault_path": str(md_path),
+        "git_status": git_status,
+        "derived_tasks": public_derived_tasks(derived_decision),
+        "derived_summary": derived_decision.get("counts", {}),
+        "derived_audit_artifacts": _derived_audit_artifacts(derived_decision),
+    }
 
     return {
-        "vault_path": primary_asset["vault_path"],
-        "git_status": primary_asset["git_status"],
-        "assets": assets,
+        "vault_path": asset["vault_path"],
+        "git_status": asset["git_status"],
+        "assets": [asset],
         "image_paths": [str(path) for path in image_paths],
-        "ingest_intent": primary_intent,
-        "ingest_intents": list(intents),
+        "ingest_intent": ingest_intent,
         "asset_family": profile["asset_family"],
         "source_media": "douyin_image_post",
         "meta": {
@@ -1457,16 +1344,16 @@ async def run_image_post_task(
             "media_type": "image_post",
         },
         "analysis": {
-            "file_id": primary_result.file_id,
-            "quality": primary_result.quality,
-            "model": primary_result.model,
-            "image_count": primary_result.image_count,
-            "truncated": primary_result.truncated,
+            "file_id": result.file_id,
+            "quality": result.quality,
+            "model": result.model,
+            "image_count": result.image_count,
+            "truncated": result.truncated,
         },
-        "cost": total_cost,
-        "derived_tasks": public_derived_tasks(primary_derived),
-        "derived_summary": primary_derived.get("counts", {}),
-        "derived_audit_artifacts": _derived_audit_artifacts(primary_derived),
+        "cost": cost,
+        "derived_tasks": public_derived_tasks(derived_decision),
+        "derived_summary": derived_decision.get("counts", {}),
+        "derived_audit_artifacts": _derived_audit_artifacts(derived_decision),
     }
 
 
@@ -1496,11 +1383,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--quality", default=None,
                    choices=["balanced", "quality"],
                    help=argparse.SUPPRESS)
-    p.add_argument("--intent", default=DEFAULT_INGEST_INTENT,
-                   choices=sorted([*INGEST_INTENT_PROFILES.keys(), "both"]),
-                   help="入库意图：knowledge_ingest、viral_breakdown 或 both")
-    p.add_argument("--intents", default=None,
-                   help="多个入库意图，逗号分隔；可用 both 同时产出知识入库和爆款拆解")
     p.add_argument("--config", default=None, type=Path,
                    help="自定义 config.toml 路径")
     return p.parse_args(argv)
@@ -1546,18 +1428,14 @@ def main(argv: list[str] | None = None) -> int:
     cache_dir = base_dir / "cache" / "videos"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── 2. 确定 url / quality / ingest_intents ──
+    # ── 2. 确定 url / quality / ingest_intent ──
     if task_data is not None:
         url = task_data.get("url")
         quality = "quality"
         intent_raw = (
-            task_data.get("ingest_intents")
-            or task_data.get("ingestIntents")
-            or task_data.get("intents")
-            or task_data.get("intent")
+            task_data.get("ingest_intent")
             or task_data.get("ingestIntent")
-            or task_data.get("ingest_intent")
-            or args.intent
+            or DEFAULT_INGEST_INTENT
         )
         if not url:
             write_terminal(task_id, status_dir, {
@@ -1571,10 +1449,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         url = args.url
         quality = "quality"
-        intent_raw = args.intents or args.intent
+        intent_raw = DEFAULT_INGEST_INTENT
 
     try:
-        ingest_intents = normalize_ingest_intents(intent_raw)
+        ingest_intent = normalize_ingest_intent(intent_raw)
     except ValueError as e:
         write_terminal(task_id, status_dir, {
             "ok": False, "stage": "task_invalid",
@@ -1584,7 +1462,6 @@ def main(argv: list[str] | None = None) -> int:
             _archive_task(task_file, base_dir, ok=False)
         print(f"✗ {e}", file=sys.stderr)
         return 2
-    ingest_intent = ingest_intents[0]
 
     # ── 2. 跑 ──
     sw = StatusWriter(task_id, status_dir)
@@ -1603,7 +1480,6 @@ def main(argv: list[str] | None = None) -> int:
         quality=quality,
         source_url=url,
         ingest_intent=ingest_intent,
-        ingest_intents=list(ingest_intents),
         asset_family=_intent_profile(ingest_intent)["asset_family"],
         **task_meta,
     )
@@ -1611,7 +1487,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         summary = asyncio.run(run_task(
             task_id=task_id, url=url, quality=quality,
-            ingest_intents=ingest_intents,
+            ingest_intent=ingest_intent,
             config=config, sw=sw, cache_dir=cache_dir,
         ))
     except IngestError as e:

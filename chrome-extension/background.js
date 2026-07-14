@@ -26,12 +26,6 @@ const DEFAULT_CHUNK_CONCURRENCY = 2;
 const MIN_TASK_CONCURRENCY = 1;
 const MAX_TASK_CONCURRENCY = 4;
 const TRUSTED_ARK_HOSTS = new Set(['ark.cn-beijing.volces.com']);
-const INGEST_INTENTS = {
-  knowledge_ingest: '知识入库',
-  viral_breakdown: '爆款拆解',
-  knowledge_and_viral: '完整入库'
-};
-const DEFAULT_INGEST_INTENT = 'knowledge_ingest';
 const CURRENT_DOUYIN_VIDEO_ACTION = 'getCurrentDouyinVideoV3';
 const DOUYIN_URL_PATTERN = /https?:\/\/(?:v\.douyin\.com\/[A-Za-z0-9_-]+\/?|(?:www\.)?(?:douyin|iesdouyin)\.com\/(?:video|share\/video|note|share\/note)\/\d+(?:[/?#][^\s"'<>，。！？、；：）)]*)?)/i;
 const DOUYIN_TAB_PATTERNS = ['https://douyin.com/*', 'https://*.douyin.com/*'];
@@ -60,18 +54,6 @@ function notifyUser(title, message) {
 
 function normalizeProvider(value) {
   return PROVIDERS[value] ? value : DEFAULT_PROVIDER;
-}
-
-function normalizeIngestIntent(value) {
-  return INGEST_INTENTS[value] ? value : DEFAULT_INGEST_INTENT;
-}
-
-function expandIngestIntents(value) {
-  const normalized = normalizeIngestIntent(value);
-  if (normalized === 'knowledge_and_viral') {
-    return ['knowledge_ingest', 'viral_breakdown'];
-  }
-  return [normalized];
 }
 
 function providerStorageKeys(value) {
@@ -723,15 +705,11 @@ async function submitDouyinIngestTask(candidate, info, tab) {
   }
 
   const requestId = makeRequestId();
-  const ingestIntent = normalizeIngestIntent(info?.ingestIntent || candidate.ingestIntent);
-  const ingestIntents = expandIngestIntents(ingestIntent);
   const payload = {
     type: 'task_request',
     requestId,
     source: info?.source || 'extension_popup',
     taskType: 'douyin_ingest',
-    ingest_intent: ingestIntents[0],
-    ingest_intents: ingestIntents,
     url: candidate.url,
     awemeId: candidate.awemeId,
     videoType: candidate.type || 'video',
@@ -751,15 +729,13 @@ async function submitDouyinIngestTask(candidate, info, tab) {
         url: payload.url,
         awemeId: payload.awemeId,
         pageTitle: payload.pageTitle,
-        ingestIntent,
-        ingestIntents,
         requestedAt: payload.requestedAt,
         detectedBy: payload.detectedBy,
         taskId: ack.task?.id || ''
       }
     });
     if (ack.ok) {
-      notifyUser('Agent 已接收任务', `${INGEST_INTENTS[ingestIntent]}任务已进入队列。`);
+      notifyUser('Agent 已接收任务', '知识入库任务已进入队列。');
     } else {
       notifyUser('发送失败', ack.message || 'Agent 未接收任务。');
     }
@@ -785,8 +761,7 @@ async function submitDouyinIngestFromPopup(request) {
     pastedCandidate.title = extractShareTitle(shareText);
   }
   const candidate = pastedCandidate || await currentDouyinCandidate({
-    pageUrl: tab?.url || '',
-    ingestIntent: request?.ingestIntent
+    pageUrl: tab?.url || ''
   }, tab);
 
   if (!candidate?.ok || !candidate.url) {
@@ -800,8 +775,7 @@ async function submitDouyinIngestFromPopup(request) {
 
   return submitDouyinIngestTask(candidate, {
     pageUrl: tab?.url || '',
-    source: 'extension_popup',
-    ingestIntent: request?.ingestIntent
+    source: 'extension_popup'
   }, tab);
 }
 

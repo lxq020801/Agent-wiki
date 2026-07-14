@@ -681,7 +681,7 @@ def _build_long_overview_prompt(
             "{chunk_plan_json}",
             json.dumps(chunk_plan, ensure_ascii=False, indent=2),
         )
-        .replace("{ingest_intents}", ", ".join(intents))
+        .replace("{ingest_intent}", ", ".join(intents))
     )
 
 
@@ -1760,6 +1760,7 @@ async def analyze_video(
     quality_params: Optional[dict] = None,
     source_id: Optional[str] = None,
     audit_id: Optional[str] = None,
+    analysis_key: str = "default",
     file_active_timeout_sec: int = 120,
     response_timeout_sec: int = 900,
     chunk_concurrency: int = _CHUNK_ANALYSIS_CONCURRENCY,
@@ -1782,9 +1783,10 @@ async def analyze_video(
       response_timeout_sec: 等 Responses API 返回的最长秒数
       on_progress: async (stage:str, info:dict) -> None，可选进度回调
     """
+    key = str(analysis_key or "default").strip() or "default"
     results = await analyze_video_many(
         video_path,
-        {"default": prompt},
+        {key: prompt},
         api_key=api_key,
         endpoint=endpoint,
         model=model,
@@ -1800,7 +1802,7 @@ async def analyze_video(
         chunk_concurrency=chunk_concurrency,
         on_progress=on_progress,
     )
-    return results["default"]
+    return results[key]
 
 
 async def analyze_video_many(
@@ -2908,13 +2910,15 @@ async def analyze_images(
     endpoint: str,
     model: str,
     quality: str = "quality",
+    analysis_key: str = "default",
     response_timeout_sec: int = 900,
     on_progress: ProgressCb = None,
 ) -> ImageAnalyzeResult:
     """Analyze a Douyin image post with Ark Responses input_image."""
+    key = str(analysis_key or "default").strip() or "default"
     results = await analyze_images_many(
         image_paths,
-        {"default": prompt},
+        {key: prompt},
         api_key=api_key,
         endpoint=endpoint,
         model=model,
@@ -2922,7 +2926,7 @@ async def analyze_images(
         response_timeout_sec=response_timeout_sec,
         on_progress=on_progress,
     )
-    return results["default"]
+    return results[key]
 
 
 async def analyze_images_many(
@@ -3009,12 +3013,6 @@ def _cli_main() -> int:
     parser = argparse.ArgumentParser(description="火山视频拆解（debug 用）")
     parser.add_argument("video", help="本地 mp4 文件路径")
     parser.add_argument(
-        "--intent",
-        default="knowledge_ingest",
-        choices=["knowledge_ingest", "viral_breakdown"],
-        help="选择调试用提示词意图",
-    )
-    parser.add_argument(
         "--prompt-file",
         default=None,
     )
@@ -3048,7 +3046,7 @@ def _cli_main() -> int:
             return 1
 
     prompt_path = Path(args.prompt_file) if args.prompt_file else (
-        Path(__file__).parent / "prompts" / f"video_{args.intent}.md"
+        Path(__file__).parent / "prompts" / "video_knowledge_ingest.md"
     )
     if not prompt_path.exists():
         print(f"✗ prompt 文件不存在: {prompt_path}", file=sys.stderr)
@@ -3068,6 +3066,7 @@ def _cli_main() -> int:
             strategy_model=args.strategy_model,
             chunk_concurrency=args.chunk_concurrency,
             quality=args.quality,
+            analysis_key="knowledge_ingest",
             on_progress=_progress,
         )
 

@@ -1649,6 +1649,7 @@ def main(argv: list[str] | None = None) -> int:
         sw.update(
             stage="started",
             type="derived_ingest",
+            ingest_intent="derived_ingest",
             source="derived_tool",
             parent_task_id=task.get("parent_task_id") or task.get("parentTaskId") or "",
             source_url=task.get("parent_source_url") or task.get("parentSourceUrl") or "",

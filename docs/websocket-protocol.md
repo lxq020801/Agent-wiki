@@ -126,7 +126,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 
 ### `task_request`
 
-提交一个抖音入库任务。扩展只发送入库意图、URL 和页面线索，不发送 Cookie/API Key。
+提交一个抖音入库任务。扩展只发送 URL 和页面线索，不发送 Cookie/API Key。
 服务端写入 `~/.agent-wiki/inbox/{task_id}.json`，再由本地任务队列调用
 `deps/douyin/scripts/ingest.py --task ...`。
 任务执行支持有限并发，默认同时处理 `2` 个任务；扩展可通过
@@ -136,12 +136,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 也可用
 `AGENT_WIKI_TASK_CONCURRENCY` 作为启动时覆盖值。
 
-`ingest_intent` 是资产用途意图：
-
-- `knowledge_ingest`：知识入库，写入 `知识资产/知识入库/`，生成 `knowledge_asset`
-- `viral_breakdown`：爆款拆解，写入 `知识资产/创作模式/`，生成 `creative_pattern`
-
-如果一次任务需要同时产出两份资产，扩展发送 `ingest_intents` 数组。服务端仍只创建一个队列任务；执行层下载一次、普通 Ark 上传/预处理一次，然后用不同 prompt 生成两份笔记。
+抖音任务固定使用 `ingest_intent: knowledge_ingest`：写入 `知识资产/知识入库/`，生成一份 `knowledge_asset` 来源笔记。该字段由服务端写入任务和状态，扩展不再发送可选入库意图。
 
 视频超过 10 分钟时，执行层会先做全片概览，再自动切片精拆，并在任务进度中出现：
 
@@ -174,8 +169,6 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
   "requestId": "1700000000000-abcd",
   "source": "extension_popup",
   "taskType": "douyin_ingest",
-  "ingest_intent": "knowledge_ingest",
-  "ingest_intents": ["knowledge_ingest", "viral_breakdown"],
   "url": "https://www.douyin.com/video/7390000000000000000",
   "pageTitle": "页面标题",
   "pageUrl": "https://www.douyin.com/",
@@ -351,5 +344,5 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 ## 边界
 
 抖音入库可以从 Agent 会话或扩展按钮提交。无论入口在哪里，业务执行都固定走
-Agent 本地执行层，并固定使用 `quality` 档。扩展可以提交 `ingest_intent`，但不展示、
+Agent 本地执行层，并固定使用 `quality` 档。扩展不提交可选入库意图，也不展示、
 不保存、不发送拆解质量、fps 或抽帧参数。

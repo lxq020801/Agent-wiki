@@ -11,9 +11,9 @@
 |------|------|------|------|
 | `id` | string | `{YYYYMMDD}-{type}-{序号}`，全局唯一 | 资产主键，与文件名日期部分一致。type 缩写：`video` / `github` / `web` / `code` |
 | `type` | enum | `video_analysis` / `image_post_analysis` / `github_project` / `web_clip` / `code_module` | 来源模板类型，决定由哪个工具/模板生成 |
-| `asset_family` | enum | `knowledge_asset` / `creative_pattern` / `github_project` / `code_module` / `idea_asset` | 资产用途，决定主目录和召回用途 |
+| `asset_family` | enum | `knowledge_asset` / `github_project` / `code_module` / `idea_asset` | 资产用途，决定主目录和召回用途 |
 | `source_media` | enum | `douyin_video` / `douyin_image_post` / `webpage` / `github` / `manual` / `other` | 来源形态 |
-| `ingest_intent` | enum | `knowledge_ingest` / `viral_breakdown` / `manual` / `derived_ingest` | 本次入库意图 |
+| `ingest_intent` | enum | `knowledge_ingest` / `manual` / `derived_ingest` | 本次入库意图 |
 | `title` | string | ≤60字，中文优先 | 资产标题，禁止纯英文（无中文来源需翻译） |
 | `source_url` | string | 有效 URL 或 `"manual"` | 原始来源链接；无来源（如纯原创）填 `"manual"` |
 | `ingested` | string | `YYYY-MM-DD` | 首次入库日期（非时间戳） |
@@ -87,7 +87,7 @@ related: []
 - **`id`**：永不修改，入库后即为资产永久主键。
 - **`asset_family`**：长期资产用途，优先用于目录、召回和维护。
 - **`source_media`**：来源形态，不得拿来替代资产用途。
-- **`ingest_intent`**：记录入口意图；扩展只能提交意图，最终写库仍由 Agent/工具执行。
+- **`ingest_intent`**：记录资产如何进入知识库；来源入库、手动资产和派生资产分别使用 `knowledge_ingest`、`manual`、`derived_ingest`。
 - **`title`**：禁止纯英文，无中文来源须翻译后填入。≤60字。
 - **`tags`**：禁止自创标签，所有标签必须在 SCHEMA.md 第四章登记。裸标签无 `#` 前缀。
 - **`summary`**：≤80字，必填，不得为空。

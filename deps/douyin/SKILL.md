@@ -46,15 +46,10 @@ The WebSocket control server writes:
    through Files API with `preprocess_configs.video.fps` and
    `preprocess_configs.video.model`, wait for the file to become `active`, then
    call Responses API with `input_video.file_id` and `store=true`.
-5. `ingest.py` chooses an intent-specific prompt and writes a SCHEMA-compliant
-   Markdown note by asset purpose:
-   - `knowledge_ingest` -> `知识资产/知识入库/` with `asset_family: knowledge_asset`
-   - `viral_breakdown` -> `知识资产/创作模式/` with `asset_family: creative_pattern`
-   It then updates `index.md` and commits only the files touched by this ingest.
-   If a task contains both intents, the source downloads once. Non-long videos
-   reuse one active `file_id` for both prompt runs; long videos reuse one
-   download but create separate overview/chunk `file_id`s for the strategy and
-   chunk analysis chain.
+5. `ingest.py` chooses the media-specific knowledge prompt and writes one
+   SCHEMA-compliant source note to `知识资产/知识入库/` with
+   `asset_family: knowledge_asset` and `ingest_intent: knowledge_ingest`. It then
+   updates `index.md` and commits only the files touched by this ingest.
 6. For `knowledge_ingest`, `derive_strategy.py` turns model-discovered follow-up
    leads into bounded candidates. It writes full candidate records under
    `系统记录/派生任务候选/`; the parent Markdown only stores

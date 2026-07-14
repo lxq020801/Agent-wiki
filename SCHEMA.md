@@ -49,7 +49,7 @@ vault/
 ├── raw/                      ← 原始抓取物（视频字幕、网页HTML、GitHub README）
 │   ├── videos/  images/  web/  github/
 ├── 知识资产/                  ← agent 产出的结构化笔记（正式产出区）
-│   ├── 知识入库/  创作模式/  GitHub项目/  网页剪藏/  代码模块/
+│   ├── 知识入库/  GitHub项目/  网页剪藏/  代码模块/
 ├── 系统记录/                  ← agent 自动生成：维护报告/、回收站/、变更日志/、派生任务候选/
 ├── .obsidian/                ← 【红线】agent 严禁读取或修改此目录
 └── .git/
@@ -79,7 +79,6 @@ vault/
 | asset_family 值 | 写入目录 | 用途 |
 |---|---|---|
 | `knowledge_asset` | `知识资产/知识入库/` | 知识、工具、项目、方法、步骤、风险、派生线索 |
-| `creative_pattern` | `知识资产/创作模式/` | 爆款基因、文案结构、叙事节奏、画面/剪辑特征、可迁移方法 |
 | `github_project` | `知识资产/GitHub项目/` | GitHub 仓库的中文化评估：功能、用法、风险 |
 | `code_module` | `知识资产/代码模块/` | 代码模块的能力说明书、接口契约、复刻步骤 |
 | `idea_asset` | `知识资产/知识入库/` | 用户灵感、问题、假设、方案草稿 |
@@ -149,9 +148,9 @@ related: []                 # 关联的 [[笔记名]] 列表
 |------|------|------|
 | `id` | 是 | `{YYYYMMDD}-{type}-{序号}`，全局唯一 |
 | `type` | 是 | 来源模板类型：`video_analysis` / `image_post_analysis` / `github_project` / `web_clip` / `code_module` |
-| `asset_family` | 是 | `knowledge_asset` / `creative_pattern` / `github_project` / `code_module` / `idea_asset` |
+| `asset_family` | 是 | `knowledge_asset` / `github_project` / `code_module` / `idea_asset` |
 | `source_media` | 是 | `douyin_video` / `douyin_image_post` / `webpage` / `github` / `manual` / `other` |
-| `ingest_intent` | 是 | `knowledge_ingest` / `viral_breakdown` / `manual` / `derived_ingest` |
+| `ingest_intent` | 是 | `knowledge_ingest` / `manual` / `derived_ingest` |
 | `title` | 是 | ≤60字，中文优先 |
 | `source_url` | 是 | 原始链接，无来源填 `"manual"` |
 | `ingested` | 是 | `YYYY-MM-DD` |
@@ -178,7 +177,7 @@ related: []                 # 关联的 [[笔记名]] 列表
 
 **平台类：** `douyin` `bilibili` `youtube` `github` `webpage` `zhihu` `weixin` `xiaohongshu` `hackernews` `arxiv` `medium` `substack` `twitter`
 
-**领域类：** `ai-agent` `video-analysis` `image-analysis` `code-generation` `knowledge-management` `creative-pattern` `web-scraping` `api-design` `prompt-engineering` `llm` `rag` `mcp` `tool-use` `browser-automation` `derived-asset` `official-doc` `web-research` `project`
+**领域类：** `ai-agent` `video-analysis` `image-analysis` `code-generation` `knowledge-management` `web-scraping` `api-design` `prompt-engineering` `llm` `rag` `mcp` `tool-use` `browser-automation` `derived-asset` `official-doc` `web-research` `project`
 
 **类型类：** `knowledge-asset` `tutorial` `reference` `case-study` `tool` `library` `framework` `opinion` `news` `paper` `sop`
 
@@ -212,9 +211,6 @@ related: []                 # 关联的 [[笔记名]] 列表
 
 ## 知识入库
 - [[20260617-douyin-video-download|抖音视频下载]] — Cookie鉴权链路分析 `#douyin` `#knowledge-asset`
-
-## 创作模式
-- [[20260617-douyin-image-post-template|抖音图文结构拆解]] — 图文表达结构样本 `#douyin` `#creative-pattern`
 
 ## GitHub项目 / 网页剪藏 / 代码模块
 - [[20260616-openai-agents-sdk|OpenAI Agents SDK]] — 官方Agent SDK评估 `#ai-agent` `#library`
