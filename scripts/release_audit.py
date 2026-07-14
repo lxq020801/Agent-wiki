@@ -127,6 +127,7 @@ HISTORY_GIT_PATTERN = (
 MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 REQUIREMENT_NAME = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.-]*)")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
+RELEASE_TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 VENDOR_COMMIT = "42784ffc83a72a516bfe952153ad7e2a3998d16c"
 
 
@@ -152,7 +153,8 @@ class AuditResult:
     dependencies: list[Dependency]
     tracked_files: int
     history_scanned: bool
-    nearest_tag: str
+    nearest_release_tag: str
+    exact_head_release_tags: tuple[str, ...]
 
     @property
     def ok(self) -> bool:
@@ -331,7 +333,41 @@ def check_markdown_links(root: Path, paths: Iterable[Path]) -> list[Finding]:
     return findings
 
 
-def check_license_and_version(root: Path) -> tuple[list[Finding], str]:
+def release_tag_state(root: Path) -> tuple[str, tuple[str, ...]]:
+    proc = run_git(root, ["tag", "--list"], check=False)
+    if proc.returncode != 0:
+        return "", ()
+    release_tags = sorted(
+        tag
+        for tag in proc.stdout.decode("utf-8", "replace").splitlines()
+        if RELEASE_TAG.fullmatch(tag)
+    )
+    if not release_tags:
+        return "", ()
+
+    head_proc = run_git(root, ["rev-parse", "HEAD"], check=False)
+    head = head_proc.stdout.decode("ascii", "replace").strip() if head_proc.returncode == 0 else ""
+    exact_tags = []
+    if head:
+        for tag in release_tags:
+            tag_proc = run_git(root, ["rev-parse", f"refs/tags/{tag}^{{}}"], check=False)
+            if tag_proc.returncode == 0 and tag_proc.stdout.decode("ascii", "replace").strip() == head:
+                exact_tags.append(tag)
+
+    describe_args = ["describe", "--tags", "--abbrev=0"]
+    for tag in release_tags:
+        describe_args.extend(["--match", tag])
+    describe_args.append("HEAD")
+    nearest_proc = run_git(root, describe_args, check=False)
+    nearest = (
+        nearest_proc.stdout.decode("utf-8", "replace").strip()
+        if nearest_proc.returncode == 0
+        else ""
+    )
+    return nearest, tuple(exact_tags)
+
+
+def check_license_and_version(root: Path) -> tuple[list[Finding], str, tuple[str, ...]]:
     findings = []
     license_path = root / "LICENSE"
     license_text = license_path.read_text(encoding="utf-8") if license_path.is_file() else ""
@@ -348,18 +384,19 @@ def check_license_and_version(root: Path) -> tuple[list[Finding], str]:
     if not VERSION.fullmatch(manifest_version):
         findings.append(Finding("version", "chrome-extension/manifest.json", None, "missing semantic version"))
 
-    proc = run_git(root, ["describe", "--tags", "--abbrev=0"], check=False)
-    nearest_tag = proc.stdout.decode("utf-8", "replace").strip() if proc.returncode == 0 else ""
-    if nearest_tag and nearest_tag.removeprefix("v") != manifest_version:
+    nearest_release_tag, exact_head_release_tags = release_tag_state(root)
+    expected_tag = f"v{manifest_version}"
+    if exact_head_release_tags and exact_head_release_tags != (expected_tag,):
+        exact_display = ", ".join(exact_head_release_tags)
         findings.append(
             Finding(
                 "version",
                 "chrome-extension/manifest.json",
                 None,
-                f"version {manifest_version} does not match nearest tag {nearest_tag}",
+                f"version {manifest_version} does not match exact HEAD release tag(s) {exact_display}",
             )
         )
-    return findings, nearest_tag
+    return findings, nearest_release_tag, exact_head_release_tags
 
 
 def check_vendor(root: Path) -> list[Finding]:
@@ -448,7 +485,7 @@ def audit(root: Path = PROJECT_ROOT, *, history: bool = False) -> AuditResult:
     findings.extend(check_ignore_policy(root))
     findings.extend(check_dependency_notices(root, dependencies))
     findings.extend(check_markdown_links(root, paths))
-    version_findings, nearest_tag = check_license_and_version(root)
+    version_findings, nearest_release_tag, exact_head_release_tags = check_license_and_version(root)
     findings.extend(version_findings)
     findings.extend(check_vendor(root))
 
@@ -463,7 +500,14 @@ def audit(root: Path = PROJECT_ROOT, *, history: bool = False) -> AuditResult:
         findings.extend(scan_reachable_history(root))
 
     findings.sort(key=lambda item: (item.check, item.path, item.line or 0, item.detail))
-    return AuditResult(findings, dependencies, len(paths), history, nearest_tag)
+    return AuditResult(
+        findings,
+        dependencies,
+        len(paths),
+        history,
+        nearest_release_tag,
+        exact_head_release_tags,
+    )
 
 
 def print_human(result: AuditResult, *, verbose: bool = False) -> None:
@@ -471,7 +515,9 @@ def print_human(result: AuditResult, *, verbose: bool = False) -> None:
     print(f"release audit: {status}")
     print(f"tracked files: {result.tracked_files}")
     print(f"direct dependency declarations: {len(result.dependencies)}")
-    print(f"nearest version tag: {result.nearest_tag or 'none'}")
+    print(f"nearest release tag: {result.nearest_release_tag or 'none'}")
+    exact_tags = ", ".join(result.exact_head_release_tags) or "none"
+    print(f"exact HEAD release tag: {exact_tags}")
     history_status = "complete (high-confidence patterns)" if result.history_scanned else "skipped (use --history)"
     print(f"history scan: {history_status}")
     for finding in result.findings:
@@ -495,7 +541,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "ok": result.ok,
             "tracked_files": result.tracked_files,
             "history_scanned": result.history_scanned,
-            "nearest_tag": result.nearest_tag,
+            "nearest_release_tag": result.nearest_release_tag,
+            "exact_head_release_tags": result.exact_head_release_tags,
             "dependencies": [asdict(item) for item in result.dependencies],
             "findings": [asdict(item) for item in result.findings],
         }

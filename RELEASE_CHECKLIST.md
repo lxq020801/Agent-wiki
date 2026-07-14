@@ -6,6 +6,7 @@
 
 - [ ] 工作区干净，发布 commit 已经完成代码审查。
 - [ ] 发布版本与 `chrome-extension/manifest.json` 的 `version` 一致。
+- [ ] 打 tag 前运行审计时，确认输出的 `exact HEAD release tag` 为 `none`；打 tag 后复跑并确认它与 manifest 精确一致。
 - [ ] `git ls-files` 只包含准备公开的源码、文档和静态资源。
 - [ ] README 的平台、Python 版本、安装路径和运行目录仍与代码一致。
 
