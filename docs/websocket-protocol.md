@@ -253,7 +253,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 - `current/packaged_source`：不带 Git 元数据的源码副本
 - `legacy_path/legacy_source_path`：从已知旧目录名启动，扩展必须暂停写操作并提示从当前仓库启动
 
-不得通过新建旧目录、复制当前代码到旧目录或建立旧路径符号链接来消除提示。
+不得通过新建旧目录、复制当前代码到旧目录或建立旧路径符号链接来消除提示。服务使用启动时可见路径判断旧目录风险，旧目录名符号链接不会被 canonical path 掩盖；manifest、Git commit 和源码指纹仍从 canonical 路径读取。
 
 ### `handshake_ack`
 

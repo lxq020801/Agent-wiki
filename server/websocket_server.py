@@ -15,9 +15,12 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-# 添加项目路径
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SERVER_SOURCE = Path(__file__).resolve()
+# Keep the launch spelling for deployment-risk checks, but use canonical paths
+# for imports, manifests, Git metadata, and source hashing.
+VISIBLE_SERVER_SOURCE = Path(os.path.abspath(__file__))
+VISIBLE_PROJECT_ROOT = VISIBLE_SERVER_SOURCE.parents[1]
+SERVER_SOURCE = VISIBLE_SERVER_SOURCE.resolve()
+PROJECT_ROOT = SERVER_SOURCE.parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "deps" / "douyin" / "scripts"))
 
@@ -45,9 +48,10 @@ CONTROL_MUTATION_TYPES = {
 }
 
 
-def _read_product_version(project_root=PROJECT_ROOT):
+def _read_product_version(project_root=None):
+    canonical_root = Path(project_root).resolve() if project_root is not None else PROJECT_ROOT
     try:
-        manifest = json.loads((Path(project_root) / "chrome-extension" / "manifest.json").read_text(encoding="utf-8"))
+        manifest = json.loads((canonical_root / "chrome-extension" / "manifest.json").read_text(encoding="utf-8"))
         version = str(manifest.get("version") or "").strip()
     except (OSError, ValueError, TypeError):
         version = ""
@@ -91,14 +95,26 @@ def _deployment_identity(project_root):
     return {"state": "current", "code": code}
 
 
-def build_runtime_identity(project_root=PROJECT_ROOT, server_source=SERVER_SOURCE):
+def build_runtime_identity(
+    project_root=None,
+    server_source=None,
+    visible_project_root=None,
+):
+    canonical_project_root = Path(project_root).resolve() if project_root is not None else PROJECT_ROOT
+    canonical_server_source = Path(server_source).resolve() if server_source is not None else SERVER_SOURCE
+    if visible_project_root is not None:
+        launch_project_root = Path(visible_project_root)
+    elif project_root is not None:
+        launch_project_root = Path(project_root)
+    else:
+        launch_project_root = VISIBLE_PROJECT_ROOT
     return {
         "product": PRODUCT_ID,
-        "productVersion": _read_product_version(project_root),
+        "productVersion": _read_product_version(canonical_project_root),
         "protocolVersion": PROTOCOL_VERSION,
-        "sourceRevision": _source_revision(project_root),
-        "buildId": _source_build_id(server_source),
-        "deployment": _deployment_identity(project_root),
+        "sourceRevision": _source_revision(canonical_project_root),
+        "buildId": _source_build_id(canonical_server_source),
+        "deployment": _deployment_identity(launch_project_root),
     }
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -128,6 +129,37 @@ class RuntimeVersionProtocolTests(unittest.TestCase):
             "code": "legacy_source_path",
         })
         self.assertNotIn("obsidian-librarian-codex", json.dumps(identity))
+
+    def test_default_runtime_identity_detects_real_legacy_symlink_launch(self) -> None:
+        probe = (
+            "import json, runpy, sys\n"
+            "namespace = runpy.run_path(sys.argv[1], run_name='agent_wiki_symlink_probe')\n"
+            "print(json.dumps(namespace['build_runtime_identity'](), sort_keys=True))\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            for legacy_name in ("obsidian-librarian", "obsidian-librarian-codex"):
+                with self.subTest(legacy_name=legacy_name):
+                    legacy_link = Path(tmp) / legacy_name
+                    legacy_link.symlink_to(ROOT, target_is_directory=True)
+                    linked_server = legacy_link / "server" / "websocket_server.py"
+                    result = subprocess.run(
+                        [sys.executable, "-c", probe, str(linked_server)],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    identity = json.loads(result.stdout.strip().splitlines()[-1])
+                    serialized = json.dumps(identity, ensure_ascii=False)
+
+                    self.assertEqual(identity["productVersion"], "0.1.0")
+                    self.assertEqual(identity["deployment"], {
+                        "state": "legacy_path",
+                        "code": "legacy_source_path",
+                    })
+                    self.assertRegex(identity["sourceRevision"], r"^[0-9a-f]{7,40}$")
+                    self.assertRegex(identity["buildId"], r"^src-[0-9a-f]{16}$")
+                    self.assertNotIn(str(legacy_link), serialized)
+                    self.assertNotIn(legacy_name, serialized)
 
     def test_status_snapshot_exposes_same_runtime_identity(self) -> None:
         runtime = {
