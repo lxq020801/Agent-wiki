@@ -18,9 +18,9 @@ jobs:
         python-version: ["3.11", "3.12"]
 
     env:
-      AGENT_WIKI_HOME: ${{ runner.temp }}/agent-wiki-ci
+      AGENT_WIKI_HOME: /tmp/agent-wiki-ci
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+      PYTHONPYCACHEPREFIX: /tmp/agent-wiki-pycache
 
     steps:
       - name: Check out repository
