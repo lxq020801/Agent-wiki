@@ -67,14 +67,27 @@ cd Agent-wiki
 初始化本地运行环境：
 
 ```bash
-python3 install/bootstrap.py
+python3.11 install/bootstrap.py
 ```
 
-启动本地控制服务：
+启动托管的本地控制服务：
 
 ```bash
-python3 server/launcher.py
+python3.11 server/launcher.py start
+python3.11 server/launcher.py status
 ```
+
+`start` 会先检查 Python、控制面依赖、配置中的回环地址、端口占用、旧部署和已有服务的源码位置。它不会按进程名杀进程；`stop` 只停止由 Agent-wiki 私有状态完整确认的进程。需要前台运行时使用 `python3.11 server/launcher.py foreground`，无参数调用仍兼容此前的前台行为。
+
+环境诊断和缓存占用预览：
+
+```bash
+python3.11 server/launcher.py doctor
+python3.11 server/launcher.py cache report
+python3.11 server/launcher.py cache clean --dry-run
+```
+
+缓存命令不实现真实删除。完整说明见 [本地运行与诊断](docs/runtime-operations.md)。
 
 安装 Chrome 扩展：
 
@@ -108,9 +121,10 @@ python3 scripts/ingest_url.py "https://v.douyin.com/..."
 常用检查：
 
 ```bash
-python3 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py install/bootstrap.py
-python3 tests/test_p0_static.py
-python3 tests/test_douyin_image_post_static.py
+python3.11 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py server/runtime_manager.py server/service_entry.py install/bootstrap.py
+python3.11 tests/test_runtime_manager.py
+python3.11 tests/test_p0_static.py
+python3.11 tests/test_douyin_image_post_static.py
 node --check chrome-extension/background.js
 node --check chrome-extension/popup/popup.js
 node --check chrome-extension/content/douyin-current-video.js
@@ -121,6 +135,7 @@ node --check chrome-extension/content/douyin-current-video.js
 - [产品基准线](PROJECT_INTENT.md)
 - [开发 AI 入口](AGENTS.md)
 - [技术总览](docs/technical-overview.md)
+- [本地运行与诊断](docs/runtime-operations.md)
 - [WebSocket 协议](docs/websocket-protocol.md)
 - [Ark 视频理解链路](docs/ark-video-understanding.md)
 - [抖音工具说明](deps/douyin/SKILL.md)

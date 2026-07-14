@@ -14,9 +14,10 @@
 提交前建议运行：
 
 ```bash
-python3 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py install/bootstrap.py
-python3 tests/test_p0_static.py
-python3 tests/test_douyin_image_post_static.py
+python3.11 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py server/runtime_manager.py server/service_entry.py install/bootstrap.py
+python3.11 tests/test_runtime_manager.py
+python3.11 tests/test_p0_static.py
+python3.11 tests/test_douyin_image_post_static.py
 node --check chrome-extension/background.js
 node --check chrome-extension/popup/popup.js
 node --check chrome-extension/content/douyin-current-video.js
