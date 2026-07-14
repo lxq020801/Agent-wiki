@@ -166,11 +166,12 @@ class ReleaseAuditTests(unittest.TestCase):
             check=True,
         )
         payload = json.loads(proc.stdout)
+        expected_nearest, expected_exact = release_audit.release_tag_state(ROOT)
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["history_scanned"])
         self.assertGreater(payload["tracked_files"], 0)
-        self.assertEqual(payload["nearest_release_tag"], "v0.1.0")
-        self.assertEqual(payload["exact_head_release_tags"], [])
+        self.assertEqual(payload["nearest_release_tag"], expected_nearest)
+        self.assertEqual(payload["exact_head_release_tags"], list(expected_exact))
 
     def test_ci_fetches_full_history_without_persisting_credentials(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
