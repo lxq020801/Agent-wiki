@@ -9,6 +9,10 @@
 - 格式：JSON text message
 - Origin：允许 Chrome 扩展和本地无 Origin 测试客户端；拒绝普通网页 Origin
 - 敏感信息：服务端状态响应不得返回 API Key、Cookie、Bearer token
+- 当前产品版本：`0.1.0`
+- 当前协议版本：`1`
+
+连接建立后可以先读取状态，但配置、Cookie、模型检查、入库和派生操作必须通过版本握手。新服务会拒绝旧扩展的写操作；新扩展连接缺少完整运行身份的旧服务时，只保留状态诊断并暂停同步与入库。
 
 ## 扩展 -> Agent
 
@@ -18,9 +22,13 @@
 {
   "type": "handshake",
   "client": "agent-wiki-extension",
-  "version": "0.1.0"
+  "product": "agent-wiki",
+  "version": "0.1.0",
+  "protocolVersion": 1
 }
 ```
+
+`version` 必须来自扩展 `manifest.json`，不能在 background/popup 中另写常量。服务端以 `handshake_ack.compatibility` 返回校验结果。
 
 ### `status_request`
 
@@ -215,6 +223,18 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 {
   "type": "agent_ready",
   "version": "0.1.0",
+  "protocolVersion": 1,
+  "runtime": {
+    "product": "agent-wiki",
+    "productVersion": "0.1.0",
+    "protocolVersion": 1,
+    "sourceRevision": "3c7ea9e0158a",
+    "buildId": "src-0123456789abcdef",
+    "deployment": {
+      "state": "current",
+      "code": "source_checkout"
+    }
+  },
   "capabilities": [
     "config_sync",
     "cookie_sync",
@@ -227,12 +247,68 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 }
 ```
 
+`sourceRevision` 是可用时的短 Git commit；`buildId` 是服务源码内容指纹，Git 不可用时仍可比较两次运行是否来自同一份服务代码。两者都不包含源码目录。`deployment` 只返回枚举状态，不返回本地路径：
+
+- `current/source_checkout`：当前 Git checkout
+- `current/packaged_source`：不带 Git 元数据的源码副本
+- `legacy_path/legacy_source_path`：从已知旧目录名启动，扩展必须暂停写操作并提示从当前仓库启动
+
+不得通过新建旧目录、复制当前代码到旧目录或建立旧路径符号链接来消除提示。
+
+### `handshake_ack`
+
+```json
+{
+  "type": "handshake_ack",
+  "runtime": {
+    "product": "agent-wiki",
+    "productVersion": "0.1.0",
+    "protocolVersion": 1,
+    "sourceRevision": "3c7ea9e0158a",
+    "buildId": "src-0123456789abcdef",
+    "deployment": { "state": "current", "code": "source_checkout" }
+  },
+  "compatibility": {
+    "state": "compatible",
+    "canOperate": true,
+    "message": "扩展、服务与协议版本一致。",
+    "clientVersion": "0.1.0",
+    "clientProtocolVersion": 1
+  }
+}
+```
+
+`compatibility.state` 可能为 `compatible`、`legacy_client`、`product_mismatch`、`version_mismatch` 或 `protocol_mismatch`。除 `compatible` 外，服务端拒绝控制面写操作。
+
+### `protocol_rejected`
+
+未握手或版本校验未通过的客户端发送写操作时，服务端返回：
+
+```json
+{
+  "type": "protocol_rejected",
+  "reason": "version_mismatch",
+  "message": "扩展 v0.0.9 与服务 v0.1.0 不一致。",
+  "runtime": { "product": "agent-wiki", "productVersion": "0.1.0", "protocolVersion": 1 }
+}
+```
+
+只读的 `status_request` 和 `task_status_request` 不受该门禁影响，便于诊断旧部署。
+
 ### `status_snapshot`
 
 ```json
 {
   "type": "status_snapshot",
   "status": {
+    "runtime": {
+      "product": "agent-wiki",
+      "productVersion": "0.1.0",
+      "protocolVersion": 1,
+      "sourceRevision": "3c7ea9e0158a",
+      "buildId": "src-0123456789abcdef",
+      "deployment": { "state": "current", "code": "source_checkout" }
+    },
     "vault": { "state": "ready", "path": "/...", "source": "obsidian_registry" },
     "llm": { "state": "ready", "provider": "doubao", "model": "...", "endpoint": "https://ark.cn-beijing.volces.com/api/v3" },
     "videoAnalysis": {
@@ -259,6 +335,20 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
   "timestamp": "2026-07-02T10:00:00"
 }
 ```
+
+## 扩展兼容行为
+
+扩展用同一套纯函数同时校验 background 和 popup 收到的 `agent_ready`、`handshake_ack`、`status_snapshot.status.runtime`：
+
+| 场景 | 显示 | 控制面行为 |
+| --- | --- | --- |
+| 产品、扩展版本、服务版本、协议和部署状态都匹配 | 服务版本、协议、源码 commit/指纹，绿色“版本一致” | 正常同步和入库 |
+| 扩展版本与服务版本不同 | 中文说明两端版本 | 暂停同步和入库 |
+| 协议版本不同 | 中文说明两端协议版本 | 暂停同步和入库 |
+| 缺 `runtime`、版本、协议或源码标识 | “检测到旧服务” | 保留状态读取，暂停同步和入库 |
+| `deployment.state = legacy_path` | “服务由旧源码路径启动” | 暂停同步和入库 |
+
+扩展只读取运行身份白名单字段。服务端即使返回额外的 `path`、`apiKey` 或任意文本，也不会进入版本状态或持久化的 `agentRuntime`。
 
 ### `task_accepted` / `task_rejected` / `task_status_snapshot`
 

@@ -1,6 +1,8 @@
 // popup.js - Agent-wiki control console
 // 首页只负责提交拆解任务；设置页负责 API、Cookie、Vault 与拆解偏好。
 
+const RuntimeVersion = globalThis.AgentWikiRuntime;
+const EXTENSION_VERSION = RuntimeVersion.extensionVersion();
 const WS_URL = 'ws://127.0.0.1:8765';
 const DEBUG_LOGS = false;
 const PROVIDERS = {
@@ -54,6 +56,8 @@ let previewInputTimer = null;
 let previewRequestSeq = 0;
 let lastPreviewKey = '';
 let lastSettingsTrigger = null;
+let runtimeCompatibility = null;
+let runtimeSyncStarted = false;
 const pendingDerivedActions = new Map();
 
 function debugLog(...args) {
@@ -268,14 +272,11 @@ function connectWebSocket() {
   try {
     ws = new WebSocket(WS_URL);
     ws.onopen = () => {
+      runtimeCompatibility = null;
+      runtimeSyncStarted = false;
       updateConnectionStatus(true);
-      ws.send(JSON.stringify({
-        type: 'handshake',
-        client: 'agent-wiki-extension',
-        version: '0.1.0'
-      }));
+      ws.send(JSON.stringify(RuntimeVersion.buildHandshake('agent-wiki-extension')));
       requestStatus();
-      flushPendingSync();
       startStatusPolling();
     };
     ws.onmessage = (event) => {
@@ -286,6 +287,8 @@ function connectWebSocket() {
       }
     };
     ws.onclose = () => {
+      runtimeCompatibility = null;
+      runtimeSyncStarted = false;
       updateConnectionStatus(false);
       ws = null;
       stopStatusPolling();
@@ -312,6 +315,9 @@ function stopStatusPolling() {
 }
 
 function sendToAgent(data) {
+  if (!RuntimeVersion.canSendMessage(data?.type, runtimeCompatibility)) {
+    return false;
+  }
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(data));
     return true;
@@ -414,11 +420,18 @@ async function flushPendingSync() {
 function handleAgentMessage(msg) {
   switch (msg.type) {
     case 'agent_ready':
+    case 'handshake_ack': {
       updateConnectionStatus(true);
+      const compatibility = applyRuntimeCompatibility(msg);
       requestStatus();
-      flushPendingSync();
+      if (compatibility.canOperate && !runtimeSyncStarted) {
+        runtimeSyncStarted = true;
+        flushPendingSync();
+      }
       break;
+    }
     case 'status_snapshot':
+      applyRuntimeCompatibility(msg);
       applyStatusSnapshot(msg.status || {});
       break;
     case 'task_status_snapshot':
@@ -470,9 +483,52 @@ function handleAgentMessage(msg) {
     case 'error':
       showHint('config-hint', msg.message || msg.error || 'Agent 返回错误', 'error', { persist: true });
       break;
+    case 'protocol_rejected':
+      applyRuntimeCompatibility(msg, {
+        state: msg.reason || 'protocol_rejected',
+        tone: 'offline',
+        canOperate: false,
+        message: msg.message || '版本握手未通过，服务已拒绝写操作。'
+      });
+      break;
     default:
       debugLog('[Librarian] 未知消息类型:', msg.type);
   }
+}
+
+function applyRuntimeCompatibility(msg, override = null) {
+  const evaluated = RuntimeVersion.evaluateRuntimeCompatibility(msg, EXTENSION_VERSION);
+  runtimeCompatibility = override ? { ...evaluated, ...override } : evaluated;
+  const runtime = runtimeCompatibility.runtime;
+  const serviceVersion = runtime.productVersion ? `v${runtime.productVersion}` : '旧服务 / 未提供';
+  const serviceProtocol = runtime.protocolVersion ? `v${runtime.protocolVersion}` : '未提供';
+  const sourceIdentity = runtime.sourceRevision || runtime.buildId || '未提供';
+  const versionLabel = runtimeCompatibility.canOperate
+    ? `服务 ${serviceVersion}`
+    : runtimeCompatibility.state === 'legacy_server'
+      ? '检测到旧服务'
+      : '版本不一致';
+
+  setStatus('agent', versionLabel, runtimeCompatibility.tone);
+  document.getElementById('extension-version').textContent = `v${EXTENSION_VERSION || '未知'}`;
+  document.getElementById('service-version').textContent = serviceVersion;
+  document.getElementById('runtime-protocol-version').textContent = `扩展 v${RuntimeVersion.PROTOCOL_VERSION} · 服务 ${serviceProtocol}`;
+  document.getElementById('runtime-source-version').textContent = sourceIdentity;
+  document.getElementById('agent-settings-copy').textContent = runtimeCompatibility.canOperate
+    ? `本地服务已连接，版本校验通过`
+    : '本地服务已连接，但版本校验未通过';
+  showHint(
+    'runtime-version-hint',
+    runtimeCompatibility.message,
+    runtimeCompatibility.canOperate ? 'success' : runtimeCompatibility.tone === 'offline' ? 'error' : 'warning',
+    { persist: true }
+  );
+  updateSystemSummary();
+  return runtimeCompatibility;
+}
+
+function runtimeUnavailableMessage() {
+  return runtimeCompatibility?.message || '请先启动 Agent 服务';
 }
 
 function applyStatusSnapshot(status) {
@@ -907,7 +963,7 @@ async function saveApiConfig() {
       showHint('config-hint', sent ? 'API 设置已保存，填写 Key 后再测试连接' : 'API 设置已本地保存', 'warning', { persist: true });
       return;
     }
-    showHint('config-hint', sent ? 'API 设置已发送到 Agent' : 'Agent 未连接，API 设置已本地保存', sent ? 'success' : 'warning', { persist: !sent });
+    showHint('config-hint', sent ? 'API 设置已发送到 Agent' : `${runtimeUnavailableMessage()} API 设置仅保存在扩展本地。`, sent ? 'success' : 'warning', { persist: !sent });
   } catch (err) {
     setStatus('api', '配置错误', 'offline');
     showHint('config-hint', err.message || 'API 设置无效', 'error', { persist: true });
@@ -919,7 +975,7 @@ async function saveVideoConfig() {
     await persistConfigLocally();
     const agentConfig = await buildAgentConfig({ requireApiKey: false });
     const sent = sendToAgent({ type: 'config_update', data: agentConfig });
-    showHint('video-config-hint', sent ? '拆解设置已同步' : 'Agent 未连接，拆解设置已本地保存', sent ? 'success' : 'warning', { persist: !sent });
+    showHint('video-config-hint', sent ? '拆解设置已同步' : `${runtimeUnavailableMessage()} 拆解设置仅保存在扩展本地。`, sent ? 'success' : 'warning', { persist: !sent });
   } catch (err) {
     showHint('video-config-hint', err.message || '拆解设置保存失败', 'error', { persist: true });
   }
@@ -930,7 +986,7 @@ async function sendConfigToAgent({ silent = false, requireApiKey = false } = {})
     const data = await buildAgentConfig({ requireApiKey });
     if (!data) return false;
     const sent = sendToAgent({ type: 'config_update', data });
-    if (!sent && !silent) showHint('config-hint', 'Agent 未连接', 'warning', { persist: true });
+    if (!sent && !silent) showHint('config-hint', runtimeUnavailableMessage(), 'warning', { persist: true });
     return sent;
   } catch (err) {
     if (!silent) showHint('config-hint', err.message, 'error', { persist: true });
@@ -953,8 +1009,8 @@ async function checkModelHealth() {
     if (!sent) {
       const response = await chrome.runtime.sendMessage({ action: 'modelHealthCheck' }).catch(() => null);
       if (!response?.accepted) {
-        setStatus('api', 'Agent 未连接', 'offline');
-        showHint('model-hint', '请先启动 Agent 服务', 'warning', { persist: true });
+        setStatus('api', runtimeCompatibility ? '版本未通过' : 'Agent 未连接', 'offline');
+        showHint('model-hint', response?.message || runtimeUnavailableMessage(), 'warning', { persist: true });
       }
     }
     return sent;
@@ -1098,6 +1154,11 @@ async function submitDouyinIngestFromPopup() {
     openSettingsDetail('agent-settings');
     return;
   }
+  if (!runtimeCompatibility?.canOperate) {
+    showHint(hintId, runtimeUnavailableMessage(), runtimeCompatibility?.tone === 'offline' ? 'error' : 'warning', { persist: true });
+    openSettingsDetail('agent-settings');
+    return;
+  }
   buttons.forEach(btn => { btn.disabled = true; });
   showHint(hintId, shareText ? '正在从分享文案提取链接并提交' : '正在识别当前抖音页面', 'warning', { persist: true });
   try {
@@ -1124,8 +1185,8 @@ async function discoverVault() {
   setStatus('vault', '正在识别', 'warning');
   const sent = sendToAgent({ type: 'vault_discover', hint });
   if (!sent) {
-    setStatus('vault', 'Agent 未连接', 'offline');
-    showHint('vault-hint', '请先启动 Agent 服务', 'warning', { persist: true });
+    setStatus('vault', runtimeCompatibility ? '版本未通过' : 'Agent 未连接', 'offline');
+    showHint('vault-hint', runtimeUnavailableMessage(), 'warning', { persist: true });
   }
 }
 
@@ -1133,8 +1194,8 @@ function pickVault() {
   setStatus('vault', '等待选择', 'warning');
   const sent = sendToAgent({ type: 'vault_pick' });
   if (!sent) {
-    setStatus('vault', 'Agent 未连接', 'offline');
-    showHint('vault-hint', '请先启动 Agent 服务', 'warning', { persist: true });
+    setStatus('vault', runtimeCompatibility ? '版本未通过' : 'Agent 未连接', 'offline');
+    showHint('vault-hint', runtimeUnavailableMessage(), 'warning', { persist: true });
   }
 }
 
@@ -1193,7 +1254,12 @@ async function grabCookie() {
       data: cookieText
     });
     setStatus('cookie', sent ? '等待确认' : '待同步', 'warning', formatTime(grabbedAt));
-    showHint('cookie-hint', sent ? 'Cookie 已发送，等待 Agent 确认' : 'Agent 未连接，Cookie 已暂存', sent ? 'warning' : 'warning', { persist: true });
+    showHint(
+      'cookie-hint',
+      sent ? 'Cookie 已发送，等待 Agent 确认' : `${runtimeUnavailableMessage()} Cookie 已暂存在扩展中，未发送给服务。`,
+      'warning',
+      { persist: true }
+    );
   } catch (err) {
     setStatus('cookie', '抓取失败', 'offline');
     showHint('cookie-hint', err.message || 'Cookie 抓取失败', 'error', { persist: true });
@@ -1224,8 +1290,17 @@ async function refreshCookieStatusFromStorage() {
 
 function updateConnectionStatus(connected) {
   isAgentConnected = connected;
-  setStatus('agent', connected ? '已连接' : '未连接', connected ? 'online' : 'offline');
-  document.getElementById('agent-settings-copy').textContent = connected ? '本地 Agent 已连接' : '本地 Agent 未连接';
+  if (connected && !runtimeCompatibility) {
+    setStatus('agent', '正在校验版本', 'warning');
+    document.getElementById('agent-settings-copy').textContent = '本地服务已连接，正在校验版本';
+  } else if (!connected) {
+    setStatus('agent', '未连接', 'offline');
+    document.getElementById('agent-settings-copy').textContent = '本地 Agent 未连接';
+    document.getElementById('service-version').textContent = '待连接';
+    document.getElementById('runtime-protocol-version').textContent = '待校验';
+    document.getElementById('runtime-source-version').textContent = '待校验';
+    showHint('runtime-version-hint', '', '');
+  }
   refreshCookieStatusFromStorage();
   updateSystemSummary();
 }
@@ -1254,6 +1329,16 @@ function updateSystemSummary() {
   if (!el) return;
   if (!isAgentConnected) {
     el.textContent = 'Agent 未连接';
+    return;
+  }
+  if (!runtimeCompatibility) {
+    el.textContent = '正在校验服务版本';
+    return;
+  }
+  if (!runtimeCompatibility.canOperate) {
+    el.textContent = runtimeCompatibility.state === 'legacy_server'
+      ? '检测到旧服务，已暂停入库'
+      : '版本不一致，已暂停入库';
     return;
   }
   const api = document.getElementById('api-status-text')?.className || '';
@@ -1415,6 +1500,7 @@ function syncModelPresetFromInput() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('extension-version').textContent = `v${EXTENSION_VERSION || '未知'}`;
   document.getElementById('open-settings').addEventListener('click', openSettingsIndex);
   document.getElementById('back-home').addEventListener('click', closeToHome);
   document.getElementById('back-home-from-index').addEventListener('click', closeToHome);

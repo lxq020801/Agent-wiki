@@ -4,6 +4,9 @@
 //   2. 接收配置/Cookie 同步确认
 //   3. 安装时初始化
 
+importScripts('runtime-version.js');
+
+const RuntimeVersion = self.AgentWikiRuntime;
 const WS_URL = 'ws://127.0.0.1:8765';
 const MODEL_HEALTH_ALARM = 'agent-wiki-model-health';
 const NOTIFICATION_ICON = 'icons/icon-128.png';
@@ -34,6 +37,7 @@ let reconnectTimer = null;
 let pendingModelHealthCheck = false;
 let pendingModelConfigSync = false;
 let pendingTaskRequests = new Map();
+let runtimeCompatibility = null;
 
 function debugLog(...args) {
   if (DEBUG_LOGS) console.log(...args);
@@ -243,19 +247,9 @@ function connectWebSocket() {
       }
       debugLog('[Librarian BG] WebSocket 已连接');
       clearTimeout(reconnectTimer);
+      runtimeCompatibility = null;
 
-      // 发送握手
-      socket.send(JSON.stringify({
-        type: 'handshake',
-        client: 'agent-wiki-background',
-        version: '0.1.0'
-      }));
-
-      if (pendingModelConfigSync) {
-        sendModelConfigAndHealthCheck();
-      } else if (pendingModelHealthCheck) {
-        sendModelHealthCheck();
-      }
+      socket.send(JSON.stringify(RuntimeVersion.buildHandshake('agent-wiki-background')));
     };
 
     socket.onmessage = (event) => {
@@ -270,6 +264,7 @@ function connectWebSocket() {
       if (ws !== socket) return;
       debugLog('[Librarian BG] WebSocket 已断开，3秒后重连');
       ws = null;
+      runtimeCompatibility = null;
       reconnectTimer = setTimeout(connectWebSocket, 3000);
     };
 
@@ -285,6 +280,9 @@ function connectWebSocket() {
 }
 
 function sendToAgent(data) {
+  if (!RuntimeVersion.canSendMessage(data?.type, runtimeCompatibility)) {
+    return false;
+  }
   const socket = ws;
   if (socket && socket.readyState === WebSocket.OPEN) {
     try {
@@ -370,8 +368,7 @@ async function sendModelHealthCheck() {
   }
 
   pendingModelHealthCheck = false;
-  sendToAgent({ type: 'model_check', data });
-  return true;
+  return sendToAgent({ type: 'model_check', data });
 }
 
 async function sendModelConfigAndHealthCheck() {
@@ -405,9 +402,9 @@ async function sendModelConfigAndHealthCheck() {
 
   pendingModelConfigSync = false;
   pendingModelHealthCheck = false;
-  sendToAgent({ type: 'config_update', data });
-  sendToAgent({ type: 'model_check', data });
-  return true;
+  const configSent = sendToAgent({ type: 'config_update', data });
+  const healthSent = sendToAgent({ type: 'model_check', data });
+  return configSent && healthSent;
 }
 
 function ensureModelHealthAlarm() {
@@ -678,7 +675,7 @@ async function currentDouyinCandidate(info, tab) {
 }
 
 async function waitForAgentConnection(timeoutMs = 3000) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
+  if (ws && ws.readyState === WebSocket.OPEN && runtimeCompatibility?.canOperate) {
     return true;
   }
 
@@ -686,9 +683,12 @@ async function waitForAgentConnection(timeoutMs = 3000) {
   const start = Date.now();
   return new Promise((resolve) => {
     const timer = setInterval(() => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
+      if (ws && ws.readyState === WebSocket.OPEN && runtimeCompatibility?.canOperate) {
         clearInterval(timer);
         resolve(true);
+      } else if (runtimeCompatibility && !runtimeCompatibility.canOperate) {
+        clearInterval(timer);
+        resolve(false);
       } else if (Date.now() - start >= timeoutMs) {
         clearInterval(timer);
         resolve(false);
@@ -700,8 +700,9 @@ async function waitForAgentConnection(timeoutMs = 3000) {
 async function submitDouyinIngestTask(candidate, info, tab) {
   const connected = await waitForAgentConnection();
   if (!connected) {
-    notifyUser('Agent 未连接', '已识别视频链接，但本地 Agent 服务暂时连接不上。');
-    return { ok: false, message: 'Agent 未连接' };
+    const message = runtimeCompatibility?.message || '已识别视频链接，但本地 Agent 服务暂时连接不上。';
+    notifyUser(runtimeCompatibility ? '版本校验未通过' : 'Agent 未连接', message);
+    return { ok: false, message };
   }
 
   const requestId = makeRequestId();
@@ -815,6 +816,7 @@ function handleAgentMessage(msg) {
       break;
 
     case 'status_snapshot':
+      applyRuntimeCompatibility(msg);
       if (msg.status?.model || msg.status?.llm || msg.status?.videoAnalysis) {
         const modelStatus = msg.status.llm || msg.status.model || {};
         const videoStatus = msg.status.videoAnalysis || {};
@@ -857,7 +859,27 @@ function handleAgentMessage(msg) {
       break;
       
     case 'agent_ready':
-      debugLog('[Librarian BG] Agent 已就绪');
+    case 'handshake_ack': {
+      const compatibility = applyRuntimeCompatibility(msg);
+      debugLog('[Librarian BG] Agent 版本状态:', compatibility.state);
+      if (compatibility.canOperate) {
+        if (pendingModelConfigSync) {
+          sendModelConfigAndHealthCheck();
+        } else if (pendingModelHealthCheck) {
+          sendModelHealthCheck();
+        }
+      }
+      break;
+    }
+
+    case 'protocol_rejected':
+      applyRuntimeCompatibility(msg, {
+        state: msg.reason || 'protocol_rejected',
+        canOperate: false,
+        tone: 'offline',
+        message: msg.message || '版本握手未通过，服务已拒绝写操作。'
+      });
+      notifyUser('版本校验未通过', msg.message || '服务已拒绝写操作。');
       break;
 
     case 'task_rejected':
@@ -877,6 +899,16 @@ function handleAgentMessage(msg) {
     default:
       debugLog('[Librarian BG] 未知消息类型:', msg.type);
   }
+}
+
+function applyRuntimeCompatibility(msg, override = null) {
+  const evaluated = RuntimeVersion.evaluateRuntimeCompatibility(msg);
+  runtimeCompatibility = override ? { ...evaluated, ...override } : evaluated;
+  chrome.storage.local.set({
+    runtimeCompatibility,
+    agentRuntime: runtimeCompatibility.runtime
+  });
+  return runtimeCompatibility;
 }
 
 // ─────────────────────────────────────────
@@ -911,13 +943,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse({ connected: ws && ws.readyState === WebSocket.OPEN });
     return false;
   } else if (request.action === 'modelHealthCheck') {
-    sendModelHealthCheck().then(() => {
-      sendResponse({ accepted: true });
+    sendModelHealthCheck().then((accepted) => {
+      sendResponse({ accepted, message: accepted ? '' : runtimeCompatibility?.message || 'Agent 未连接' });
     });
     return true;
   } else if (request.action === 'syncModelConfigAndCheck') {
     sendModelConfigAndHealthCheck().then((accepted) => {
-      sendResponse({ accepted });
+      sendResponse({ accepted, message: accepted ? '' : runtimeCompatibility?.message || 'Agent 未连接' });
     });
     return true;
   } else if (request.action === 'submitDouyinIngestFromPopup') {

@@ -256,6 +256,43 @@ body[data-view="settings-detail-view"] #open-settings {
   margin-bottom: 0;
 }
 
+.runtime-details {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 12px;
+  margin: 10px 0 0;
+}
+
+.runtime-details div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 7px;
+  min-width: 0;
+  padding: 7px 0;
+  border-top: 1px solid var(--border);
+}
+
+.runtime-details dt,
+.runtime-details dd {
+  min-width: 0;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.runtime-details dt {
+  color: var(--text-secondary);
+}
+
+.runtime-details dd {
+  overflow: hidden;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 h2,
 h3 {
   font-size: 13px;

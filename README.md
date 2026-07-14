@@ -125,7 +125,10 @@ python3.11 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/con
 python3.11 tests/test_runtime_manager.py
 python3.11 tests/test_p0_static.py
 python3.11 tests/test_douyin_image_post_static.py
+python3.11 tests/test_runtime_version_protocol.py
+node tests/test_extension_runtime_version.js
 node --check chrome-extension/background.js
+node --check chrome-extension/runtime-version.js
 node --check chrome-extension/popup/popup.js
 node --check chrome-extension/content/douyin-current-video.js
 ```
