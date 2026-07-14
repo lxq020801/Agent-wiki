@@ -14,11 +14,16 @@
 提交前建议运行：
 
 ```bash
-python3.11 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py server/runtime_manager.py server/service_entry.py install/bootstrap.py
+python3.11 scripts/release_audit.py
+python3.11 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py server/runtime_manager.py server/service_entry.py install/bootstrap.py scripts/release_audit.py
 python3.11 tests/test_runtime_manager.py
 python3.11 tests/test_p0_static.py
 python3.11 tests/test_douyin_image_post_static.py
+python3.11 tests/test_runtime_version_protocol.py
+python3.11 tests/test_release_audit.py
+node tests/test_extension_runtime_version.js
 node --check chrome-extension/background.js
+node --check chrome-extension/runtime-version.js
 node --check chrome-extension/popup/popup.js
 node --check chrome-extension/content/douyin-current-video.js
 ```
@@ -30,3 +35,5 @@ node --check chrome-extension/content/douyin-current-video.js
 - 没有提交真实 Cookie、API Key、access token、日志或运行缓存。
 - README 或相关文档已经同步更新。
 - 失败的测试已经说明原因，最好附上复现命令。
+
+涉及公开版本、依赖清单或 vendor 更新时，还要按 [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) 运行历史扫描并复核第三方许可。审计脚本只报告疑似秘密的类型和文件位置，不要把匹配正文复制到 issue 或 pull request。

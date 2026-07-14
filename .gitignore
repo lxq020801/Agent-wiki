@@ -3,6 +3,18 @@
 # Local-only historical workspace kept outside the open-source project.
 obsidian-[l]ibrarian/
 
+# Local secrets accidentally placed in the repository root
+.env
+.env.*
+!.env.example
+config.toml
+cookies.txt
+douyin.txt
+*.pem
+*.key
+*.p12
+*.pfx
+
 # Python caches
 __pycache__/
 *.pyc

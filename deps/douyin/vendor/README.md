@@ -34,7 +34,7 @@ vendor/crawlers/
 │       ├── utils.py             AwemeIdFetcher / BogusManager / TokenManager
 │       ├── xbogus.py            X-Bogus 签名算法（黑科技）
 │       ├── abogus.py            A-Bogus 签名算法（黑科技）
-│       └── config.yaml          ⚠️ 含默认 Cookie，运行时被 monkey patch 覆盖
+│       └── config.yaml          Cookie 值已清空，运行时由 monkey patch 注入
 └── utils/
     ├── __init__.py
     ├── api_exceptions.py
@@ -49,7 +49,7 @@ vendor/crawlers/
 
 ## Cookie 注入机制
 
-`vendor/crawlers/douyin/web/config.yaml` 自带一份默认 Cookie，但**会过期**。
+上游 `config.yaml` 自带示例 Cookie；本仓库快照已将它清空，避免公开仓库携带无关凭据。
 
 我们的 `scripts/downloader.py` 在 import 之后用 **monkey patch** 把 cookie 替换为用户当前的（从 `~/.agent-wiki/cookie/douyin.txt` 读取）：
 
@@ -58,7 +58,7 @@ from crawlers.douyin.web import web_crawler
 web_crawler.config["TokenManager"]["douyin"]["headers"]["Cookie"] = fresh_cookie
 ```
 
-**不改 vendor 源文件**，保持 sync 干净。
+除下文列出的安全修改外，不改 vendor 源文件。
 
 ---
 
@@ -66,8 +66,17 @@ web_crawler.config["TokenManager"]["douyin"]["headers"]["Cookie"] = fresh_cookie
 
 - **快照来源**：Evil0ctal/Douyin_TikTok_Download_API main 分支源码快照
 - **快照日期**：2026-06-26
+- **上游 commit**：`42784ffc83a72a516bfe952153ad7e2a3998d16c`
 - **上游 Git**：https://github.com/Evil0ctal/Douyin_TikTok_Download_API
 - **上游分支**：main
+
+快照中的 12 个非 `__init__.py` 文件已与该 commit 核对。以下三个文件保留 Agent-wiki 的本地安全修改，并在文件头标记：
+
+| 文件 | 本地修改 |
+|---|---|
+| `crawlers/douyin/web/config.yaml` | 清空上游示例 Cookie |
+| `crawlers/douyin/web/web_crawler.py` | 移除会输出 Cookie 的调试日志 |
+| `crawlers/douyin/web/xbogus.py` | 将上游示例标识符和 token 替换为占位符 |
 
 更新方式：
 
@@ -79,6 +88,12 @@ bash <repo-root>/deps/douyin/vendor-sync.sh
 
 同步脚本会**只复制相关文件**，并保留我们自己加的 `__init__.py` 和 README。
 
+同步会覆盖上述三个本地安全修改。提交 vendor 更新前必须重新应用安全修改、更新文件头和本页 commit，并运行：
+
+```bash
+python3 scripts/release_audit.py --history
+```
+
 ---
 
 ## License
@@ -89,7 +104,7 @@ bash <repo-root>/deps/douyin/vendor-sync.sh
 
 ## ⚠️ 注意事项
 
-1. **不要修改 vendor 内的 .py 文件**——会让 sync 出冲突
-2. `config.yaml` 里的 Cookie 是占位用，**实际不依赖**，由 monkey patch 覆盖
+1. 除上表记录的安全修改外，不要修改 vendor 内的 `.py` 文件
+2. `config.yaml` 里的 Cookie 为空，运行时由 monkey patch 注入
 3. `models.py` 用了 pydantic v2，与新版兼容
 4. 反风控失效时（视频解析返回 `{}`），先 sync vendor，再换 cookie

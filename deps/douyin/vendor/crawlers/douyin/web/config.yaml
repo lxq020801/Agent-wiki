@@ -1,3 +1,4 @@
+# Modified by Agent-wiki on 2026-07-05: cleared the upstream example Cookie value.
 TokenManager:
   douyin:
     headers:

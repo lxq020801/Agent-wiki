@@ -31,6 +31,7 @@
 # - https://github.com/Johnserf-Seed
 #
 # ==============================================================================
+# Modified by Agent-wiki on 2026-07-05: removed Cookie logging to avoid secret disclosure.
 
 
 import asyncio  # 异步I/O
