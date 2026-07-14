@@ -12,7 +12,7 @@
 
 ## 安全与许可
 
-- [ ] 运行 `python3 scripts/release_audit.py --history`；报告中不复制疑似秘密正文。
+- [ ] 运行 `python3.11 scripts/release_audit.py --history`；报告中不复制疑似秘密正文。
 - [ ] 确认 `~/.agent-wiki/`、真实 vault、Cookie、API Key、日志、缓存和本地配置不在 Git 跟踪列表中。
 - [ ] 对实际解析出的 Python 直接/传递依赖重新生成清单并复核许可证。
 - [ ] 人工处理 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 中标记为“需人工确认”的许可元数据。
@@ -21,11 +21,10 @@
 
 ## 验证
 
-- [ ] 运行 `python3 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py install/bootstrap.py scripts/release_audit.py`。
-- [ ] 运行 `python3 tests/test_p0_static.py`。
-- [ ] 运行 `python3 tests/test_douyin_image_post_static.py`。
-- [ ] 运行 `python3 tests/test_release_audit.py`。
-- [ ] 运行三个 `node --check chrome-extension/...` 命令，确认扩展脚本语法通过。
+- [ ] 运行 `python3.11 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py server/runtime_manager.py server/service_entry.py server/launcher.py install/bootstrap.py scripts/release_audit.py`。
+- [ ] 运行 P0、图文、runtime manager、runtime version protocol、CI integration 和 release audit 六组 Python 测试。
+- [ ] 运行 `node tests/test_extension_runtime_version.js` 和 `node tests/test_extension_contract.js`。
+- [ ] 对 background、runtime-version、popup 和 content 四个扩展脚本运行 `node --check`。
 
 ## 发布
 

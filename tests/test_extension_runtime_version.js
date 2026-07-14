@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 
 global.chrome = {
   runtime: {
-    getManifest: () => ({ version: '0.1.0' })
+    getManifest: () => ({ version: '0.1.1' })
   }
 };
 
@@ -13,7 +13,7 @@ const runtimeVersion = require('../chrome-extension/runtime-version.js');
 function currentRuntime(overrides = {}) {
   return {
     product: 'agent-wiki',
-    productVersion: '0.1.0',
+    productVersion: '0.1.1',
     protocolVersion: 1,
     sourceRevision: 'abcdef123456',
     buildId: 'src-1234567890abcdef',
@@ -27,7 +27,7 @@ assert.deepEqual(handshake, {
   type: 'handshake',
   client: 'agent-wiki-extension',
   product: 'agent-wiki',
-  version: '0.1.0',
+  version: '0.1.1',
   protocolVersion: 1
 });
 
@@ -41,7 +41,7 @@ const versionMismatch = runtimeVersion.evaluateRuntimeCompatibility({
 });
 assert.equal(versionMismatch.state, 'version_mismatch');
 assert.equal(versionMismatch.canOperate, false);
-assert.match(versionMismatch.message, /扩展 v0\.1\.0 与服务 v0\.0\.9 不一致/);
+assert.match(versionMismatch.message, /扩展 v0\.1\.1 与服务 v0\.0\.9 不一致/);
 
 const protocolMismatch = runtimeVersion.evaluateRuntimeCompatibility({
   runtime: currentRuntime({ protocolVersion: 2 })
@@ -58,10 +58,10 @@ assert.equal(missingVersion.canOperate, false);
 
 const oldService = runtimeVersion.evaluateRuntimeCompatibility({
   type: 'agent_ready',
-  version: '0.1.0'
+  version: '0.1.1'
 });
 assert.equal(oldService.state, 'legacy_server');
-assert.equal(oldService.runtime.productVersion, '0.1.0');
+assert.equal(oldService.runtime.productVersion, '0.1.1');
 assert.equal(runtimeVersion.canSendMessage('status_request', oldService), true);
 assert.equal(runtimeVersion.canSendMessage('task_request', oldService), false);
 

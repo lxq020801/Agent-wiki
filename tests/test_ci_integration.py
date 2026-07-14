@@ -153,7 +153,10 @@ class WebSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
         initial_status = await self.receive_json()
 
         self.assertEqual(ready["type"], "agent_ready")
-        self.assertEqual(ready["version"], "0.1.0")
+        self.assertEqual(ready["version"], "0.1.1")
+        self.assertEqual(ready["runtime"]["product"], "agent-wiki")
+        self.assertEqual(ready["runtime"]["productVersion"], "0.1.1")
+        self.assertEqual(ready["runtime"]["protocolVersion"], 1)
         self.assertTrue(
             {"config_sync", "extension_task_ingest", "task_status"}
             <= set(ready["capabilities"])
@@ -162,11 +165,33 @@ class WebSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tasks", initial_status["status"])
         self.assertEqual(self.server.runtime_root, self.runtime)
 
+        inbox_before = sorted((self.runtime / "inbox").glob("*.json"))
+        status_before = sorted((self.runtime / "status").glob("*.json"))
+        await self.websocket.send(json.dumps({
+            "type": "task_request",
+            "requestId": "integration-before-handshake",
+            "source": "extension_popup",
+            "taskType": "douyin_ingest",
+            "url": "https://www.douyin.com/video/7390000000000000000",
+        }))
+        blocked = await self.receive_json()
+        self.assertEqual(blocked["type"], "protocol_rejected")
+        self.assertEqual(blocked["reason"], "handshake_required")
+        self.assertEqual(sorted((self.runtime / "inbox").glob("*.json")), inbox_before)
+        self.assertEqual(sorted((self.runtime / "status").glob("*.json")), status_before)
+
         await self.websocket.send(json.dumps({
             "type": "handshake",
             "client": "agent-wiki-background",
-            "version": "0.1.0",
+            "product": "agent-wiki",
+            "version": "0.1.1",
+            "protocolVersion": 1,
         }))
+        handshake_ack = await self.receive_json()
+        self.assertEqual(handshake_ack["type"], "handshake_ack")
+        self.assertEqual(handshake_ack["compatibility"]["state"], "compatible")
+        self.assertTrue(handshake_ack["compatibility"]["canOperate"])
+
         await self.websocket.send(json.dumps({"type": "status_request"}))
         requested_status = await self.receive_json()
         self.assertEqual(requested_status["type"], "status_snapshot")
@@ -174,8 +199,6 @@ class WebSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("llm", requested_status["status"])
         self.assertNotIn("api_key", json.dumps(requested_status).lower())
 
-        inbox_before = sorted((self.runtime / "inbox").glob("*.json"))
-        status_before = sorted((self.runtime / "status").glob("*.json"))
         await self.websocket.send(json.dumps({
             "type": "task_request",
             "requestId": "integration-viral-rejected",

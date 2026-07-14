@@ -124,13 +124,15 @@ python3 scripts/ingest_url.py "https://v.douyin.com/..."
 
 ```bash
 python3.11 scripts/release_audit.py
-python3.11 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py server/runtime_manager.py server/service_entry.py install/bootstrap.py scripts/release_audit.py
+python3.11 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py server/runtime_manager.py server/service_entry.py server/launcher.py install/bootstrap.py scripts/release_audit.py
 python3.11 tests/test_runtime_manager.py
 python3.11 tests/test_p0_static.py
 python3.11 tests/test_douyin_image_post_static.py
 python3.11 tests/test_runtime_version_protocol.py
+python3.11 tests/test_ci_integration.py
 python3.11 tests/test_release_audit.py
 node tests/test_extension_runtime_version.js
+node tests/test_extension_contract.js
 node --check chrome-extension/background.js
 node --check chrome-extension/runtime-version.js
 node --check chrome-extension/popup/popup.js
@@ -140,7 +142,7 @@ node --check chrome-extension/content/douyin-current-video.js
 准备公开发布时，再运行包含 Git 历史的只读扫描：
 
 ```bash
-python3 scripts/release_audit.py --history
+python3.11 scripts/release_audit.py --history
 ```
 
 ## 更多文档

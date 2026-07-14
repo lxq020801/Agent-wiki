@@ -26,6 +26,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
@@ -51,8 +52,12 @@ jobs:
           deps/douyin/scripts/analyzer.py
           deps/douyin/scripts/config_loader.py
           deps/douyin/scripts/ingest.py
+          server/launcher.py
+          server/runtime_manager.py
+          server/service_entry.py
           server/websocket_server.py
           install/bootstrap.py
+          scripts/release_audit.py
           tests/test_ci_integration.py
 
       - name: Run P0 static checks
@@ -60,7 +65,7 @@ jobs:
           ALL_PROXY: http://127.0.0.1:9
           HTTP_PROXY: http://127.0.0.1:9
           HTTPS_PROXY: http://127.0.0.1:9
-          NO_PROXY: 127.0.0.1,localhost
+          NO_PROXY: 127.0.0.1,localhost,::1
         run: python tests/test_p0_static.py
 
       - name: Run Douyin image-post checks
@@ -68,22 +73,52 @@ jobs:
           ALL_PROXY: http://127.0.0.1:9
           HTTP_PROXY: http://127.0.0.1:9
           HTTPS_PROXY: http://127.0.0.1:9
-          NO_PROXY: 127.0.0.1,localhost
+          NO_PROXY: 127.0.0.1,localhost,::1
         run: python tests/test_douyin_image_post_static.py
+
+      - name: Run runtime manager checks
+        env:
+          ALL_PROXY: http://127.0.0.1:9
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          NO_PROXY: 127.0.0.1,localhost,::1
+        run: python tests/test_runtime_manager.py
+
+      - name: Run runtime version protocol checks
+        env:
+          ALL_PROXY: http://127.0.0.1:9
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          NO_PROXY: 127.0.0.1,localhost,::1
+        run: python tests/test_runtime_version_protocol.py
 
       - name: Run isolated integration checks
         env:
           ALL_PROXY: http://127.0.0.1:9
           HTTP_PROXY: http://127.0.0.1:9
           HTTPS_PROXY: http://127.0.0.1:9
-          NO_PROXY: 127.0.0.1,localhost
+          NO_PROXY: 127.0.0.1,localhost,::1
         run: python tests/test_ci_integration.py
+
+      - name: Run release audit checks
+        env:
+          ALL_PROXY: http://127.0.0.1:9
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          NO_PROXY: 127.0.0.1,localhost,::1
+        run: |
+          python tests/test_release_audit.py
+          python scripts/release_audit.py
+          python scripts/release_audit.py --history
 
       - name: Check Chrome extension JavaScript
         run: |
           node --check chrome-extension/background.js
+          node --check chrome-extension/runtime-version.js
           node --check chrome-extension/popup/popup.js
           node --check chrome-extension/content/douyin-current-video.js
 
-      - name: Run extension message contract checks
-        run: node tests/test_extension_contract.js
+      - name: Run extension protocol and message contract checks
+        run: |
+          node tests/test_extension_runtime_version.js
+          node tests/test_extension_contract.js

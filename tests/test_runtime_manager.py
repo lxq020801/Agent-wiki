@@ -305,6 +305,40 @@ class RuntimeManagerTests(unittest.TestCase):
         self.assertIn("nothing was stopped", result.lines[0])
         self.assertEqual(spawned, [])
 
+    def test_start_does_not_report_ready_after_managed_process_exits(self) -> None:
+        spawned: list[list[str]] = []
+        fake_process = FakeProcess(43210)
+        inspections = 0
+
+        def spawn(command, _cwd, _env, _log):
+            spawned.append(list(command))
+            return fake_process
+
+        def inspect(pid: int):
+            nonlocal inspections
+            inspections += 1
+            if inspections == 1:
+                return ProcessSnapshot(
+                    pid,
+                    "Mon Jul 14 10:00:00 2026",
+                    " ".join(spawned[0]),
+                )
+            return None
+
+        port_results = iter([False, True])
+        controller = self.controller(
+            spawner=spawn,
+            inspector=inspect,
+            port_probe=lambda _host, _port: next(port_results),
+        )
+
+        result = controller.start(ready_timeout=1)
+
+        self.assertEqual(result.code, 2)
+        self.assertIn("exited during startup", result.lines[0])
+        self.assertFalse(controller.state_path.exists())
+        self.assertFalse(controller.pid_path.exists())
+
     def test_server_settings_reject_non_loopback_host(self) -> None:
         self.runtime.mkdir()
         config = self.runtime / "config.toml"

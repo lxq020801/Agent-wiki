@@ -172,6 +172,13 @@ class ReleaseAuditTests(unittest.TestCase):
         self.assertEqual(payload["nearest_release_tag"], "v0.1.0")
         self.assertEqual(payload["exact_head_release_tags"], [])
 
+    def test_ci_fetches_full_history_without_persisting_credentials(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertIn("python scripts/release_audit.py --history", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

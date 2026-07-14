@@ -285,12 +285,11 @@ body[data-view="settings-detail-view"] #open-settings {
 }
 
 .runtime-details dd {
-  overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 h2,

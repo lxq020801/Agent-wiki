@@ -39,6 +39,8 @@ class FakeWebSocket {
 
 async function main() {
   const stored = {};
+  const runtimeVersionPath = path.resolve(__dirname, '..', 'chrome-extension', 'runtime-version.js');
+  const backgroundPath = path.resolve(__dirname, '..', 'chrome-extension', 'background.js');
   const chrome = {
     alarms: {
       create() {},
@@ -46,6 +48,7 @@ async function main() {
     },
     notifications: { create() {} },
     runtime: {
+      getManifest: () => ({ version: '0.1.1' }),
       lastError: null,
       onInstalled: extensionEvent(),
       onMessage: extensionEvent(),
@@ -67,7 +70,8 @@ async function main() {
       sendMessage() {}
     }
   };
-  const context = vm.createContext({
+  let context;
+  context = vm.createContext({
     chrome,
     console,
     Date,
@@ -77,10 +81,16 @@ async function main() {
     WebSocket: FakeWebSocket,
     clearInterval,
     clearTimeout,
+    importScripts(script) {
+      assert.equal(script, 'runtime-version.js');
+      vm.runInContext(fs.readFileSync(runtimeVersionPath, 'utf8'), context, {
+        filename: runtimeVersionPath
+      });
+    },
     setInterval,
     setTimeout
   });
-  const backgroundPath = path.resolve(__dirname, '..', 'chrome-extension', 'background.js');
+  context.self = context;
   vm.runInContext(fs.readFileSync(backgroundPath, 'utf8'), context, { filename: backgroundPath });
 
   vm.runInContext('connectWebSocket()', context);
@@ -91,8 +101,38 @@ async function main() {
   assert.deepEqual(socket.sent[0], {
     type: 'handshake',
     client: 'agent-wiki-background',
-    version: '0.1.0'
+    product: 'agent-wiki',
+    version: '0.1.1',
+    protocolVersion: 1
   });
+
+  const sentBeforeHandshake = vm.runInContext(
+    `sendToAgent({ type: 'task_request', requestId: 'blocked-before-handshake' })`,
+    context
+  );
+  assert.equal(sentBeforeHandshake, false);
+  assert.equal(socket.sent.length, 1);
+
+  const compatibleRuntime = {
+    product: 'agent-wiki',
+    productVersion: '0.1.1',
+    protocolVersion: 1,
+    sourceRevision: 'abcdef123456',
+    buildId: 'src-1234567890abcdef',
+    deployment: { state: 'current', code: 'source_checkout' }
+  };
+  vm.runInContext(`handleAgentMessage(${JSON.stringify({
+    type: 'handshake_ack',
+    runtime: compatibleRuntime,
+    compatibility: {
+      state: 'compatible',
+      canOperate: true,
+      clientVersion: '0.1.1',
+      clientProtocolVersion: 1
+    }
+  })})`, context);
+  assert.equal(stored.runtimeCompatibility.canOperate, true);
+  assert.equal(stored.agentRuntime.productVersion, '0.1.1');
 
   const candidate = {
     url: 'https://www.douyin.com/video/7390000000000000000',
@@ -137,6 +177,7 @@ async function main() {
   vm.runInContext(`handleAgentMessage(${JSON.stringify({
     type: 'status_snapshot',
     status: {
+      runtime: compatibleRuntime,
       llm: { state: 'ready', provider: 'doubao' },
       videoAnalysis: { modelPreset: 'lite', chunkConcurrency: 2 },
       tasks: { taskConcurrency: 3 }

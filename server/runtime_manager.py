@@ -713,12 +713,16 @@ class ServiceController:
 
         deadline = self.clock() + ready_timeout
         while self.clock() < deadline:
+            current_snapshot = self.inspector(state.pid)
+            if current_snapshot is None:
+                self._remove_state()
+                return OperationResult(2, (f"service exited during startup; inspect {self.log_path}",))
+            if not process_matches_state(state, current_snapshot):
+                self._remove_state()
+                return OperationResult(2, ("service identity changed during startup; no signal was sent",))
             if self.port_probe(settings.host, settings.port):
                 lines = [*warnings, f"service started (PID {state.pid})", f"log: {self.log_path}"]
                 return OperationResult(0, tuple(lines), _public_state(state))
-            if self.inspector(state.pid) is None:
-                self._remove_state()
-                return OperationResult(2, (f"service exited during startup; inspect {self.log_path}",))
             self.sleeper(0.1)
 
         stopped = self.stop(timeout=2.0)
