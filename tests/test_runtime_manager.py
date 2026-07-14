@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -27,7 +28,10 @@ from server.runtime_manager import (  # noqa: E402
     ServiceController,
     ServiceState,
     cache_report,
+    find_python311,
     main,
+    missing_python_modules,
+    process_matches_state,
     read_server_settings,
 )
 from server.service_entry import main as service_entry_main  # noqa: E402
@@ -84,6 +88,7 @@ class RuntimeManagerTests(unittest.TestCase):
             project_root=str(self.project.resolve()),
             entrypoint=str(controller.entrypoint),
             python=str(self.python),
+            python_identity=str(self.python.resolve()),
             host="127.0.0.1",
             port=8765,
             source_version="v0.1.0-test",
@@ -102,6 +107,9 @@ class RuntimeManagerTests(unittest.TestCase):
         port_results = iter([False, True])
         spawned: list[list[str]] = []
         fake_process = FakeProcess(43210)
+        execution_python = self.root / "control-venv" / "bin" / "python"
+        execution_python.parent.mkdir(parents=True)
+        execution_python.symlink_to(self.python)
 
         def spawn(command, _cwd, _env, _log):
             spawned.append(list(command))
@@ -112,6 +120,7 @@ class RuntimeManagerTests(unittest.TestCase):
             return ProcessSnapshot(pid, "Mon Jul 14 10:00:00 2026", command)
 
         controller = self.controller(
+            python_finder=lambda _root: execution_python,
             port_probe=lambda _host, _port: next(port_results),
             spawner=spawn,
             inspector=inspect,
@@ -128,11 +137,82 @@ class RuntimeManagerTests(unittest.TestCase):
         self.assertEqual(metadata["pid"], 43210)
         self.assertEqual(metadata["source_version"], "v0.1.0-3-gabcdef")
         self.assertEqual(metadata["source_commit"], "b" * 40)
+        self.assertEqual(metadata["python"], str(execution_python))
+        self.assertEqual(metadata["python_identity"], str(self.python))
         self.assertEqual(controller.pid_path.read_text(encoding="ascii"), "43210\n")
         self.assertEqual(stat.S_IMODE(controller.state_path.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(controller.pid_path.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(controller.log_path.stat().st_mode), 0o600)
         self.assertFalse(fake_process.terminated)
+        self.assertTrue(controller.status().running)
+        state = ServiceState.from_mapping(metadata)
+        base_command = (
+            f"{execution_python.resolve()} {state.entrypoint} "
+            f"--host {state.host} --port {state.port}"
+        )
+        self.assertFalse(
+            process_matches_state(
+                state,
+                ProcessSnapshot(state.pid, state.process_start_token, base_command),
+            )
+        )
+
+    def test_find_python311_preserves_real_symlink_venv_and_its_site_packages(self) -> None:
+        venv_root = self.project / "deps" / "douyin" / ".venv"
+        subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", "--symlinks", str(venv_root)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        venv_python = venv_root / "bin" / "python"
+        self.assertTrue(venv_python.is_symlink())
+
+        site_packages = Path(
+            subprocess.run(
+                [str(venv_python), "-c", "import site; print(site.getsitepackages()[0])"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+        module_name = "agent_wiki_venv_probe"
+        (site_packages / f"{module_name}.py").write_text("VALUE = 'venv-site-packages'\n", encoding="utf-8")
+        distribution = site_packages / "agent_wiki_venv_probe-1.0.dist-info"
+        distribution.mkdir()
+        (distribution / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: agent-wiki-venv-probe\nVersion: 1.0\n",
+            encoding="utf-8",
+        )
+
+        found = find_python311(self.project)
+
+        self.assertEqual(found, venv_python.absolute())
+        self.assertNotEqual(found, venv_python.resolve())
+        self.assertEqual(missing_python_modules(found, [module_name]), [])
+        result = subprocess.run(
+            [
+                str(found),
+                "-c",
+                f"import importlib.metadata, json, sys, {module_name}; "
+                f"print(json.dumps([sys.prefix, {module_name}.VALUE, "
+                "importlib.metadata.version('agent-wiki-venv-probe')]))",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        prefix, value, distribution_version = json.loads(result.stdout)
+        self.assertEqual(Path(prefix), venv_root)
+        self.assertEqual(value, "venv-site-packages")
+        self.assertEqual(distribution_version, "1.0")
+
+        resolved_result = subprocess.run(
+            [str(found.resolve()), "-c", f"import {module_name}"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(resolved_result.returncode, 0)
 
     def test_stop_refuses_pid_that_belongs_to_unrelated_process(self) -> None:
         signals: list[tuple[int, int]] = []

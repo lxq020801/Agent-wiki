@@ -30,7 +30,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence, TextIO
 
 
 SERVICE_ID = "agent-wiki-control-plane"
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 CONTROL_MODULES = ("websockets",)
@@ -93,6 +93,7 @@ class ServiceState:
     project_root: str
     entrypoint: str
     python: str
+    python_identity: str
     host: str
     port: int
     source_version: str
@@ -111,6 +112,7 @@ class ServiceState:
             "project_root",
             "entrypoint",
             "python",
+            "python_identity",
             "host",
             "port",
             "source_version",
@@ -138,6 +140,7 @@ class ServiceState:
                 state.project_root,
                 state.entrypoint,
                 state.python,
+                state.python_identity,
                 state.started_at,
                 state.log_path,
             )
@@ -276,6 +279,11 @@ def python_version_info(executable: Path) -> Optional[tuple[int, int, int]]:
     return parts if result.returncode == 0 and len(parts) == 3 else None
 
 
+def _absolute_path_without_resolving(path: Path) -> Path:
+    """Return an absolute execution path while preserving its final symlink."""
+    return Path(os.path.abspath(os.fspath(path.expanduser())))
+
+
 def find_python311(project_root: Path) -> Optional[Path]:
     raw_candidates: list[Optional[str]] = [
         str(project_root / "deps" / "douyin" / ".venv" / "bin" / "python"),
@@ -289,16 +297,17 @@ def find_python311(project_root: Path) -> Optional[Path]:
     for raw in raw_candidates:
         if not raw:
             continue
-        candidate = Path(raw).expanduser()
+        candidate = _absolute_path_without_resolving(Path(raw))
         if not candidate.exists():
             continue
-        resolved = candidate.resolve()
-        if resolved in seen:
+        identity = candidate.resolve()
+        if identity in seen:
             continue
-        seen.add(resolved)
-        version = python_version_info(resolved)
+        version = python_version_info(candidate)
+        if version:
+            seen.add(identity)
         if version and version >= (3, 11, 0):
-            return resolved
+            return candidate
     return None
 
 
@@ -429,6 +438,17 @@ def _path_token_matches(raw: str, expected: Path) -> bool:
         return False
 
 
+def _python_token_matches(raw: str, state: ServiceState) -> bool:
+    actual = _absolute_path_without_resolving(Path(raw))
+    expected = _absolute_path_without_resolving(Path(state.python))
+    if actual != expected:
+        return False
+    try:
+        return actual.resolve() == Path(state.python_identity)
+    except (OSError, RuntimeError):
+        return False
+
+
 def process_matches_state(state: ServiceState, snapshot: ProcessSnapshot) -> bool:
     if snapshot.pid != state.pid or snapshot.start_token != state.process_start_token:
         return False
@@ -438,7 +458,7 @@ def process_matches_state(state: ServiceState, snapshot: ProcessSnapshot) -> boo
         return False
     if len(tokens) < 2:
         return False
-    if not _path_token_matches(tokens[0], Path(state.python)):
+    if not _python_token_matches(tokens[0], state):
         return False
     if not _path_token_matches(tokens[1], Path(state.entrypoint)):
         return False
@@ -520,6 +540,14 @@ class ServiceController:
             raise StateError("service metadata entrypoint does not belong to its recorded source")
         if Path(state.log_path).expanduser().resolve() != self.log_path:
             raise StateError("service metadata log path does not belong to this runtime")
+        python = _absolute_path_without_resolving(Path(state.python))
+        if not Path(state.python).is_absolute() or python != Path(state.python):
+            raise StateError("service metadata Python execution path is not canonical")
+        try:
+            if python.resolve() != Path(state.python_identity):
+                raise StateError("service metadata Python identity does not match its execution path")
+        except (OSError, RuntimeError) as exc:
+            raise StateError("service metadata Python execution path cannot be verified") from exc
         if not _is_loopback_host(state.host):
             raise StateError("service metadata contains a non-loopback host")
         return state
@@ -660,7 +688,8 @@ class ServiceController:
             process_start_token=snapshot.start_token,
             project_root=str(self.project_root),
             entrypoint=str(self.entrypoint),
-            python=str(python.resolve()),
+            python=str(_absolute_path_without_resolving(python)),
+            python_identity=str(python.resolve()),
             host=settings.host,
             port=settings.port,
             source_version=str(version.get("version") or "unknown"),
