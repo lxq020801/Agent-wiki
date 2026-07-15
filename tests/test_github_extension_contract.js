@@ -78,7 +78,7 @@ assert.match(js, /homeSummary\.textContent = login \? `@\$\{login\}` : '已登�
 assert.match(js, /copy\.textContent = login \? `@\$\{login\}` : '已登录'/);
 assert.match(js, /case 'handshake_ack':[\s\S]*?requestStatus\(\);[\s\S]*?requestGithubValidationAfterHandshake\(compatibility\)/);
 assert.match(js, /ws\.onopen = \(\) => \{[\s\S]*?githubValidationRequestedForConnection = false/);
-assert.match(js, /function applyGithubStatus[\s\S]*status\.state === 'unchecked'/);
+assert.match(js, /function applyGithubStatus[\s\S]*\['checking', 'unchecked', 'unavailable'\]\.includes\(status\.state\)/);
 assert.match(js, /status\.activeAuthorization/);
 assert.match(js, /status\.activeImport/);
 assert.match(js, /status\.recentImports/);
@@ -104,7 +104,7 @@ const behaviorContext = vm.createContext({
   WebSocket: { OPEN: 1 },
   console: { log() {}, error() {} },
   document: {
-    body: { dataset: { view: 'github-view' } },
+    body: { dataset: { view: 'home-view' } },
     addEventListener() {}
   },
   setTimeout,
@@ -128,6 +128,57 @@ assert.equal(sentMessages.length, 1, 'handshake must trigger at most one GitHub 
 assert.equal(sentMessages[0].type, 'github_status_request');
 assert.equal(sentMessages[0].validate, true);
 
+const githubElements = new Proxy({}, {
+  get(target, id) {
+    if (!target[id]) {
+      target[id] = {
+        className: '',
+        textContent: '',
+        title: '',
+        hidden: false,
+        disabled: false,
+        checked: false,
+        indeterminate: false,
+        max: 0,
+        value: 0,
+        replaceChildren() {},
+        appendChild() {}
+      };
+    }
+    return target[id];
+  }
+});
+behaviorContext.document.getElementById = id => githubElements[id];
+vm.runInContext(`handleAgentMessage({
+  type: 'github_status',
+  result: {
+    configured: true,
+    authenticated: true,
+    account: { login: 'existing-user' },
+    settings: { autoStar: true }
+  }
+})`, behaviorContext);
+assert.equal(githubElements['home-github-summary'].textContent, '@existing-user');
+assert.equal(githubElements['home-github-dot'].className, 'status-dot inline-dot online');
+assert.equal(githubElements['github-account-copy'].textContent, '@existing-user');
+
+vm.runInContext(`handleAgentMessage({
+  type: 'github_status',
+  result: { configured: true, authenticated: false, state: 'ready' }
+})`, behaviorContext);
+assert.equal(githubElements['home-github-summary'].textContent, '未登录');
+assert.equal(githubElements['home-github-dot'].className, 'status-dot inline-dot warning');
+assert.equal(githubElements['github-login'].hidden, false);
+assert.equal(githubElements['github-logout'].hidden, true);
+
+vm.runInContext(`applyGithubStatus({
+  configured: true,
+  authenticated: false,
+  state: 'unavailable'
+})`, behaviorContext);
+assert.equal(githubElements['home-github-summary'].textContent, '待检查');
+assert.equal(githubElements['github-account-copy'].textContent, 'Agent 未连接，暂无法检查 GitHub');
+
 sentMessages.length = 0;
 vm.runInContext(`requestGithubImportStatus('batch-restore')`, behaviorContext);
 assert.equal(sentMessages[0].type, 'github_import_status');
@@ -143,11 +194,13 @@ assert.equal(recoveredViews[0].text, 'openai/running：正在入库');
 assert.equal(recoveredViews[1].text, 'openai/failed：mock failure');
 
 sentMessages.length = 0;
-behaviorContext.document.body.dataset.view = 'home-view';
+behaviorContext.document.body.dataset.view = 'settings-detail-view';
 vm.runInContext(`
   githubValidationRequestedForConnection = false;
   requestGithubValidationAfterHandshake({ canOperate: true });
 `, behaviorContext);
-assert.equal(sentMessages.length, 0, 'handshake must not validate GitHub while another view is active');
+assert.equal(sentMessages.length, 1, 'handshake must validate GitHub regardless of the restored view');
+assert.equal(sentMessages[0].type, 'github_status_request');
+assert.equal(sentMessages[0].validate, true);
 
 console.log('GitHub extension contract checks passed');

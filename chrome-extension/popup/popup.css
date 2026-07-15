@@ -116,10 +116,11 @@ button {
 
 .topbar {
   flex: 0 0 auto;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  grid-template-rows: auto auto;
+  align-items: center;
+  gap: 7px 0;
   min-width: 0;
   padding: 10px 12px 9px;
   background: var(--surface);
@@ -127,25 +128,29 @@ button {
 }
 
 .topbar-copy {
-  display: flex;
-  min-width: 0;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 7px;
+  display: contents;
 }
 
 .topbar-title-row {
   display: flex;
+  grid-column: 2;
+  grid-row: 1;
+  justify-content: center;
   min-width: 0;
+  text-align: center;
 }
 
 .topbar-title-row h1 {
-  flex: 0 0 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .status-strip {
   display: grid;
+  grid-column: 1 / -1;
+  grid-row: 2;
   grid-template-columns: repeat(4, minmax(0, 1fr));
+  width: 100%;
   min-width: 0;
   gap: 6px;
 }
@@ -156,6 +161,11 @@ button {
   align-items: center;
   min-width: 0;
   gap: 3px;
+}
+
+.topbar > .icon-button {
+  grid-column: 3;
+  grid-row: 1;
 }
 
 .status-indicator b,

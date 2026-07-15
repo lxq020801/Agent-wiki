@@ -449,11 +449,11 @@ function requestGithubImportStatus(batchId) {
 function requestGithubValidationAfterHandshake(compatibility) {
   if (
     githubValidationRequestedForConnection ||
-    !compatibility?.canOperate ||
-    document.body.dataset.view !== 'github-view'
+    !compatibility?.canOperate
   ) return false;
-  githubValidationRequestedForConnection = true;
-  return requestGithubStatus({ validate: true });
+  const sent = requestGithubStatus({ validate: true });
+  if (sent) githubValidationRequestedForConnection = true;
+  return sent;
 }
 
 function derivedActionKey(taskId, candidateId) {
@@ -706,7 +706,9 @@ function applyStatusSnapshot(status) {
   applyVideoStatus(status.videoAnalysis || {});
   applyCookieStatus(status.cookie || {});
   applyTaskStatus(status.tasks || {});
-  applyGithubStatus(status.github || {});
+  if (status.github && typeof status.github === 'object') {
+    applyGithubStatus(status.github);
+  }
 }
 
 function applyVaultStatus(status) {
@@ -793,6 +795,7 @@ function githubConfigured(status) {
 function applyGithubStatus(status) {
   const configured = githubConfigured(status);
   const authenticated = Boolean(status.authenticated);
+  const pending = ['checking', 'unchecked', 'unavailable'].includes(status.state);
   githubIsConfigured = configured;
   githubIsAuthenticated = authenticated;
   const account = status.account || {};
@@ -810,18 +813,20 @@ function applyGithubStatus(status) {
     homeDot.className = 'status-dot inline-dot online';
     accountDot.className = 'status-dot inline-dot online';
     copy.textContent = login ? `@${login}` : '已登录';
+  } else if (pending) {
+    homeSummary.textContent = '待检查';
+    homeSummary.title = '等待 Agent 确认 GitHub 登录状态';
+    homeDot.className = 'status-dot inline-dot warning';
+    accountDot.className = 'status-dot inline-dot warning';
+    copy.textContent = status.state === 'unavailable'
+      ? 'Agent 未连接，暂无法检查 GitHub'
+      : '正在检查 GitHub 登录状态';
   } else if (!configured) {
     homeSummary.textContent = '未登录';
     homeSummary.title = '未登录';
     homeDot.className = 'status-dot inline-dot offline';
     accountDot.className = 'status-dot inline-dot offline';
     copy.textContent = '未登录 · GitHub App 尚未配置';
-  } else if (status.state === 'unchecked') {
-    homeSummary.textContent = '未登录';
-    homeSummary.title = '未登录';
-    homeDot.className = 'status-dot inline-dot warning';
-    accountDot.className = 'status-dot inline-dot warning';
-    copy.textContent = '打开页面后检查 GitHub 登录状态';
   } else {
     homeSummary.textContent = '未登录';
     homeSummary.title = '未登录';
@@ -860,7 +865,14 @@ function applyGithubStatus(status) {
     clearGithubAuthFlow();
   }
 
-  if (status.message && !authenticated && !githubAuthFlow) {
+  if (pending && !githubAuthFlow) {
+    showHint(
+      'github-hint',
+      status.state === 'unavailable' ? '连接 Agent 后将自动检查 GitHub 登录状态' : '正在检查 GitHub 登录状态',
+      'warning',
+      { persist: true }
+    );
+  } else if (status.message && !authenticated && !githubAuthFlow) {
     showHint('github-hint', status.message, configured ? 'warning' : 'error', { persist: true });
   } else if (authenticated && !githubAuthFlow) {
     showHint('github-hint', login ? `GitHub 已连接：@${login}` : 'GitHub 已连接', 'success', { persist: true });
@@ -2418,6 +2430,11 @@ function updateConnectionStatus(connected) {
   if (connected && !runtimeCompatibility) {
     setStatus('agent', '正在校验版本', 'warning');
     document.getElementById('agent-settings-copy').textContent = '本地服务已连接，正在校验版本';
+    applyGithubStatus({
+      state: 'checking',
+      configured: githubIsConfigured,
+      authenticated: false
+    });
   } else if (!connected) {
     setStatus('agent', '未连接', 'offline');
     document.getElementById('agent-settings-copy').textContent = '本地 Agent 未连接';
@@ -2425,6 +2442,11 @@ function updateConnectionStatus(connected) {
     document.getElementById('runtime-protocol-version').textContent = '待校验';
     document.getElementById('runtime-source-version').textContent = '待校验';
     showHint('runtime-version-hint', '', '');
+    applyGithubStatus({
+      state: 'unavailable',
+      configured: githubIsConfigured,
+      authenticated: false
+    });
   }
   refreshCookieStatusFromStorage();
 }
