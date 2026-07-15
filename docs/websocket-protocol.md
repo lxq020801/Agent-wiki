@@ -72,9 +72,9 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 
 旧版 flat 字段仍兼容读取：`provider/apiKey/model/strategyModel/taskConcurrency/serverTaskConcurrency/videoChunkConcurrency/endpoint`。
 
-### `vault_discover`
+### `vault_discover`（旧扩展兼容）
 
-让 Agent 按知识库发现协议识别 vault。`hint` 可为空。
+旧消息不再自动识别、持久化或接管已有 vault，只返回应升级到正式知识库生命周期 API 的兼容状态。新 UI 使用 `vault_scan`。
 
 ```json
 {
@@ -83,10 +83,9 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 }
 ```
 
-### `vault_pick`
+### `vault_pick`（旧扩展兼容）
 
-让本地 Agent 弹系统文件夹选择器，拿到真实绝对路径后校验并写入配置。
-当前只支持 macOS。
+旧消息不再把任意文件夹直接写成当前知识库。新 UI 通过系统选择器取得父目录后，把绝对路径作为 `vault_create.data.parentDirectory` 或 `vault_migration_preview.data.parentDirectory` 发送。
 
 ```json
 { "type": "vault_pick" }
@@ -432,9 +431,65 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 }
 ```
 
-### `vault_status` / `model_status` / `config_synced` / `cookie_synced`
+### 知识库生命周期消息
 
-分别确认知识库识别、模型健康检查、配置落盘、Cookie 落盘。
+知识库生命周期使用统一响应类型 `vault_lifecycle_status`，请求名和输入如下：
+
+| 请求 `type` | `data` 必填字段 | `data` 可选字段 | 含义 |
+| --- | --- | --- | --- |
+| `vault_scan` | 无 | `userName`, `parentHints[]` | 扫描 Obsidian 根位置和带身份标记的 Agent-wiki 库；不会切换到普通旧库 |
+| `vault_create` | `userName`，以及 `obsidianRoot` / `parentDirectory` 二选一 | 无 | 在所选父目录下创建 `<userName>/` 空白新库并切换 |
+| `vault_switch` | `vaultPath` | `expectedVaultId` | 只切换到身份标记有效的 Agent-wiki 库；普通旧库返回 `migration_required` |
+| `vault_candidate_confirm` | `candidateId`, `action` | `userName`, `obsidianRoot`, `parentDirectory` | 确认扫描候选；`action` 为 `create`、`switch` 或 `migrate` |
+| `vault_migration_preview` | `sourcePath`, `userName`，以及 `obsidianRoot` / `parentDirectory` 二选一 | 无 | 生成复制计划、内容摘要和冲突清单，不写目标、不切换 |
+| `vault_migration_execute` | `migrationId` | 无 | 重新核对来源摘要，复制到 staging，逐文件校验后才切换 |
+| `vault_migration_rollback` | `migrationId` | 无 | 回退当前库选择；来源和已迁移目标都保留 |
+
+`obsidianRoot` 与 `parentDirectory` 在后端都表示新知识库目录的直接父目录；字段名区分自动扫描到的 Obsidian 根位置和用户手动选择的父目录。二者不能同时出现。新库路径由后端规范化为绝对路径 `<父目录>/<userName>`，名称校验和目录名拼接只在生命周期模块中完成。
+
+统一回包：
+
+```json
+{
+  "type": "vault_lifecycle_status",
+  "requestId": "vault-...",
+  "result": {
+    "contractVersion": 1,
+    "ok": true,
+    "operation": "create",
+    "state": "created",
+    "requiresUserAction": false,
+    "message": "A new empty Agent-wiki vault was created and activated.",
+    "activeVault": {
+      "vaultId": "5e9c...",
+      "userName": "Alice",
+      "vaultPath": "/Users/alice/Obsidian/Alice",
+      "identityMarker": ".agent-wiki-vault.json"
+    },
+    "obsidianRoots": [],
+    "vaultCandidates": [],
+    "migration": null
+  },
+  "timestamp": "2026-07-15T10:00:00"
+}
+```
+
+所有响应固定包含 `contractVersion`、`ok`、`operation`、`state`、`requiresUserAction`、`message`、`activeVault`、`obsidianRoots`、`vaultCandidates`、`migration`。失败时可额外包含稳定的 `errorCode`。
+
+字段边界：
+
+- `obsidianRoots[].obsidianRoot` 是新库的父目录；`suggestedVaultPath` 是按当前 `userName` 计算的建议绝对路径。
+- `vaultCandidates[].vaultPath` 是具体知识库目录，不是 Obsidian 根目录。
+- `activeVault.vaultId` 与库根目录的 `.agent-wiki-vault.json` 一致；安全重连同时匹配 `userName` 和 `vaultId`。
+- `vaultCandidates[].kind` 为 `agent_wiki_vault`、`existing_obsidian_vault` 或 `obsidian_root`；普通旧库只支持 `migrate`，不能直接 `switch`。
+- 同一名称和身份出现多个路径时返回 `state = "ambiguous"`，不自动切换；UI 用 `vault_candidate_confirm` 确认一个候选。
+- `migration` 包含 `migrationId`、`sourceVault`、`targetVault`、`copyMode`、`sourcePreserved`、`fileCount`、`directoryCount`、`totalBytes`、`sourceDigest`、`excludedNames`、`conflicts`、`canExecute` 与 `rollbackAvailable`。
+
+常见 `state` 包括 `first_use`、`root_selection_required`、`root_ready`、`created`、`ready`、`disconnected`、`reconnected`、`ambiguous`、`switched`、`migration_required`、`migration_ready`、`migration_conflict`、`migration_stale`、`migrated`、`rollback_blocked`、`rolled_back` 和 `error`。
+
+空白初始化只创建 `index.md`、`raw/`、`知识资产/知识入库/` 和 `.agent-wiki-vault.json`；不复制旧内容、仓库 `rules/` / `templates/` / `SCHEMA.md`，不创建 `.obsidian/` 或 `.git/`。迁移复制用户内容，但任何层级的 `.obsidian/`、`.git/` 和来源身份标记都不读取或复制；目标使用新的唯一身份，避免在保留来源副本时产生重复身份。
+
+旧响应 `vault_status` 仅保留给旧扩展兼容。新 UI 使用上述正式生命周期消息。`model_status`、`config_synced` 和 `cookie_synced` 分别确认模型健康检查、配置落盘和 Cookie 落盘。
 
 ## GitHub 联动消息
 

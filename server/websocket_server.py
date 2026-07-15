@@ -24,10 +24,14 @@ PROJECT_ROOT = SERVER_SOURCE.parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "deps" / "douyin" / "scripts"))
 
-from install.vault_discovery import (
-    discover_vault,
-    score_vault,
-    write_vault_path_to_config,
+# Keep discover_vault importable for legacy no-fallback guards; lifecycle code
+# never calls it to select or persist an existing vault.
+from install.vault_discovery import discover_vault, score_vault
+from install.vault_lifecycle import (
+    VAULT_LIFECYCLE_REQUEST_TYPES,
+    VAULT_LIFECYCLE_RESPONSE_TYPE,
+    VaultLifecycleManager,
+    dispatch_vault_lifecycle,
 )
 from server.github_service import GitHubService, GitHubServiceError
 from video_sampling import normalize_fps_mode
@@ -60,7 +64,7 @@ CONTROL_MUTATION_TYPES = {
     "github_refresh_check",
     "github_refresh_confirm",
     "github_refresh_cancel",
-}
+} | set(VAULT_LIFECYCLE_REQUEST_TYPES)
 GITHUB_AUTH_RETRYABLE_ERRORS = {
     "network_error",
     "rate_limited",
@@ -563,15 +567,6 @@ def _is_agent_plan_endpoint_text(endpoint):
     return str(endpoint or "").rstrip("/").endswith("/api/plan/v3")
 
 
-def _candidate_payload(candidate):
-    return {
-        'score': candidate.score,
-        'path': candidate.path,
-        'source': candidate.source,
-        'reasons': candidate.reasons,
-    }
-
-
 def _origin_allowed(websocket):
     headers = getattr(websocket, "request_headers", None)
     if not headers:
@@ -658,6 +653,7 @@ class LibrarianServer:
                     'config_sync',
                     'cookie_sync',
                     'vault_discovery',
+                    'vault_lifecycle_v1',
                     'model_health_check',
                     'extension_task_ingest',
                     'task_status',
@@ -782,6 +778,20 @@ class LibrarianServer:
                 'type': 'status_snapshot',
                 'status': status,
                 'timestamp': datetime.now().isoformat()
+            }, ensure_ascii=False))
+
+        elif msg_type in VAULT_LIFECYCLE_REQUEST_TYPES:
+            result = await asyncio.to_thread(
+                dispatch_vault_lifecycle,
+                self.vault_lifecycle_manager(),
+                msg_type,
+                msg.get('data') or {},
+            )
+            await websocket.send(json.dumps({
+                'type': VAULT_LIFECYCLE_RESPONSE_TYPE,
+                'requestId': msg.get('requestId'),
+                'result': result,
+                'timestamp': datetime.now().isoformat(),
             }, ensure_ascii=False))
 
         elif msg_type == 'vault_discover':
@@ -2040,15 +2050,6 @@ class LibrarianServer:
             if selected_vault is None:
                 raise ValueError('vaultPath must be an existing directory outside .obsidian')
             vault_path = str(selected_vault)
-        if not vault_path:
-            discovery = discover_vault(
-                config_path=config_path,
-                cwd=PROJECT_ROOT,
-                runtime_root=self.runtime_root,
-            )
-            if discovery.selected:
-                vault_path = discovery.selected.path
-
         quality = 'quality'
         model = None if legacy_agent_plan_payload else (
             video_config.get('analyzerModel')
@@ -2173,11 +2174,30 @@ task_concurrency = {int(task_concurrency)}
     def config_path(self):
         return self.runtime_root / 'config.toml'
 
+    def vault_lifecycle_manager(self):
+        return VaultLifecycleManager(
+            runtime_root=self.runtime_root,
+            config_path=self.config_path(),
+        )
+
     def status_path(self, name):
         return self.runtime_root / 'status' / name
 
     def vault_status(self):
         config_path = self.config_path()
+        lifecycle = self.vault_lifecycle_manager().status()
+        if lifecycle.get('state') != 'first_use':
+            active = lifecycle.get('activeVault') or {}
+            return {
+                **lifecycle,
+                'path': active.get('vaultPath') or '',
+                'source': 'vault_registry' if active else '',
+                'score': 0,
+                'reasons': ['stable_identity'] if active else [],
+            }
+
+        # A path-only legacy config remains readable, but it is never produced
+        # by first-use discovery and cannot participate in identity reconnect.
         configured = _simple_config_value(config_path, 'vault', 'path')
         if configured:
             selected = _safe_explicit_vault_path(configured)
@@ -2201,25 +2221,9 @@ task_concurrency = {int(task_concurrency)}
                 'reasons': candidate.reasons if candidate else ['explicit_config'],
             }
 
-        discovery = discover_vault(
-            config_path=config_path,
-            cwd=PROJECT_ROOT,
-            runtime_root=self.runtime_root,
-        )
-        if discovery.selected:
-            write_vault_path_to_config(config_path, discovery.selected.path_obj)
-            return {
-                'ok': True,
-                'state': 'ready',
-                'path': discovery.selected.path,
-                'source': discovery.selected.source,
-                'score': discovery.selected.score,
-                'reasons': discovery.selected.reasons,
-            }
         return {
-            'ok': False,
-            'state': 'missing',
-            'path': configured or '',
+            **lifecycle,
+            'path': '',
             'source': '',
             'score': 0,
             'reasons': [],
@@ -2379,31 +2383,19 @@ task_concurrency = {int(task_concurrency)}
         return public_snapshot
 
     def discover_and_persist_vault(self, hint=''):
-        discovery = discover_vault(
-            config_path=self.config_path(),
-            user_hint=hint or '',
-            cwd=PROJECT_ROOT,
-            runtime_root=self.runtime_root,
+        lifecycle = self.vault_lifecycle_manager().scan(
+            parent_hints=[hint] if str(hint or '').strip() else [],
         )
-        if discovery.selected:
-            write_vault_path_to_config(self.config_path(), discovery.selected.path_obj)
-            return {
-                'ok': True,
-                'state': 'ready',
-                'path': discovery.selected.path,
-                'source': discovery.selected.source,
-                'score': discovery.selected.score,
-                'reasons': discovery.selected.reasons,
-                'candidates': [_candidate_payload(c) for c in discovery.candidates[:5]],
-            }
         return {
             'ok': False,
-            'state': 'missing',
+            'state': 'lifecycle_required',
             'path': '',
             'source': '',
             'score': 0,
-            'reasons': [],
-            'candidates': [_candidate_payload(c) for c in discovery.candidates[:5]],
+            'reasons': ['legacy_message'],
+            'candidates': lifecycle.get('vaultCandidates') or [],
+            'obsidianRoots': lifecycle.get('obsidianRoots') or [],
+            'message': '请使用 vault_scan 后通过新建、切换或迁移完成知识库配置。',
         }
 
     def pick_vault_folder(self):
@@ -2414,7 +2406,7 @@ task_concurrency = {int(task_concurrency)}
                 'path': '',
                 'message': '当前系统暂不支持从扩展打开文件夹选择器',
             }
-        script = 'POSIX path of (choose folder with prompt "选择 Obsidian 知识库文件夹")'
+        script = 'POSIX path of (choose folder with prompt "选择 Obsidian 父目录")'
         try:
             proc = subprocess.run(
                 ['osascript', '-e', script],
@@ -2437,22 +2429,18 @@ task_concurrency = {int(task_concurrency)}
                 'message': '用户取消选择',
             }
         selected = _safe_explicit_vault_path(proc.stdout.strip())
-        if selected is not None:
-            candidate = score_vault(selected, source='user_selected')
-            write_vault_path_to_config(self.config_path(), selected)
+        if selected is None:
             return {
-                'ok': True,
-                'state': 'ready',
-                'path': str(selected),
-                'source': 'user_selected',
-                'score': candidate.score if candidate else 0,
-                'reasons': candidate.reasons if candidate else ['user_selected'],
+                'ok': False,
+                'state': 'invalid',
+                'path': '',
+                'message': '所选路径无效或位于 .obsidian 内部',
             }
         return {
             'ok': False,
-            'state': 'invalid',
-            'path': '',
-            'message': '所选路径无效或位于 .obsidian 内部',
+            'state': 'lifecycle_required',
+            'path': str(selected),
+            'message': '请由 UI 选择父目录，并通过 vault_create 或 vault_migration_preview 提交。',
         }
 
     async def check_model_health(self, config_data):
