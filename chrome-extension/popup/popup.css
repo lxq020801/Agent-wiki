@@ -14,10 +14,9 @@
   --warning: #f59e0b;
   --error: #ef4444;
   --focus: rgba(34, 197, 94, 0.24);
-  --radius-shell: 16px;
-  --radius-card: 10px;
+  --radius-card: 8px;
   --popup-width: 390px;
-  --popup-height: 560px;
+  --popup-height: 600px;
 }
 
 * {
@@ -39,8 +38,8 @@ body {
   overflow-x: hidden;
   overflow-y: hidden;
   background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-shell);
+  border: 0;
+  border-radius: 0;
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 14px;
@@ -48,7 +47,8 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+select {
   font: inherit;
 }
 
@@ -61,12 +61,99 @@ button {
 .topbar {
   flex: 0 0 auto;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  padding: 13px 16px 11px;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 12px 9px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+}
+
+.topbar-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.topbar-title-row {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: 8px;
+}
+
+.topbar-title-row h1 {
+  flex: 0 0 auto;
+}
+
+.topbar-title-row p {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  min-width: 0;
+  gap: 7px;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 5px;
+}
+
+.status-indicator > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.status-indicator b,
+.status-indicator em {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 9px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-indicator b {
+  color: var(--text-secondary);
+  font-weight: 650;
+}
+
+.status-indicator em {
+  color: var(--text);
+  font-style: normal;
+  font-weight: 600;
+}
+
+.status-indicator em.online {
+  color: var(--success);
+}
+
+.status-indicator em.warning {
+  color: var(--warning);
+}
+
+.status-indicator em.offline {
+  color: var(--error);
+}
+
+.status-strip .status-dot {
+  width: 6px;
+  height: 6px;
+  flex-basis: 6px;
 }
 
 h1,
@@ -93,13 +180,25 @@ h1 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: 34px;
+  height: 34px;
   flex: 0 0 auto;
-  padding: 7px 9px;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #1a1f27;
   color: var(--text-secondary);
   font-size: 12px;
+}
+
+.icon-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
 }
 
 .icon-button:hover,
@@ -124,6 +223,8 @@ body[data-view="github-view"] #open-settings {
   flex-direction: column;
   overflow-y: auto;
   padding: 11px;
+  scrollbar-color: var(--border) transparent;
+  scrollbar-width: thin;
 }
 
 .view.active {
@@ -135,7 +236,7 @@ body[data-view="github-view"] #open-settings {
 }
 
 #home-view {
-  gap: 11px;
+  gap: 8px;
 }
 
 .github-feature-entry {
@@ -144,7 +245,7 @@ body[data-view="github-view"] #open-settings {
   grid-template-columns: 34px minmax(0, 1fr) auto;
   align-items: center;
   width: 100%;
-  min-height: 58px;
+  min-height: 54px;
   gap: 9px;
   padding: 8px 28px 8px 9px;
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -180,11 +281,19 @@ body[data-view="github-view"] #open-settings {
   justify-content: center;
   width: 34px;
   height: 34px;
-  border-radius: 8px;
+  border-radius: 50%;
   background: #f0f3f6;
   color: #11151b;
-  font-size: 11px;
-  font-weight: 800;
+}
+
+.github-feature-mark svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
 }
 
 .github-feature-copy,
@@ -229,19 +338,16 @@ body[data-view="github-view"] #open-settings {
   white-space: nowrap;
 }
 
-.status-grid {
+.task-activity-entry {
+  position: relative;
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 5px;
-}
-
-.status-chip {
-  display: flex;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
+  width: 100%;
   min-width: 0;
-  gap: 6px;
-  min-height: 42px;
-  padding: 6px 8px;
+  min-height: 40px;
+  gap: 7px;
+  padding: 6px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   background: var(--surface);
@@ -249,32 +355,28 @@ body[data-view="github-view"] #open-settings {
   text-align: left;
 }
 
-.status-chip.wide {
-  grid-column: span 2;
-}
-
-.status-chip:hover,
-.status-chip:focus-visible {
+.task-activity-entry:hover,
+.task-activity-entry:focus-visible {
   outline: none;
   border-color: var(--primary);
   background: var(--panel-hover);
   box-shadow: 0 0 0 3px var(--focus);
 }
 
-.status-chip span:last-child {
+.task-activity-entry > span:nth-child(2) {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  gap: 2px;
+  gap: 1px;
 }
 
-.status-chip b {
+.task-activity-entry b {
   font-size: 10px;
   font-weight: 650;
   color: var(--text-secondary);
 }
 
-.status-chip em {
+.task-activity-entry em {
   min-width: 0;
   overflow: hidden;
   color: var(--text);
@@ -283,6 +385,14 @@ body[data-view="github-view"] #open-settings {
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.entry-chevron {
+  width: 7px;
+  height: 7px;
+  border-top: 1.5px solid var(--muted);
+  border-right: 1.5px solid var(--muted);
+  transform: rotate(45deg);
 }
 
 .status-dot {
@@ -396,7 +506,7 @@ h3 {
 
 .button-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -412,6 +522,8 @@ button.secondary {
   font-size: 13px;
   font-weight: 650;
   line-height: 1.2;
+  overflow-wrap: anywhere;
+  white-space: normal;
   transition: background 0.2s, border-color 0.2s, color 0.2s, box-shadow 0.2s;
 }
 
@@ -466,7 +578,8 @@ label {
 }
 
 input,
-textarea {
+textarea,
+select {
   width: 100%;
   min-width: 0;
   padding: 10px 12px;
@@ -476,6 +589,10 @@ textarea {
   background: var(--field);
   color: var(--text);
   font-size: 13px;
+}
+
+select {
+  min-height: 40px;
 }
 
 .static-select {
@@ -715,7 +832,8 @@ textarea {
 }
 
 input:focus,
-textarea:focus {
+textarea:focus,
+select:focus {
   border-color: var(--primary);
   box-shadow: 0 0 0 3px var(--focus);
 }
@@ -926,6 +1044,81 @@ textarea:focus {
   color: var(--error);
 }
 
+.vault-current {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--field);
+}
+
+.vault-current span {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.vault-current-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 8px;
+}
+
+.compact-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #1a1f27;
+  color: var(--text-secondary);
+}
+
+.compact-icon-button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.compact-icon-button:hover,
+.compact-icon-button:focus-visible {
+  outline: none;
+  border-color: var(--primary);
+  color: var(--text);
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
+.vault-current strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.knowledge-base-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.knowledge-base-actions #create-knowledge-base {
+  grid-column: 1 / -1;
+}
+
 .detail-section[hidden] {
   display: none;
 }
@@ -981,6 +1174,7 @@ textarea:focus {
 }
 
 .github-account-identity strong {
+  display: block;
   min-width: 0;
   overflow: hidden;
   color: var(--text);
@@ -1063,6 +1257,7 @@ textarea:focus {
   color: var(--text-secondary);
   font-size: 10px;
   line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .toggle-row input,
@@ -1129,6 +1324,7 @@ textarea:focus {
   min-height: 56px;
   padding: 7px 2px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  min-width: 0;
 }
 
 .github-repo-row:last-child {
@@ -1163,6 +1359,7 @@ textarea:focus {
 .github-repo-actions {
   display: flex;
   align-items: center;
+  min-width: 0;
   gap: 5px;
 }
 
@@ -1248,25 +1445,32 @@ textarea:focus {
 }
 
 .task-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   min-width: 0;
 }
 
 .task-head strong {
+  display: -webkit-box;
   min-width: 0;
   overflow: hidden;
   font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .task-badge {
   flex: 0 0 auto;
+  max-width: 92px;
   color: var(--text-secondary);
   font-size: 11px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 
 .task-card.done .task-badge {
@@ -1368,6 +1572,7 @@ textarea:focus {
   overflow: hidden;
   color: var(--text);
   font-size: 11px;
+  overflow-wrap: anywhere;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1417,6 +1622,8 @@ textarea:focus {
 .derived-actions {
   display: flex;
   align-items: center;
+  min-width: 0;
+  flex-wrap: wrap;
   gap: 6px;
   margin-top: 7px;
 }
@@ -1431,6 +1638,148 @@ textarea:focus {
   background: #10151c;
   color: var(--text);
   font-size: 11px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 12px;
+  background: rgba(5, 7, 10, 0.76);
+}
+
+.modal-shell {
+  display: flex;
+  width: 100%;
+  max-height: calc(var(--popup-height) - 24px);
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
+}
+
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 12px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-head > div {
+  min-width: 0;
+}
+
+.modal-head h2 {
+  margin-bottom: 3px;
+  font-size: 14px;
+}
+
+.modal-head p {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.modal-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  scrollbar-color: var(--border) transparent;
+  scrollbar-width: thin;
+}
+
+.vault-confirmation {
+  margin-bottom: 10px;
+  padding: 9px 10px;
+  border: 1px solid rgba(245, 158, 11, 0.34);
+  border-radius: var(--radius-card);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.vault-confirmation strong {
+  color: var(--warning);
+  font-size: 11px;
+}
+
+.vault-confirmation p {
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.vault-migration-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--field);
+}
+
+.vault-migration-summary > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.vault-migration-summary > div:last-of-type {
+  grid-column: 1 / -1;
+}
+
+.vault-migration-summary span {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.vault-migration-summary strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.vault-migration-summary ul {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding-left: 17px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.vault-migration-summary ul:empty {
+  display: none;
+}
+
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.modal-actions button {
+  width: auto;
+  min-width: 0;
+  flex: 1 1 104px;
 }
 
 .empty {

@@ -8,42 +8,55 @@
 </head>
 <body>
   <header class="topbar">
-    <div>
-      <h1>知识库控制台</h1>
-      <p id="system-summary">正在连接 Agent</p>
+    <div class="topbar-copy">
+      <div class="topbar-title-row">
+        <h1>知识库控制台</h1>
+        <p id="system-summary">正在连接 Agent</p>
+      </div>
+      <div class="status-strip" aria-label="连接状态">
+        <span class="status-indicator" id="status-agent">
+          <span class="status-dot inline-dot offline" id="agent-status-dot"></span>
+          <span><b>Agent</b><em id="agent-status-text">未连接</em></span>
+        </span>
+        <span class="status-indicator" id="status-api">
+          <span class="status-dot inline-dot warning" id="api-status-dot"></span>
+          <span><b>API</b><em id="api-status-text">未检查</em></span>
+        </span>
+        <span class="status-indicator" id="status-cookie">
+          <span class="status-dot inline-dot warning" id="cookie-status-dot"></span>
+          <span><b>Cookie</b><em id="cookie-status-text">未同步</em></span>
+        </span>
+        <span class="status-indicator" id="status-vault">
+          <span class="status-dot inline-dot warning" id="vault-status-dot"></span>
+          <span><b>知识库</b><em id="vault-status-text">待识别</em></span>
+        </span>
+      </div>
     </div>
-    <button class="icon-button" id="open-settings" type="button" aria-label="打开设置">设置</button>
+    <button class="icon-button" id="open-settings" type="button" aria-label="打开设置" title="设置">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
+        <circle cx="12" cy="12" r="3"></circle>
+      </svg>
+    </button>
   </header>
 
   <main class="view active" id="home-view">
-    <section class="status-grid" aria-label="系统状态">
-      <button class="status-chip" id="status-agent" type="button" data-target="agent-settings">
-        <span class="status-dot inline-dot offline" id="agent-status-dot"></span>
-        <span><b>Agent</b><em id="agent-status-text">未连接</em></span>
-      </button>
-      <button class="status-chip" id="status-api" type="button" data-target="api-settings">
-        <span class="status-dot inline-dot warning" id="api-status-dot"></span>
-        <span><b>API</b><em id="api-status-text">未检查</em></span>
-      </button>
-      <button class="status-chip" id="status-cookie" type="button" data-target="cookie-settings">
-        <span class="status-dot inline-dot warning" id="cookie-status-dot"></span>
-        <span><b>Cookie</b><em id="cookie-status-text">未同步</em></span>
-      </button>
-      <button class="status-chip" id="status-vault" type="button" data-target="vault-settings">
-        <span class="status-dot inline-dot warning" id="vault-status-dot"></span>
-        <span><b>知识库</b><em id="vault-status-text">待识别</em></span>
-      </button>
-      <button class="status-chip wide" id="status-tasks" type="button" data-target="task-settings">
-        <span class="status-dot inline-dot warning" id="tasks-status-dot"></span>
-        <span><b>任务</b><em id="tasks-status-text">暂无任务</em></span>
-      </button>
-    </section>
+    <button class="task-activity-entry" id="status-tasks" type="button" data-target="task-settings">
+      <span class="status-dot inline-dot warning" id="tasks-status-dot"></span>
+      <span><b>任务进度</b><em id="tasks-status-text">暂无任务</em></span>
+      <span class="entry-chevron" aria-hidden="true"></span>
+    </button>
 
     <button class="github-feature-entry" id="open-github" type="button">
-      <span class="github-feature-mark" aria-hidden="true">GH</span>
+      <span class="github-feature-mark" aria-hidden="true">
+        <svg data-lucide-icon="github" viewBox="0 0 24 24">
+          <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.28-.36 6.72-1.61 6.72-7A5.4 5.4 0 0 0 19.22 4 5.07 5.07 0 0 0 19.13.5S17.95.14 15 1.82a13.38 13.38 0 0 0-7 0C5.05.14 3.87.5 3.87.5A5.07 5.07 0 0 0 3.78 4a5.4 5.4 0 0 0-1.5 3.5c0 5.42 3.44 6.67 6.72 7A4.8 4.8 0 0 0 8 18v4"></path>
+          <path d="M8 19c-3 .92-3-1.5-4-2"></path>
+        </svg>
+      </span>
       <span class="github-feature-copy">
-        <b>GitHub 项目</b>
-        <small>搜索仓库 · 导入 Stars · 刷新资料</small>
+        <b>GitHub 资产</b>
+        <small>GitHub 资产管理</small>
       </span>
       <span class="github-feature-account">
         <span class="status-dot inline-dot warning" id="home-github-dot"></span>
@@ -217,14 +230,26 @@
     <section class="settings-group detail-section" id="vault-settings" data-title="知识库" tabindex="-1" hidden>
       <div class="section-heading">
         <h3>知识库</h3>
+        <p>管理本地 Markdown 知识资产的存放位置。</p>
       </div>
-      <div class="field">
-        <label for="vault-path">路径线索</label>
-        <input type="text" id="vault-path" placeholder="可留空，Agent 会自动查找">
+      <div class="vault-current" aria-live="polite">
+        <div class="vault-current-head">
+          <span>当前知识库</span>
+          <button class="compact-icon-button" id="scan-knowledge-bases" type="button" aria-label="扫描知识库" title="扫描知识库">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"></path>
+              <path d="M3 21v-5h5"></path>
+              <path d="M3 12A9 9 0 0 1 18.5 5.8L21 8"></path>
+              <path d="M21 3v5h-5"></path>
+            </svg>
+          </button>
+        </div>
+        <strong id="vault-current-path">尚未连接</strong>
       </div>
-      <div class="button-row">
-        <button class="secondary" id="detect-vault" type="button">自动识别</button>
-        <button class="secondary" id="pick-vault" type="button">选择文件夹</button>
+      <div class="knowledge-base-actions">
+        <button class="primary" id="create-knowledge-base" type="button">新建知识库</button>
+        <button class="secondary" id="switch-knowledge-base" type="button">切换知识库</button>
+        <button class="secondary" id="migrate-knowledge-base" type="button">迁移现有知识库</button>
       </div>
       <div class="hint persistent" id="vault-hint"></div>
     </section>
@@ -256,7 +281,7 @@
   <main class="view" id="github-view" aria-hidden="true" tabindex="-1" inert>
     <div class="settings-page-head">
       <button class="back-button" id="back-home-from-github" type="button">← 首页</button>
-      <h2>GitHub 项目</h2>
+      <h2>GitHub 资产管理</h2>
     </div>
 
     <section class="github-account-area" aria-labelledby="github-account-label">
@@ -291,25 +316,11 @@
 
       <label class="toggle-row" for="github-auto-star">
         <span>
-          <b>派生成功后自动 Star</b>
+          <b>资产创建后自动 Star</b>
           <small>默认关闭；Star 失败不会阻断知识入库。</small>
         </span>
         <input type="checkbox" id="github-auto-star">
       </label>
-    </section>
-
-    <section class="github-tool" id="github-search-tool">
-      <div class="section-heading compact">
-        <h3>仓库搜索</h3>
-        <p>使用 GitHub 官方 API 解析项目名称。</p>
-      </div>
-      <div class="inline-input-action">
-        <input type="search" id="github-search-query" placeholder="owner/repo 或项目名称">
-        <button class="secondary small" id="github-search" type="button">搜索</button>
-      </div>
-      <div class="github-list" id="github-search-results">
-        <div class="empty">登录后可搜索仓库</div>
-      </div>
     </section>
 
     <section class="github-tool" id="github-stars-tool">
@@ -340,7 +351,7 @@
     </section>
 
     <section class="github-refresh-panel" id="github-refresh-panel" hidden>
-      <h3 id="github-refresh-title">发现项目资料变化</h3>
+      <h3 id="github-refresh-title">发现资产资料变化</h3>
       <ul id="github-refresh-changes"></ul>
       <div class="button-row">
         <button class="primary" id="github-confirm-refresh" type="button">确定更新</button>
@@ -350,6 +361,58 @@
 
     <div class="hint persistent" id="github-hint" role="status" aria-live="polite"></div>
   </main>
+
+  <div class="modal-backdrop" id="vault-workflow-modal" hidden>
+    <section class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="vault-workflow-title" aria-describedby="vault-workflow-copy">
+      <header class="modal-head">
+        <div>
+          <h2 id="vault-workflow-title">知识库</h2>
+          <p id="vault-workflow-copy">正在准备</p>
+        </div>
+        <button class="compact-icon-button" id="close-vault-workflow" type="button" aria-label="关闭" title="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 6 6 18"></path>
+            <path d="m6 6 12 12"></path>
+          </svg>
+        </button>
+      </header>
+
+      <div class="modal-body">
+        <div class="field" id="vault-candidate-field">
+          <label for="vault-candidate-select" id="vault-candidate-label">保存位置</label>
+          <select id="vault-candidate-select" disabled>
+            <option value="">正在扫描候选位置</option>
+          </select>
+          <p class="microcopy" id="vault-candidate-copy">候选位置由本地 Agent 扫描提供。</p>
+        </div>
+
+        <div class="field" id="vault-name-field">
+          <label for="vault-name">知识库名称</label>
+          <input type="text" id="vault-name" maxlength="64" autocomplete="off" placeholder="例如：我的知识库">
+        </div>
+
+        <div class="vault-confirmation" id="vault-confirmation" hidden>
+          <strong>需要确认候选</strong>
+          <p id="vault-confirmation-copy">检测到多个可能位置，请确认所选知识库。</p>
+        </div>
+
+        <div class="vault-migration-summary" id="vault-migration-summary" hidden>
+          <div><span>迁移文件</span><strong id="vault-migration-files">待计算</strong></div>
+          <div><span>冲突</span><strong id="vault-migration-conflicts">待计算</strong></div>
+          <div><span>目标</span><strong id="vault-migration-target">待确认</strong></div>
+          <ul id="vault-migration-notes"></ul>
+        </div>
+
+        <div class="hint persistent" id="vault-workflow-hint" role="status" aria-live="polite"></div>
+      </div>
+
+      <footer class="modal-actions">
+        <button class="secondary" id="cancel-vault-workflow" type="button">取消</button>
+        <button class="secondary" id="rollback-vault-migration" type="button" hidden>回退迁移</button>
+        <button class="primary" id="confirm-vault-workflow" type="button">继续</button>
+      </footer>
+    </section>
+  </div>
 
   <script src="../runtime-version.js"></script>
   <script src="popup.js"></script>

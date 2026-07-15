@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent-wiki popup visual mock</title>
+  <style>
+    html,
+    body {
+      width: 390px;
+      height: 600px;
+      margin: 0;
+      overflow: hidden;
+      background: #15171c;
+    }
+
+    iframe {
+      display: block;
+      width: 390px;
+      height: 600px;
+      border: 0;
+    }
+  </style>
+</head>
+<body>
+  <iframe id="popup" title="Agent-wiki popup mock" src="/chrome-extension/popup/popup.html"></iframe>
+  <script>
+    const frame = document.getElementById('popup');
+    const scenario = new URLSearchParams(location.search).get('scenario') || 'tasks';
+
+    frame.addEventListener('load', () => {
+      const popup = frame.contentWindow;
+      if (scenario === 'github') {
+        popup.openGithubPage({ persist: false, focus: false });
+        popup.applyGithubStatus({
+          configured: true,
+          authenticated: true,
+          account: {
+            login: 'mock-account-with-an-intentionally-very-long-login-name-for-overflow-check'
+          },
+          settings: { autoStar: false },
+          activeImport: {
+            id: 'mock-import',
+            state: 'running',
+            completed: 17,
+            total: 48,
+            results: [
+              {
+                ok: true,
+                state: 'created',
+                repository: { fullName: 'mock-org/a-very-long-repository-name-that-must-not-overflow' }
+              }
+            ]
+          }
+        });
+        popup.applyGithubStarsResults({
+          page: 1,
+          hasNext: false,
+          repositories: [
+            {
+              id: 1,
+              fullName: 'mock-org/a-very-long-repository-name-that-must-not-overlap-actions',
+              language: 'TypeScript',
+              stars: 123456,
+              ingested: true
+            },
+            {
+              id: 2,
+              fullName: 'mock-org/second-selected-repository-for-partial-selection-state',
+              language: 'Python',
+              stars: 9876,
+              ingested: false
+            }
+          ]
+        });
+        return;
+      }
+
+      popup.openSettingsDetail('task-settings', { persist: false, focus: false });
+      popup.applyTaskStatus({
+        running: 1,
+        failed: 1,
+        done: 1,
+        items: [
+          {
+            id: 'mock-running',
+            title: '这是一个用于验证极长任务标题不会和右侧阶段按钮发生重叠或横向溢出的完全虚构任务标题',
+            stage: 'analyzing_overview_chunk',
+            stageLabel: '正在分析超长阶段名称',
+            source: 'extension_popup',
+            elapsedSec: 3671,
+            updatedAt: '2026-07-15T09:05:00+08:00',
+            progressPercent: 62,
+            url: 'https://mock.invalid/a/very/long/path/that/is/only/used/for/layout/testing',
+            derivedTasks: [
+              {
+                id: 'derived-mock',
+                name: '超长派生候选名称也必须稳定换行且不挤压确认与忽略按钮',
+                status: 'candidate',
+                targetType: 'official_doc',
+                score: 88,
+                targetUrl: 'https://mock.invalid/docs/a/very/long/documentation/path',
+                reason: '这是完全虚构的长说明，用来验证两行截断、按钮换行和内部滚动行为。'
+              }
+            ]
+          },
+          {
+            id: 'mock-failed',
+            title: '虚构失败任务：用于检查长错误信息与日期时间显示',
+            stage: 'failed',
+            ok: false,
+            source: 'extension_popup',
+            elapsedSec: 14,
+            updatedAt: '2025-12-31T23:59:00+08:00',
+            progressPercent: 31,
+            error: '这是一段很长的虚构错误信息，只用于证明错误内容能够在卡片内部自然换行，不会造成任何横向滚动。'
+          },
+          {
+            id: 'mock-done',
+            title: '虚构已完成任务',
+            stage: 'done',
+            ok: true,
+            source: 'extension_popup',
+            elapsedSec: 128,
+            updatedAt: '2026-07-14T18:30:00+08:00',
+            progressPercent: 100,
+            vaultPath: '/tmp/mock-vault/a/deeply/nested/knowledge/assets/path'
+          }
+        ]
+      });
+    });
+  </script>
+</body>
+</html>
