@@ -1,4 +1,9 @@
-"""Cross-process serialization for writes to one knowledge vault."""
+"""Cross-process serialization for writes to one knowledge vault.
+
+Vault transactions manage Markdown and related asset files only. Git history is
+owned by the user or an external backup tool and is deliberately outside this
+module's responsibilities.
+"""
 from __future__ import annotations
 
 import contextlib
@@ -13,6 +18,7 @@ from typing import Iterator
 
 _THREAD_LOCKS: dict[str, threading.RLock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
+VAULT_GIT_STATUS = "not_managed"
 
 
 def _thread_lock(key: str) -> threading.RLock:
