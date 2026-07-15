@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import os
@@ -26,6 +27,14 @@ from install.vault_lifecycle import (
     dispatch_vault_lifecycle,
     inspect_vault_identity,
 )
+
+
+class FakeSocket:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def send(self, payload: str) -> None:
+        self.sent.append(payload)
 
 
 class UUIDSequence:
@@ -429,6 +438,114 @@ class VaultLifecycleTests(unittest.TestCase):
             ))
             self.assertIn('path = ""', (runtime / "config.toml").read_text(encoding="utf-8"))
             self.assertFalse((runtime / "vault-registry.json").exists())
+
+
+class VaultLifecycleWebSocketTests(unittest.TestCase):
+    def make_server(self, runtime: Path):
+        from server import websocket_server
+
+        server = websocket_server.LibrarianServer(
+            enable_task_runner=False,
+            github_service=object(),
+        )
+        server.runtime_root = runtime
+        return websocket_server, server
+
+    def common_result(self, operation: str) -> dict[str, object]:
+        return {
+            "contractVersion": 1,
+            "ok": True,
+            "operation": operation,
+            "state": "ready",
+            "requiresUserAction": False,
+            "message": "ok",
+            "activeVault": None,
+            "obsidianRoots": [],
+            "vaultCandidates": [],
+            "migration": None,
+        }
+
+    def test_all_lifecycle_messages_use_one_gated_response_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            websocket_module, server = self.make_server(Path(tmp) / "runtime")
+            socket = FakeSocket()
+            server.clients.add(socket)
+            server.client_compatibility[socket] = {"state": "compatible", "canOperate": True}
+            manager = object()
+            server.vault_lifecycle_manager = lambda: manager
+
+            for message_type in sorted(VAULT_LIFECYCLE_REQUEST_TYPES):
+                socket.sent.clear()
+                data = {"sentinel": message_type}
+                expected = self.common_result(message_type.removeprefix("vault_"))
+                with mock.patch.object(
+                    websocket_module,
+                    "dispatch_vault_lifecycle",
+                    return_value=expected,
+                ) as dispatch:
+                    asyncio.run(server.handle_message(socket, {
+                        "type": message_type,
+                        "requestId": f"request-{message_type}",
+                        "data": data,
+                    }))
+
+                dispatch.assert_called_once_with(manager, message_type, data)
+                reply = json.loads(socket.sent[-1])
+                self.assertEqual(reply["type"], "vault_lifecycle_status")
+                self.assertEqual(reply["requestId"], f"request-{message_type}")
+                self.assertEqual(reply["result"], expected)
+                for field in VAULT_LIFECYCLE_CONTRACT["resultFields"]:
+                    self.assertIn(field, reply["result"])
+
+    def test_lifecycle_mutation_is_rejected_before_compatible_handshake(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            websocket_module, server = self.make_server(Path(tmp) / "runtime")
+            socket = FakeSocket()
+            server.clients.add(socket)
+            server.client_compatibility[socket] = {
+                "state": "handshake_required",
+                "canOperate": False,
+                "message": "handshake required",
+            }
+            with mock.patch.object(
+                websocket_module,
+                "dispatch_vault_lifecycle",
+                side_effect=AssertionError("blocked lifecycle request must not dispatch"),
+            ):
+                asyncio.run(server.handle_message(socket, {
+                    "type": "vault_create",
+                    "requestId": "blocked",
+                    "data": {
+                        "userName": "Alice",
+                        "parentDirectory": str(Path(tmp)),
+                    },
+                }))
+
+            reply = json.loads(socket.sent[-1])
+            self.assertEqual(reply["type"], "protocol_rejected")
+            self.assertEqual(reply["reason"], "handshake_required")
+            self.assertFalse((Path(tmp) / "runtime").exists())
+
+    def test_empty_config_update_and_legacy_discovery_never_adopt_a_vault(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = root / "runtime"
+            websocket_module, server = self.make_server(runtime)
+            manager = VaultLifecycleManager(
+                runtime_root=runtime,
+                registry_vault_provider=lambda: [],
+                obsidian_root_provider=lambda: [],
+                uuid_factory=UUIDSequence(),
+            )
+            server.vault_lifecycle_manager = lambda: manager
+
+            asyncio.run(server.handle_config_update({"llm": {"provider": "doubao"}}))
+            config = (runtime / "config.toml").read_text(encoding="utf-8")
+            self.assertIn('path = ""', config)
+            legacy = server.discover_and_persist_vault("")
+            self.assertEqual(legacy["state"], "lifecycle_required")
+            self.assertIn('path = ""', (runtime / "config.toml").read_text(encoding="utf-8"))
+            self.assertEqual(server.vault_status()["state"], "first_use")
 
 
 if __name__ == "__main__":
