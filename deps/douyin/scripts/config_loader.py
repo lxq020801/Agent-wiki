@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from video_sampling import FPS_MODE_AUTO, normalize_fps_mode
+
 try:
     import tomllib  # Python 3.11+
 except ImportError:
@@ -124,6 +126,7 @@ class Config:
     files_endpoint: str = DEFAULT_DOUBAO_ENDPOINT
     response_timeout_sec: int = 900
     chunk_concurrency: int = 2
+    video_fps_mode: str = FPS_MODE_AUTO
 
     # 计算属性（不暴露给 toml）
     @property
@@ -148,6 +151,7 @@ class Config:
             "target_frames": target,
             "fps_min": self.fps_min,
             "fps_max": self.fps_max,
+            "fps_mode": self.video_fps_mode,
         }
 
 
@@ -255,8 +259,24 @@ def load_config(path: Optional[Path] = None) -> Config:
     quality_target_frames = int(
         _get(data, "analysis", "quality_target_frames", default=1250)
     )
-    fps_min = float(_get(data, "analysis", "fps_min", default=0.2))
-    fps_max = float(_get(data, "analysis", "fps_max", default=5.0))
+    # fps_min/fps_max remain readable for old config files, but model uploads
+    # are now constrained to the confirmed 2-5 FPS product range.
+    fps_min = max(2.0, min(5.0, float(
+        _get(data, "analysis", "fps_min", default=2.0)
+    )))
+    fps_max = max(2.0, min(5.0, float(
+        _get(data, "analysis", "fps_max", default=5.0)
+    )))
+    if fps_min > fps_max:
+        raise ConfigError("[analysis].fps_min 不能大于 fps_max")
+    try:
+        video_fps_mode = normalize_fps_mode(
+            _get(data, "analysis", "video_fps_mode", default=FPS_MODE_AUTO)
+        )
+    except ValueError as exc:
+        raise ConfigError(
+            "[analysis].video_fps_mode 只支持 auto、fixed_2、fixed_3、fixed_5"
+        ) from exc
     file_active_timeout_sec = int(
         _get(data, "analysis", "file_active_timeout_sec", default=120)
     )
@@ -334,6 +354,7 @@ def load_config(path: Optional[Path] = None) -> Config:
         files_api_key=files_api_key,
         files_endpoint=files_endpoint,
         chunk_concurrency=chunk_concurrency,
+        video_fps_mode=video_fps_mode,
     )
 
 
@@ -360,13 +381,15 @@ strategy = "doubao-seed-2-0-mini-260428"
 analyzer_fallback = "doubao-seed-2-0-mini-260428"
 
 [analysis]
-# 默认质量档固定为 quality：优先 5fps，超过 1250 帧安全目标才下调 fps；
-# 1280 是火山硬上限，项目侧留 30 帧冗余。
+# 视频模型默认按本地画面变化和长视频语义风险在 2-5fps 自动选择。
+# 可选：auto、fixed_2、fixed_3、fixed_5。本地变化预扫描固定 1fps，
+# 但它不调用模型，也不生成知识。
+video_fps_mode = "auto"
 # balanced 仅保留为调试兼容档。
 default_quality = "quality"
 balanced_target_frames = 240
 quality_target_frames = 1250
-fps_min = 0.2
+fps_min = 2.0
 fps_max = 5.0
 file_active_timeout_sec = 120
 # Responses API 分析超时；防止网络/代理/云端异常时无限占用 worker。
@@ -415,6 +438,7 @@ if __name__ == "__main__":
             print(f"  vault: {cfg.vault_path}")
             print(f"  model: {cfg.analyzer_model}")
             print(f"  quality: {cfg.default_quality}")
+            print(f"  video fps mode: {cfg.video_fps_mode}")
         except ConfigError as e:
             print(f"✗ 配置错误：{e}", file=sys.stderr)
             sys.exit(1)

@@ -3,7 +3,7 @@ analyzer.py — 火山方舟视频拆解
 
 职责：
   1. ffprobe 测视频时长
-  2. 根据 quality 档位算 fps（动态）
+  2. 本地 1fps 变化预扫描后，在 2-5fps 内自动决策或使用固定档
   3. 普通 Ark Files API 上传（带 preprocess_configs.video.model + fps）
   4. 普通 Ark 轮询 file.status 直到 active
   5. Responses API 得到结构化拆解结果
@@ -18,8 +18,7 @@ analyzer.py — 火山方舟视频拆解
   ⑤ Files API 默认托管空间支持 ≤512MB；超过 512MB P0 直接失败
   ⑥ file_id 模式必须等 file.status == "active" 才能分析
   ⑦ file_id 模式同一视频换 quality 必须重新上传
-  ⑧ 超 10 分钟先做 1fps 全片概览规划，再按 240s 分片用 2-5fps 精拆
-     超长视频则改为分片 1fps 概览，合成全局策略后再精拆
+  ⑧ 超 10 分钟先做 2fps 全片/分片概览规划，再按 240s 分片用 2-5fps 精拆
 
 公共契约：
     analyze_video(video_path, prompt, *, config, quality="quality",
@@ -43,6 +42,14 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
+
+from video_sampling import (
+    FPS_MODE_AUTO,
+    decide_sampling_fps,
+    merge_chunk_sampling_strategy,
+    normalize_fps_mode,
+    prescan_video,
+)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -212,8 +219,8 @@ def get_duration_sec(video_path: Path) -> float:
 _FRAMES_HARD_CAP = 1280
 # 项目侧安全目标：比硬上限留 30 帧冗余，避免擦边导致服务端再抽样。
 _FRAMES_SAFE_TARGET = 1250
-# fps 取值范围（火山官方文档）
-_FPS_MIN = 0.2
+# 知识分析上传只允许使用已确认的 2-5fps；本地变化预扫描另用 1fps。
+_FPS_MIN = 2.0
 _FPS_MAX = 5.0
 _TRUSTED_ARK_HOSTS = {"ark.cn-beijing.volces.com"}
 _RESPONSE_RETRY_MAX_ATTEMPTS = 3
@@ -277,9 +284,9 @@ _IMAGE_COUNT_LIMIT = 18
 _CHUNK_THRESHOLD_SEC = 600.0
 _CHUNK_LEN_SEC = 240.0
 _CHUNK_OVERLAP_SEC = 10.0
-_LONG_OVERVIEW_FPS = 1.0
-# 1fps 粗拆在 1250 帧安全目标前留 20 秒余量，避免全片概览擦边。
-_ULTRA_LONG_THRESHOLD_SEC = 20 * 60 + 30
+_LONG_OVERVIEW_FPS = 2.0
+# 2fps 概览在 1250 帧安全目标前留 20 帧余量。
+_ULTRA_LONG_THRESHOLD_SEC = 10 * 60 + 15
 _LONG_CHUNK_FPS_MIN = 2.0
 _LONG_CHUNK_FPS_MAX = 5.0
 _CHUNK_ANALYSIS_CONCURRENCY = 2
@@ -364,6 +371,148 @@ def _write_audit_json(audit_dir: Optional[Path], rel_path: str, payload: Any) ->
 def _add_artifact(artifacts: dict[str, Any], key: str, path: str) -> None:
     if path:
         artifacts[key] = path
+
+
+def _safe_api_metadata(value: Any) -> dict[str, Any]:
+    """Keep a small allowlist of non-secret provider response facts."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        payload = value
+    elif hasattr(value, "model_dump"):
+        try:
+            payload = value.model_dump()
+        except Exception:
+            payload = {}
+    elif hasattr(value, "__dict__"):
+        payload = vars(value)
+    else:
+        payload = {}
+    allowed = {
+        "id",
+        "file_id",
+        "object",
+        "status",
+        "model",
+        "created_at",
+        "bytes",
+        "purpose",
+    }
+    return _redact_sensitive_payload({
+        str(key): child
+        for key, child in payload.items()
+        if str(key) in allowed and child is not None
+    })
+
+
+def _new_sampling_evidence(
+    *,
+    mode: str,
+    duration_sec: float,
+    prescan: dict[str, Any],
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "created_at": time.time(),
+        "truth_boundaries": {
+            "local_reproduction_evidence": {
+                "description": "Locally decoded grayscale samples used only to measure visual change.",
+                "facts": prescan,
+            },
+            "upload_request_facts": {
+                "description": "FPS values requested in Ark Files API preprocessing; not proof of consumed frames.",
+                "mode": mode,
+                "decision": decision,
+                "requests": [],
+            },
+            "vendor_returned_facts": {
+                "description": "Only metadata and usage actually returned by the provider.",
+                "actual_model_frames": None,
+                "actual_model_frames_availability": "not_returned_by_provider",
+                "files": [],
+                "responses": [],
+            },
+        },
+        "duration_sec": round(float(duration_sec), 3),
+    }
+
+
+def _persist_sampling_evidence(
+    audit_dir: Optional[Path],
+    audit_files: dict[str, Any],
+    evidence: Optional[dict[str, Any]],
+) -> None:
+    if evidence is None:
+        return
+    path = _write_audit_json(audit_dir, "01-sampling/evidence.json", evidence)
+    _add_artifact(audit_files, "sampling.evidence", path)
+
+
+def _record_upload_evidence(
+    evidence: Optional[dict[str, Any]],
+    *,
+    phase: str,
+    fps: float,
+    duration_sec: float,
+    model: str,
+    file_obj: Any = None,
+    active_obj: Any = None,
+    part_index: Optional[int] = None,
+    record_request: bool = True,
+) -> None:
+    if evidence is None:
+        return
+    boundaries = evidence["truth_boundaries"]
+    if record_request:
+        request = {
+            "phase": phase,
+            "part_index": part_index,
+            "requested_fps": float(fps),
+            "segment_duration_sec": round(float(duration_sec), 3),
+            "planned_frame_count": int(float(fps) * float(duration_sec)),
+            "actual_model_frames": None,
+            "actual_model_frames_availability": "not_returned_by_provider",
+            "model": model,
+        }
+        boundaries["upload_request_facts"]["requests"].append(request)
+    if file_obj is not None or active_obj is not None:
+        files = boundaries["vendor_returned_facts"]["files"]
+        fact = next((
+            item for item in reversed(files)
+            if item.get("phase") == phase and item.get("part_index") == part_index
+        ), None)
+        if fact is None:
+            fact = {"phase": phase, "part_index": part_index}
+            files.append(fact)
+        if file_obj is not None:
+            fact["upload_response"] = _safe_api_metadata(file_obj)
+        if active_obj is not None:
+            fact["active_response"] = _safe_api_metadata(active_obj)
+
+
+def _record_response_evidence(
+    evidence: Optional[dict[str, Any]],
+    *,
+    phase: str,
+    model: str,
+    usage: dict[str, Any],
+    text_length: int,
+    part_index: Optional[int] = None,
+    intent: Optional[str] = None,
+) -> None:
+    if evidence is None:
+        return
+    evidence["truth_boundaries"]["vendor_returned_facts"]["responses"].append({
+        "phase": phase,
+        "part_index": part_index,
+        "intent": intent,
+        "model": model,
+        "completed": True,
+        "output_text_length": int(text_length),
+        "usage": _redact_sensitive_payload(usage),
+        "provider_identifier_persisted": False,
+    })
 
 
 def _chunk_output_rel_path(intent: str, part_index: int) -> str:
@@ -516,13 +665,22 @@ def save_response_memory(
 
 
 def _combine_usage(usages: list[dict[str, Any]]) -> dict[str, Any]:
+    def merge(target: dict[str, Any], source: dict[str, Any]) -> None:
+        for key, value in source.items():
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                target[key] = target.get(key, 0) + value
+            elif isinstance(value, dict):
+                child = target.setdefault(key, {})
+                if isinstance(child, dict):
+                    merge(child, value)
+
     totals: dict[str, Any] = {}
     for usage in usages:
         if not isinstance(usage, dict):
             continue
-        for key, value in usage.items():
-            if isinstance(value, (int, float)):
-                totals[key] = totals.get(key, 0) + value
+        merge(totals, usage)
     return totals
 
 
@@ -611,8 +769,12 @@ async def _retry_response_call(
     raise APIError(f"{label} failed without captured exception")
 
 
-def _chunk_plan(duration_sec: float) -> list[dict[str, float | int]]:
-    if duration_sec <= _CHUNK_THRESHOLD_SEC:
+def _chunk_plan(
+    duration_sec: float,
+    *,
+    force_for_frame_budget: bool = False,
+) -> list[dict[str, float | int]]:
+    if duration_sec <= _CHUNK_THRESHOLD_SEC and not force_for_frame_budget:
         return []
     plan: list[dict[str, float | int]] = []
     start = 0.0
@@ -726,7 +888,7 @@ def _build_chunked_overview_strategy_prompt(
         intents=intents,
     )
     return (
-        "下面是同一个超长视频按固定切片用 1fps 得到的粗概览。"
+        "下面是同一个超长视频按固定切片用 2fps 得到的粗概览。"
         "请把这些粗概览合成为全片概览与分段精拆策略。\n"
         "你必须根据粗概览里的证据，为每一个固定切片给出 2、3、4 或 5fps 建议。\n"
         "只输出最终 JSON，不要输出 Markdown，不要输出 JSON 外的内容。\n\n"
@@ -847,7 +1009,12 @@ def _redact_sensitive_text(text: str) -> str:
             r"(?i)[\"']?(authorization|cookie|set-cookie)[\"']?\s*[:=]\s*[^\n\r]+",
             "sensitive=[REDACTED]",
         ),
+        (r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@", r"\1[REDACTED]@"),
         (r"\bresp-[A-Za-z0-9._-]+\b", "resp-[REDACTED]"),
+        (r"\bghp_[A-Za-z0-9_]{20,}\b", "ghp_[REDACTED]"),
+        (r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", "github_pat_[REDACTED]"),
+        (r"(?i)(access_token|private_token|github_token)=([^&\s]+)", r"\1=[REDACTED]"),
+        (r"(?i)([?&][^=&#]*(token|key|secret|signature|sig)[^=&#]*=)[^&#\s]+", r"\1[REDACTED]"),
     ]
     for pattern, repl in replacements:
         cleaned = re.sub(pattern, repl, cleaned)
@@ -867,6 +1034,9 @@ def _is_sensitive_key(key: Any) -> bool:
         "setcookie",
         "responseid",
         "previousresponseid",
+        "githubtoken",
+        "accesstoken",
+        "privatetoken",
     } or canonical.endswith("apikey")
 
 
@@ -1400,6 +1570,11 @@ async def _upload_with_preprocess(
 
     阻塞 IO 跑在 thread。
     """
+    if not (_FPS_MIN <= float(fps) <= _FPS_MAX):
+        raise AnalyzerError(
+            f"模型视频上传 fps 必须在 {_FPS_MIN:g}-{_FPS_MAX:g}，实际 {fps!r}"
+        )
+
     def _do_upload() -> Any:
         with video_path.open("rb") as f:
             preprocess_configs = {
@@ -1777,7 +1952,7 @@ async def analyze_video(
       model: Files API 预处理用的模型 ID（必须传，否则回落 640 帧）
               同时也是 Responses API 推理用的模型
       quality: 'balanced' | 'quality'
-      quality_params: {target_frames, fps_min, fps_max}，可选；
+      quality_params: {target_frames, fps_min, fps_max, fps_mode}，可选；
                       不传则使用默认（balanced=240, quality=1250）
       file_active_timeout_sec: 等 file active 的最长秒数
       response_timeout_sec: 等 Responses API 返回的最长秒数
@@ -1840,15 +2015,21 @@ async def analyze_video_many(
     memory_source_id = str(source_id or video_path.stem)
     audit_root = _audit_dir(audit_id, memory_source_id)
     audit_files: dict[str, Any] = {}
+    q_params = quality_params or {}
+    try:
+        sampling_mode = normalize_fps_mode(q_params.get("fps_mode", FPS_MODE_AUTO))
+    except ValueError as exc:
+        raise AnalyzerError(str(exc)) from exc
     if audit_root is not None:
         _add_artifact(audit_files, "run_manifest", _write_audit_json(audit_root, "00-run-manifest.json", {
             "audit_id": audit_id,
             "source_id": memory_source_id,
-            "video_path": str(video_path),
+            "video_file_name": video_path.name,
             "intents": list(prompts),
             "analysis_model": model,
             "strategy_model": strategy_model or model,
             "quality": quality,
+            "video_fps_mode": sampling_mode,
             "created_at": time.time(),
         }))
         for intent, prompt in prompts.items():
@@ -1870,17 +2051,70 @@ async def analyze_video_many(
     # 2. 文件大小校验
     _check_size(video_path)
 
-    # 3. 算 fps
-    q_params = quality_params or {}
-    fps, target_frames, will_truncate = calc_fps(
-        duration,
-        quality,
-        fps_min=q_params.get("fps_min", _FPS_MIN),
-        fps_max=q_params.get("fps_max", _FPS_MAX),
-        balanced_target_frames=q_params.get("target_frames", 240) if quality == "balanced" else 240,
-        quality_target_frames=q_params.get("target_frames", 1250) if quality == "quality" else 1250,
+    # 3. 本地变化预扫描 + 2-5fps 决策。固定档无需预扫描。
+    if sampling_mode == FPS_MODE_AUTO:
+        await _call_progress(on_progress, "prescanning_started", {
+            "purpose": "local_visual_change_measurement_only",
+            "sample_fps": 1.0,
+            "duration_sec": duration,
+        })
+        thumbnail_dir = audit_root / "01-sampling" / "thumbnails" if audit_root else None
+        prescan = await asyncio.to_thread(
+            prescan_video,
+            video_path,
+            duration,
+            ffmpeg_path=_ffmpeg_command(),
+            thumbnail_dir=thumbnail_dir,
+        )
+        await _call_progress(
+            on_progress,
+            "prescanning_done" if prescan.get("ok") else "prescanning_failed",
+            {
+                "ok": bool(prescan.get("ok")),
+                "elapsed_sec": prescan.get("elapsed_sec"),
+                "sample_count": prescan.get("sample_count"),
+                "change_point_count": len(prescan.get("change_points") or []),
+                "coverage_ratio": prescan.get("coverage_ratio"),
+                "failure_reason": prescan.get("failure_reason"),
+            },
+        )
+    else:
+        prescan = {
+            "ok": False,
+            "skipped": True,
+            "purpose": "local_visual_change_measurement_only",
+            "sample_fps": 1.0,
+            "sample_count": 0,
+            "elapsed_sec": 0.0,
+            "timestamps_sec": [],
+            "thumbnail_manifest": [],
+            "change_points": [],
+            "failure_reason": "fixed FPS mode does not require prescan",
+        }
+        await _call_progress(on_progress, "prescanning_skipped", {
+            "mode": sampling_mode,
+            "reason": prescan["failure_reason"],
+        })
+
+    decision = decide_sampling_fps(
+        mode=sampling_mode,
+        duration_sec=duration,
+        prescan=prescan,
+    )
+    fps = float(decision["selected_fps"])
+    target_frames = min(
+        _FRAMES_SAFE_TARGET,
+        max(1, int(q_params.get("target_frames", _FRAMES_SAFE_TARGET))),
     )
     actual_frames_est = int(fps * duration)
+    will_truncate = actual_frames_est > _FRAMES_HARD_CAP
+    sampling_evidence = _new_sampling_evidence(
+        mode=sampling_mode,
+        duration_sec=duration,
+        prescan=prescan,
+        decision=decision,
+    )
+    _persist_sampling_evidence(audit_root, audit_files, sampling_evidence)
 
     await _call_progress(on_progress, "fps_decided", {
         "fps": fps,
@@ -1888,6 +2122,10 @@ async def analyze_video_many(
         "actual_frames_estimate": actual_frames_est,
         "will_truncate": will_truncate,
         "quality": quality,
+        "mode": sampling_mode,
+        "decision_reasons": decision.get("decision_reasons"),
+        "fallback_applied": decision.get("fallback_applied"),
+        "fallback_reason": decision.get("fallback_reason"),
     })
 
     responses_client = _build_response_client(api_key, endpoint, response_timeout_sec)
@@ -1897,13 +2135,22 @@ async def analyze_video_many(
         file_endpoint,
     )
 
-    chunk_plan = _chunk_plan(duration)
+    frame_budget_requires_chunks = actual_frames_est > _FRAMES_SAFE_TARGET
+    chunk_plan = _chunk_plan(
+        duration,
+        force_for_frame_budget=frame_budget_requires_chunks,
+    )
     if chunk_plan:
         await _call_progress(on_progress, "chunking_plan", {
             "chunk_count": len(chunk_plan),
             "chunk_len_sec": _CHUNK_LEN_SEC,
             "overlap_sec": _CHUNK_OVERLAP_SEC,
             "duration_sec": duration,
+            "reason": (
+                "requested_fps_exceeds_safe_frame_budget"
+                if frame_budget_requires_chunks and duration <= _CHUNK_THRESHOLD_SEC
+                else "long_video_duration"
+            ),
         })
         with tempfile.TemporaryDirectory(prefix="agent-wiki-chunks-") as tmpdir:
             chunk_paths = await asyncio.to_thread(
@@ -1925,10 +2172,23 @@ async def analyze_video_many(
                 source_id=memory_source_id,
                 audit_dir=audit_root,
                 audit_files=audit_files,
+                sampling_evidence=sampling_evidence,
                 chunk_paths=chunk_paths,
                 chunk_concurrency=chunk_concurrency,
                 on_progress=on_progress,
             )
+            strategy = merge_chunk_sampling_strategy(
+                strategy,
+                chunk_plan,
+                mode=sampling_mode,
+                prescan=prescan,
+            )
+            _add_artifact(
+                audit_files,
+                "sampling.chunk_strategy",
+                _write_audit_json(audit_root, "01-sampling/chunk-strategy.json", strategy),
+            )
+            _persist_sampling_evidence(audit_root, audit_files, sampling_evidence)
             return await _analyze_video_chunks(
                 chunk_paths,
                 chunk_plan,
@@ -1942,13 +2202,26 @@ async def analyze_video_many(
                 strategy=strategy,
                 audit_dir=audit_root,
                 audit_files=audit_files,
+                sampling_evidence=sampling_evidence,
                 file_active_timeout_sec=file_active_timeout_sec,
                 response_timeout_sec=response_timeout_sec,
                 chunk_concurrency=chunk_concurrency,
                 on_progress=on_progress,
             )
 
-    await _call_progress(on_progress, "uploading", {"path": str(video_path)})
+    await _call_progress(on_progress, "uploading", {
+        "file_name": video_path.name,
+        "requested_fps": fps,
+        "planned_frame_count": actual_frames_est,
+    })
+    _record_upload_evidence(
+        sampling_evidence,
+        phase="precision_analysis",
+        fps=fps,
+        duration_sec=duration,
+        model=model,
+    )
+    _persist_sampling_evidence(audit_root, audit_files, sampling_evidence)
     try:
         file_obj = await _upload_with_preprocess(
             files_client, video_path, fps=fps, model=model
@@ -1961,13 +2234,34 @@ async def analyze_video_many(
         raise APIError(f"Files API 返回缺 id: {file_obj!r}")
 
     await _call_progress(on_progress, "uploaded", {"file_id": file_id})
+    _record_upload_evidence(
+        sampling_evidence,
+        phase="precision_analysis",
+        fps=fps,
+        duration_sec=duration,
+        model=model,
+        file_obj=file_obj,
+        record_request=False,
+    )
+    _persist_sampling_evidence(audit_root, audit_files, sampling_evidence)
 
     # 5. 等 active
-    await _wait_for_active(
+    active_obj = await _wait_for_active(
         files_client, file_id,
         timeout_sec=file_active_timeout_sec,
         on_progress=on_progress,
     )
+    _record_upload_evidence(
+        sampling_evidence,
+        phase="precision_analysis",
+        fps=fps,
+        duration_sec=duration,
+        model=model,
+        file_obj=file_obj,
+        active_obj=active_obj,
+        record_request=False,
+    )
+    _persist_sampling_evidence(audit_root, audit_files, sampling_evidence)
 
     # 6. 用同一个 file_id 按多个 prompt 顺序拆解
     results: dict[str, AnalyzeResult] = {}
@@ -2012,6 +2306,15 @@ async def analyze_video_many(
         text, usage = call.text, call.usage
         if not text.strip():
             raise APIError(f"Responses API 未返回可写入的分析文本: {intent}")
+        _record_response_evidence(
+            sampling_evidence,
+            phase="precision_analysis",
+            model=model,
+            usage=usage,
+            text_length=len(text),
+            intent=intent,
+        )
+        _persist_sampling_evidence(audit_root, audit_files, sampling_evidence)
         save_response_memory(
             media_type="douyin_video",
             source_id=memory_source_id,
@@ -2057,11 +2360,13 @@ async def _prepare_long_video_strategy(
     chunk_concurrency: int = _CHUNK_ANALYSIS_CONCURRENCY,
     audit_dir: Optional[Path] = None,
     audit_files: Optional[dict[str, Any]] = None,
+    sampling_evidence: Optional[dict[str, Any]] = None,
     on_progress: ProgressCb,
 ) -> dict[str, Any]:
-    """Run a 1fps full-video overview or chunked overview and return a per-chunk strategy."""
+    """Run a 2fps full-video overview or chunked overview and return a per-chunk strategy."""
     overview_duration = float(chunk_plan[-1]["end_sec"]) if chunk_plan else 0.0
     audit_files = audit_files if audit_files is not None else {}
+    strategy_usages: list[dict[str, Any]] = []
     try:
         if _is_ultra_long_video(overview_duration):
             call = await _prepare_chunked_overview_strategy(
@@ -2074,6 +2379,7 @@ async def _prepare_long_video_strategy(
                 duration_sec=overview_duration,
                 audit_dir=audit_dir,
                 audit_files=audit_files,
+                sampling_evidence=sampling_evidence,
                 file_active_timeout_sec=file_active_timeout_sec,
                 response_timeout_sec=response_timeout_sec,
                 chunk_concurrency=chunk_concurrency,
@@ -2086,6 +2392,14 @@ async def _prepare_long_video_strategy(
                 "chunk_count": len(chunk_plan),
                 "model": strategy_model,
             })
+            _record_upload_evidence(
+                sampling_evidence,
+                phase="overview_strategy",
+                fps=overview_fps,
+                duration_sec=overview_duration,
+                model=strategy_model,
+            )
+            _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
             file_obj = await _upload_with_preprocess(
                 files_client, video_path, fps=overview_fps, model=strategy_model
             )
@@ -2096,12 +2410,33 @@ async def _prepare_long_video_strategy(
                 "file_id": file_id,
                 "fps": overview_fps,
             })
-            await _wait_for_active(
+            _record_upload_evidence(
+                sampling_evidence,
+                phase="overview_strategy",
+                fps=overview_fps,
+                duration_sec=overview_duration,
+                model=strategy_model,
+                file_obj=file_obj,
+                record_request=False,
+            )
+            _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
+            active_obj = await _wait_for_active(
                 files_client,
                 file_id,
                 timeout_sec=file_active_timeout_sec,
                 on_progress=on_progress,
             )
+            _record_upload_evidence(
+                sampling_evidence,
+                phase="overview_strategy",
+                fps=overview_fps,
+                duration_sec=overview_duration,
+                model=strategy_model,
+                file_obj=file_obj,
+                active_obj=active_obj,
+                record_request=False,
+            )
+            _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
             overview_prompt = _build_long_overview_prompt(
                 duration_sec=overview_duration,
                 chunk_plan=chunk_plan,
@@ -2135,6 +2470,15 @@ async def _prepare_long_video_strategy(
                     "fps": overview_fps,
                 },
             )
+            _record_response_evidence(
+                sampling_evidence,
+                phase="overview_strategy",
+                model=strategy_model,
+                usage=call.usage,
+                text_length=len(call.text),
+            )
+            _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
+        strategy_usages.append(call.usage)
         if not call.text.strip():
             raise APIError("Responses API 未返回长视频概览策略文本")
         _add_artifact(
@@ -2191,6 +2535,15 @@ async def _prepare_long_video_strategy(
                     "reason": repair_reason,
                 },
             )
+            _record_response_evidence(
+                sampling_evidence,
+                phase="overview_strategy_repair",
+                model=strategy_model,
+                usage=repair.usage,
+                text_length=len(repair.text),
+            )
+            _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
+            strategy_usages.append(repair.usage)
             _add_artifact(
                 audit_files,
                 "mini.strategy_repair_raw",
@@ -2281,6 +2634,9 @@ async def _prepare_long_video_strategy(
                     if isinstance(item, dict)
                 ],
             })
+        strategy["usage_by_model"] = {
+            strategy_model: _combine_usage(strategy_usages),
+        }
         _add_artifact(
             audit_files,
             "mini.overview_strategy_final",
@@ -2290,6 +2646,9 @@ async def _prepare_long_video_strategy(
     except Exception as e:
         reason = f"长视频概览策略失败，按 5fps 分片兜底: {e}"
         strategy = _strategy_fallback(chunk_plan, reason=reason)
+        strategy["usage_by_model"] = {
+            strategy_model: _combine_usage(strategy_usages),
+        }
         _write_strategy_log("overview_strategy_failed", {
             "source_id": source_id,
             "strategy_model": strategy_model,
@@ -2321,12 +2680,13 @@ async def _prepare_chunked_overview_strategy(
     duration_sec: float,
     audit_dir: Optional[Path] = None,
     audit_files: Optional[dict[str, Any]] = None,
+    sampling_evidence: Optional[dict[str, Any]] = None,
     file_active_timeout_sec: int,
     response_timeout_sec: int,
     chunk_concurrency: int,
     on_progress: ProgressCb,
 ) -> ResponseCallResult:
-    """Build ultra-long-video strategy from 1fps overview chunks."""
+    """Build ultra-long-video strategy from 2fps overview chunks."""
     if len(chunk_paths) != len(chunk_plan):
         raise AnalyzerError("超长视频概览切片数量与计划不一致")
     audit_files = audit_files if audit_files is not None else {}
@@ -2373,6 +2733,15 @@ async def _prepare_chunked_overview_strategy(
             "model": strategy_model,
             "concurrency": chunk_concurrency,
         })
+        _record_upload_evidence(
+            sampling_evidence,
+            phase="overview_strategy_chunk",
+            fps=_LONG_OVERVIEW_FPS,
+            duration_sec=float(plan_item["end_sec"]) - float(plan_item["start_sec"]),
+            model=strategy_model,
+            part_index=part_index,
+        )
+        _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
         file_obj = await _upload_with_preprocess(
             files_client,
             chunk_path,
@@ -2387,12 +2756,35 @@ async def _prepare_chunked_overview_strategy(
             "chunk_count": total,
             "file_id": file_id,
         })
-        await _wait_for_active(
+        _record_upload_evidence(
+            sampling_evidence,
+            phase="overview_strategy_chunk",
+            fps=_LONG_OVERVIEW_FPS,
+            duration_sec=float(plan_item["end_sec"]) - float(plan_item["start_sec"]),
+            model=strategy_model,
+            file_obj=file_obj,
+            part_index=part_index,
+            record_request=False,
+        )
+        _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
+        active_obj = await _wait_for_active(
             files_client,
             file_id,
             timeout_sec=file_active_timeout_sec,
             on_progress=on_progress,
         )
+        _record_upload_evidence(
+            sampling_evidence,
+            phase="overview_strategy_chunk",
+            fps=_LONG_OVERVIEW_FPS,
+            duration_sec=float(plan_item["end_sec"]) - float(plan_item["start_sec"]),
+            model=strategy_model,
+            file_obj=file_obj,
+            active_obj=active_obj,
+            part_index=part_index,
+            record_request=False,
+        )
+        _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
         prompt = _build_overview_chunk_prompt(
             duration_sec=duration_sec,
             chunk_count=total,
@@ -2436,6 +2828,15 @@ async def _prepare_chunked_overview_strategy(
         )
         if not call.text.strip():
             raise APIError(f"Responses API 未返回超长概览切片文本 part={part_index}")
+        _record_response_evidence(
+            sampling_evidence,
+            phase="overview_strategy_chunk",
+            model=strategy_model,
+            usage=call.usage,
+            text_length=len(call.text),
+            part_index=part_index,
+        )
+        _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
         async with lock:
             pieces.append((part_index, call.text.strip()))
             usages.append(call.usage)
@@ -2510,6 +2911,14 @@ async def _prepare_chunked_overview_strategy(
             "model": strategy_model,
         },
     )
+    _record_response_evidence(
+        sampling_evidence,
+        phase="overview_strategy_synthesis",
+        model=strategy_model,
+        usage=synth.usage,
+        text_length=len(synth.text),
+    )
+    _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
     _add_artifact(
         audit_files,
         "mini.chunked_strategy_raw",
@@ -2541,6 +2950,7 @@ async def _analyze_video_chunks(
     strategy: Optional[dict[str, Any]],
     audit_dir: Optional[Path] = None,
     audit_files: Optional[dict[str, Any]] = None,
+    sampling_evidence: Optional[dict[str, Any]] = None,
     file_active_timeout_sec: int,
     response_timeout_sec: int,
     chunk_concurrency: int = _CHUNK_ANALYSIS_CONCURRENCY,
@@ -2675,6 +3085,15 @@ async def _analyze_video_chunks(
             "strategy_lite_brief": str(strategy_item.get("lite_brief") or "")[:300],
             "missing_intents": missing_intents,
         })
+        _record_upload_evidence(
+            sampling_evidence,
+            phase="precision_chunk",
+            fps=fps,
+            duration_sec=chunk_duration,
+            model=model,
+            part_index=part_index,
+        )
+        _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
         try:
             file_obj = await _upload_with_preprocess(files_client, chunk_path, fps=fps, model=model)
         except Exception as e:
@@ -2687,12 +3106,35 @@ async def _analyze_video_chunks(
             "chunk_count": total,
             "file_id": file_id,
         })
-        await _wait_for_active(
+        _record_upload_evidence(
+            sampling_evidence,
+            phase="precision_chunk",
+            fps=fps,
+            duration_sec=chunk_duration,
+            model=model,
+            file_obj=file_obj,
+            part_index=part_index,
+            record_request=False,
+        )
+        _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
+        active_obj = await _wait_for_active(
             files_client,
             file_id,
             timeout_sec=file_active_timeout_sec,
             on_progress=on_progress,
         )
+        _record_upload_evidence(
+            sampling_evidence,
+            phase="precision_chunk",
+            fps=fps,
+            duration_sec=chunk_duration,
+            model=model,
+            file_obj=file_obj,
+            active_obj=active_obj,
+            part_index=part_index,
+            record_request=False,
+        )
+        _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
 
         for intent in missing_intents:
             chunk_prompt = intent_prompts[intent]
@@ -2727,6 +3169,16 @@ async def _analyze_video_chunks(
             )
             if not call.text.strip():
                 raise APIError(f"Responses API 未返回可写入的分片分析文本: {intent} part={part_index}")
+            _record_response_evidence(
+                sampling_evidence,
+                phase="precision_chunk",
+                model=model,
+                usage=call.usage,
+                text_length=len(call.text),
+                part_index=part_index,
+                intent=intent,
+            )
+            _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
             text_piece = (
                 f"## 分片 {part_index}/{total} "
                 f"({float(plan_item['start_sec']):.1f}s - {float(plan_item['end_sec']):.1f}s)\n\n"
@@ -2854,7 +3306,28 @@ async def _analyze_video_chunks(
             },
         )
         final_response_id = synth.response_id or previous_memory_response.get(intent)
-        final_usage = _combine_usage(per_intent_usages[intent] + [synth.usage])
+        main_usage = _combine_usage(per_intent_usages[intent] + [synth.usage])
+        usage_by_model: dict[str, dict[str, Any]] = {}
+        strategy_usage_by_model = (strategy or {}).get("usage_by_model", {})
+        if isinstance(strategy_usage_by_model, dict):
+            for usage_model, model_usage in strategy_usage_by_model.items():
+                if isinstance(model_usage, dict):
+                    usage_by_model[str(usage_model)] = _combine_usage([model_usage])
+        usage_by_model[model] = _combine_usage([
+            usage_by_model.get(model, {}),
+            main_usage,
+        ])
+        final_usage = _combine_usage(list(usage_by_model.values()))
+        final_usage["usage_by_model"] = usage_by_model
+        _record_response_evidence(
+            sampling_evidence,
+            phase="chunk_synthesis",
+            model=model,
+            usage=synth.usage,
+            text_length=len(synth.text),
+            intent=intent,
+        )
+        _persist_sampling_evidence(audit_dir, audit_files, sampling_evidence)
         _add_artifact(
             audit_files,
             f"lite.{intent}.synthesis_output",

@@ -42,8 +42,9 @@ The WebSocket control server writes:
    Cookie path. The current runtime always uses the `quality` analysis profile.
 3. `downloader.py` converts the extension's Netscape Cookie file into a header
    string and monkey-patches the vendor crawler in memory.
-4. `analyzer.py` uses the ordinary Ark API path only: upload the local video
-   through Files API with `preprocess_configs.video.fps` and
+4. `analyzer.py` runs a local change-only prescan for automatic mode, then uses
+   the ordinary Ark API path only: upload the local video through Files API
+   with `preprocess_configs.video.fps` and
    `preprocess_configs.video.model`, wait for the file to become `active`, then
    call Responses API with `input_video.file_id` and `store=true`.
 5. `ingest.py` chooses the media-specific knowledge prompt and writes one
@@ -79,17 +80,21 @@ The WebSocket control server writes:
   error.
 - Ordinary Ark Responses content uses `{"type": "input_video", "file_id": ...}`
   plus an `input_text` prompt.
-- The current runtime fixes analysis to `quality` (1250 target frames). The Chrome extension must
-  not expose quality, fps, or target-frame settings.
+- The current runtime fixes analysis to `quality` and supports
+  `analysis.video_fps_mode = "auto" | "fixed_2" | "fixed_3" | "fixed_5"`.
+  Automatic mode uses a local 1fps grayscale prescan only to measure visual
+  change, then requests 2-5fps for model analysis. Model video uploads reject
+  values below 2fps. The Chrome extension does not expose the legacy quality
+  or target-frame settings.
 - Re-upload when fps/model preprocessing changes; do not cache `file_id`.
 - Responses memory is short-term only. Store returned `response_id` under
   `~/.agent-wiki/responses-memory/` for 3 days; never write it into
   vault Markdown, task status, or strategy logs.
-- Videos longer than 10 minutes first run a full-video overview at `1fps` when
-  duration is `<= 1230s` (20m30s), leaving about 20 frames of margin below the
-  1250-frame safety target, with the strategy model (`models.strategy`, default
-  mini). If duration is `> 1230s`, treat it as an ultra-long video: split the
-  overview phase too, analyze each 240s chunk at `1fps`, synthesize those rough
+- Videos longer than 10 minutes first run a full-video overview at `2fps` when
+  duration is `<= 615s`, leaving 20 frames of margin below the 1250-frame
+  safety target, with the strategy model (`models.strategy`, default mini). If
+  duration is `> 615s`, split the overview phase too, analyze each 240s chunk
+  at `2fps`, synthesize those rough
   overviews into the same global strategy JSON, then continue through the normal
   long-video precision pass. This means duration scales by chunk count; the
   practical limits are still file size, download time, task timeout, and model
@@ -103,10 +108,24 @@ The WebSocket control server writes:
   repaired once by the same strategy model via `previous_response_id`; structural
   fallback and fps adjustment are tracked separately. Text-only Responses then
   synthesizes the final asset body from the overview and chunk results.
+- A shorter high-change video is also split when its selected upload FPS would
+  exceed the 1250-frame safety budget; this preserves the requested density
+  instead of silently relying on server-side uniform resampling.
 - Video ingest writes inspectable intermediate artifacts under
   `~/.agent-wiki/run-artifacts/{task_id}/`: mini chunk overview
   prompts/outputs, strategy synthesis and repair artifacts, Lite chunk
   prompts/outputs, and final synthesis prompt/output.
+- `01-sampling/evidence.json` separates local reproduction frames and
+  thumbnails, requested upload FPS/planned frame counts, and provider-returned
+  facts. Ark does not return the exact frames consumed by the model, so that
+  field remains explicitly unavailable instead of being inferred.
+- Status JSON keeps an ordered, redacted `audit_events` timeline in addition
+  to the latest progress snapshot.
+- Cost estimation uses provider-returned usage only. It splits audio from
+  non-audio input, preserves reasoning-token facts without double charging,
+  applies the official input-length tier per model, and sums Mini/Lite stages
+  separately. Unknown pricing returns unavailable instead of using a fallback
+  rate; the amount remains an estimate rather than the final invoice.
 - Strategy fallbacks and JSON repair results are logged to
   `~/.agent-wiki/logs/video-strategy-events.jsonl` without API keys,
   Cookies, Bearer tokens, or `response_id`.

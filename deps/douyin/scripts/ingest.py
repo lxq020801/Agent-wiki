@@ -1048,6 +1048,7 @@ async def run_task(
             file_endpoint=config.files_endpoint,
             quality=quality,
             quality_params={
+                "fps_mode": config.video_fps_mode,
                 "fps_min": config.fps_min,
                 "fps_max": config.fps_max,
                 "target_frames": (

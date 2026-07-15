@@ -57,10 +57,11 @@ strategy = "doubao-seed-2-0-mini-260428"
 analyzer_fallback = "doubao-seed-2-0-mini-260428"
 
 [analysis]
+video_fps_mode = "auto"
 default_quality = "quality"
 balanced_target_frames = 240
 quality_target_frames = 1250
-fps_min = 0.2
+fps_min = 2.0
 fps_max = 5.0
 file_active_timeout_sec = 120
 

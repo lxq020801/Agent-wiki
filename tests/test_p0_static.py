@@ -36,6 +36,7 @@ analyzer = "doubao-seed-2-0-lite-260428"
 analyzer_fallback = "doubao-seed-2-0-mini-260428"
 
 [analysis]
+video_fps_mode = "fixed_3"
 default_quality = "balanced"
 balanced_target_frames = 240
 quality_target_frames = 1250
@@ -63,6 +64,9 @@ port = 8765
     assert cfg.vault_relative_root == "知识资产/知识入库"
     assert cfg.default_quality == "quality"
     assert cfg.strategy_model == "doubao-seed-2-0-mini-260428"
+    assert cfg.video_fps_mode == "fixed_3"
+    assert cfg.fps_min == 2.0
+    assert cfg.quality_params("quality")["fps_mode"] == "fixed_3"
 
 
 def test_config_loader_rejects_invalid_ark_endpoints(tmp: Path) -> None:
@@ -1846,11 +1850,12 @@ def test_websocket_config_writer(tmp: Path) -> None:
     assert cfg.vault_relative_root == "知识资产/知识入库"
     assert cfg.default_quality == "quality"
     assert cfg.quality_target_frames == 1250
-    assert cfg.fps_min == 0.2
+    assert cfg.fps_min == 2.0
     assert cfg.fps_max == 5.0
     assert cfg.response_timeout_sec == 900
     assert cfg.strategy_model == "doubao-seed-2-0-mini-260428"
     assert cfg.chunk_concurrency == 4
+    assert cfg.video_fps_mode == "auto"
     assert server.task_concurrency == 3
 
     config_path = tmp / "ws-runtime" / "config.toml"
@@ -1904,6 +1909,395 @@ def test_quality_fps_stays_5_until_safe_frame_target() -> None:
     assert truncated is False
 
 
+def _prescan_metrics(
+    *,
+    mean: float,
+    p90: float,
+    peak: float,
+    point_ratio: float,
+    coverage_ratio: float = 1.0,
+) -> dict:
+    return {
+        "ok": True,
+        "mean_change_score": mean,
+        "p90_change_score": p90,
+        "peak_change_score": peak,
+        "change_point_ratio": point_ratio,
+        "coverage_ratio": coverage_ratio,
+    }
+
+
+def test_adaptive_sampling_regression_scenarios() -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from video_sampling import decide_sampling_fps
+
+    low_change_51s = decide_sampling_fps(
+        mode="auto",
+        duration_sec=51.5,
+        prescan=_prescan_metrics(
+            mean=0.003,
+            p90=0.009,
+            peak=0.08,
+            point_ratio=0.02,
+        ),
+    )
+    assert low_change_51s["selected_fps"] == 2.0
+    assert low_change_51s["fallback_applied"] is False
+
+    complex_demo = decide_sampling_fps(
+        mode="auto",
+        duration_sec=180,
+        prescan=_prescan_metrics(
+            mean=0.041,
+            p90=0.11,
+            peak=0.45,
+            point_ratio=0.22,
+        ),
+        risk_hints={"presentation_risk": 4, "ocr_risk": 5, "action_risk": 5},
+    )
+    assert complex_demo["selected_fps"] == 5.0
+
+    ultra_long = decide_sampling_fps(
+        mode="auto",
+        duration_sec=3600,
+        prescan=_prescan_metrics(
+            mean=0.002,
+            p90=0.008,
+            peak=0.04,
+            point_ratio=0.01,
+            coverage_ratio=1 / 6,
+        ),
+    )
+    assert ultra_long["selected_fps"] == 3.0
+    assert any("ultra-long" in reason for reason in ultra_long["decision_reasons"])
+
+    failed = decide_sampling_fps(
+        mode="auto",
+        duration_sec=51.5,
+        prescan={"ok": False, "failure_reason": "ffmpeg timeout"},
+    )
+    assert failed["selected_fps"] == 5.0
+    assert failed["fallback_applied"] is True
+    assert failed["fallback_reason"] == "ffmpeg timeout"
+
+    for mode, expected in (("fixed_2", 2.0), ("fixed_3", 3.0), ("fixed_5", 5.0)):
+        fixed = decide_sampling_fps(
+            mode=mode,
+            duration_sec=51.5,
+            prescan={"ok": False, "failure_reason": "must be ignored"},
+        )
+        assert fixed["selected_fps"] == expected
+        assert fixed["fallback_applied"] is False
+
+
+def test_local_prescan_writes_reproduction_evidence(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import video_sampling
+
+    frame_size = 96 * 54
+    raw = bytes(frame_size) + bytes(frame_size) + bytes([255]) * frame_size
+    calls = []
+
+    def fake_runner(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout=raw, stderr=b"")
+
+    result = video_sampling.prescan_video(
+        tmp / "sample.mp4",
+        51.5,
+        thumbnail_dir=tmp / "thumbs",
+        runner=fake_runner,
+    )
+
+    assert result["ok"] is True
+    assert result["purpose"] == "local_visual_change_measurement_only"
+    assert result["sample_fps"] == 1.0
+    assert result["sample_count"] == 3
+    assert result["timestamps_sec"] == [0.0, 1.0, 2.0]
+    assert [item["timestamp_sec"] for item in result["change_points"]] == [2.0]
+    assert result["visual_risk_proxies"]["basis"] == "visual_change_only_not_ocr_or_content_recognition"
+    assert result["visual_risk_proxies"]["action_risk"] == 5.0
+    assert len(list((tmp / "thumbs").glob("*.pgm"))) == 3
+    assert "fps=1" in calls[0][0][calls[0][0].index("-vf") + 1]
+
+
+def test_analyzer_uses_adaptive_sampling_and_persists_provider_facts(tmp: Path) -> None:
+    import asyncio
+    import sys
+
+    runtime = tmp / "adaptive-analyzer-runtime"
+    os.environ["AGENT_WIKI_HOME"] = str(runtime)
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    video = tmp / "low-change-51s.mp4"
+    video.write_bytes(b"fake-video")
+    uploads = []
+    progress = []
+
+    async def fake_upload(client, path, *, fps, model):
+        uploads.append((Path(path).name, fps, model))
+        return SimpleNamespace(id="file-adaptive", status="processing", filename="private.mp4")
+
+    async def fake_wait(*args, **kwargs):
+        return SimpleNamespace(id="file-adaptive", status="active")
+
+    async def fake_stream(*args, **kwargs):
+        return analyzer.ResponseCallResult(
+            text="自适应分析结果",
+            usage={
+                "input_tokens": 100,
+                "input_tokens_details": {"audio_tokens": 10},
+                "output_tokens": 20,
+                "output_tokens_details": {"reasoning_tokens": 5},
+                "total_tokens": 120,
+            },
+            response_id="resp-do-not-audit",
+        )
+
+    async def on_progress(stage, info):
+        progress.append((stage, info))
+
+    old_duration = analyzer.get_duration_sec
+    old_prescan = analyzer.prescan_video
+    old_build_client = analyzer._build_client
+    old_build_response = analyzer._build_response_client
+    old_upload = analyzer._upload_with_preprocess
+    old_wait = analyzer._wait_for_active
+    old_stream = analyzer._stream_responses
+    try:
+        analyzer.get_duration_sec = lambda path: 51.5
+        analyzer.prescan_video = lambda *args, **kwargs: {
+            **_prescan_metrics(mean=0.002, p90=0.008, peak=0.03, point_ratio=0.01),
+            "purpose": "local_visual_change_measurement_only",
+            "sample_fps": 1.0,
+            "sample_count": 52,
+            "elapsed_sec": 0.7,
+            "timestamps_sec": [float(i) for i in range(52)],
+            "thumbnail_manifest": [
+                {"timestamp_sec": float(i), "thumbnail": f"frame-{i:04d}.pgm"}
+                for i in range(52)
+            ],
+            "change_points": [],
+            "failure_reason": "",
+        }
+        analyzer._build_client = lambda *args, **kwargs: SimpleNamespace()
+        analyzer._build_response_client = lambda *args, **kwargs: SimpleNamespace()
+        analyzer._upload_with_preprocess = fake_upload
+        analyzer._wait_for_active = fake_wait
+        analyzer._stream_responses = fake_stream
+        result = asyncio.run(analyzer.analyze_video(
+            video,
+            "prompt",
+            api_key="test-key",
+            endpoint="https://ark.cn-beijing.volces.com/api/v3",
+            model="doubao-seed-2-0-lite-260428",
+            source_id="source-adaptive",
+            audit_id="task-adaptive",
+            quality_params={"fps_mode": "auto", "target_frames": 1250},
+            on_progress=on_progress,
+        ))
+    finally:
+        analyzer.get_duration_sec = old_duration
+        analyzer.prescan_video = old_prescan
+        analyzer._build_client = old_build_client
+        analyzer._build_response_client = old_build_response
+        analyzer._upload_with_preprocess = old_upload
+        analyzer._wait_for_active = old_wait
+        analyzer._stream_responses = old_stream
+
+    assert uploads == [("low-change-51s.mp4", 2.0, "doubao-seed-2-0-lite-260428")]
+    assert result.fps_used == 2.0
+    assert result.actual_frames_estimate == 103
+    assert any(stage == "prescanning_done" for stage, _ in progress)
+    assert any(stage == "fps_decided" and info["mode"] == "auto" for stage, info in progress)
+    evidence_path = runtime / "run-artifacts" / "task-adaptive" / "01-sampling" / "evidence.json"
+    evidence_text = evidence_path.read_text(encoding="utf-8")
+    evidence = json.loads(evidence_text)
+    vendor = evidence["truth_boundaries"]["vendor_returned_facts"]
+    assert vendor["actual_model_frames"] is None
+    assert vendor["files"][0]["active_response"]["status"] == "active"
+    assert vendor["responses"][0]["usage"]["input_tokens_details"]["audio_tokens"] == 10
+    assert "resp-do-not-audit" not in evidence_text
+    assert "private.mp4" not in evidence_text
+
+
+def test_sampling_audit_keeps_truth_boundaries_and_redacts(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    prescan = {
+        "ok": True,
+        "purpose": "local_visual_change_measurement_only",
+        "sample_count": 2,
+        "timestamps_sec": [0.0, 1.0],
+        "thumbnail_manifest": [{"timestamp_sec": 0.0, "thumbnail": "frame.pgm"}],
+    }
+    decision = {"mode": "auto", "selected_fps": 2.0, "policy_version": "test"}
+    evidence = analyzer._new_sampling_evidence(
+        mode="auto",
+        duration_sec=51.5,
+        prescan=prescan,
+        decision=decision,
+    )
+    analyzer._record_upload_evidence(
+        evidence,
+        phase="precision_analysis",
+        fps=2.0,
+        duration_sec=51.5,
+        model="doubao-seed-2-0-lite-260428",
+        file_obj={
+            "id": "file-safe",
+            "status": "processing",
+            "authorization": "Bearer secret",
+            "url": "https://example.test/upload?api_key=secret",
+        },
+        active_obj={"id": "file-safe", "status": "active", "cookie": "sid=secret"},
+    )
+    analyzer._record_response_evidence(
+        evidence,
+        phase="precision_analysis",
+        model="doubao-seed-2-0-lite-260428",
+        usage={"input_tokens": 10, "output_tokens": 2},
+        text_length=100,
+        intent="knowledge_ingest",
+    )
+    artifacts = {}
+    analyzer._persist_sampling_evidence(tmp, artifacts, evidence)
+    payload = json.loads((tmp / "01-sampling" / "evidence.json").read_text(encoding="utf-8"))
+    text = json.dumps(payload)
+
+    assert payload["truth_boundaries"]["local_reproduction_evidence"]["facts"]["sample_count"] == 2
+    request = payload["truth_boundaries"]["upload_request_facts"]["requests"][0]
+    assert request["requested_fps"] == 2.0
+    assert request["planned_frame_count"] == 103
+    vendor = payload["truth_boundaries"]["vendor_returned_facts"]
+    assert vendor["actual_model_frames"] is None
+    assert vendor["actual_model_frames_availability"] == "not_returned_by_provider"
+    assert vendor["files"][0]["active_response"]["status"] == "active"
+    assert vendor["responses"][0]["usage"]["input_tokens"] == 10
+    assert "secret" not in text
+    assert "authorization" not in text.lower()
+    assert "cookie" not in text.lower()
+    assert "response_id" not in text.lower()
+
+
+def test_official_tiered_cost_and_display_rules() -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+    from cost_estimator import estimate_cost_rmb, format_cost_rmb
+
+    sample = estimate_cost_rmb("doubao-seed-2-0-lite-260428", {
+        "input_tokens": 84_691,
+        "input_tokens_details": {"audio_tokens": 322},
+        "output_tokens": 2_517,
+        "output_tokens_details": {"reasoning_tokens": 1_146},
+        "total_tokens": 87_208,
+    })
+    assert sample["non_audio_input_tokens"] == 84_369
+    assert sample["audio_input_tokens"] == 322
+    assert sample["reasoning_tokens"] == 1_146
+    assert sample["cost_rmb_estimate"] == 0.0938709
+    assert sample["cost_rmb_display"] == "¥0.09"
+    assert sample["pricing"]["input_length_tier"] == "(32000, 128000]"
+    assert sample["pricing"]["rates"] == {
+        "non_audio_input": 0.9,
+        "audio_input": 13.5,
+        "output": 5.4,
+    }
+
+    expected_rates = (
+        (32_000, 0.6),
+        (32_001, 0.9),
+        (128_000, 0.9),
+        (128_001, 1.8),
+        (256_000, 1.8),
+    )
+    for input_tokens, expected_rate in expected_rates:
+        estimate = estimate_cost_rmb("doubao-seed-2-0-lite-260428", {
+            "input_tokens": input_tokens,
+            "output_tokens": 0,
+            "total_tokens": input_tokens,
+        })
+        assert estimate["pricing"]["rates"]["non_audio_input"] == expected_rate
+    over_verified_tiers = estimate_cost_rmb("doubao-seed-2-0-lite-260428", {
+        "input_tokens": 256_001,
+        "output_tokens": 0,
+        "total_tokens": 256_001,
+    })
+    assert over_verified_tiers["estimate_available"] is False
+
+    split = estimate_cost_rmb("doubao-seed-2-0-lite-260428", {
+        "input_tokens": 1_000,
+        "input_tokens_details": {"audio_tokens": 200},
+        "output_tokens": 0,
+        "total_tokens": 1_000,
+    })
+    assert split["non_audio_input_tokens"] == 800
+    assert split["audio_input_tokens"] == 200
+    assert split["cost_rmb_estimate"] == 0.00228
+    assert split["cost_rmb_display"] == "<¥0.01"
+    assert format_cost_rmb(0) == "¥0.00"
+    assert format_cost_rmb(0.009999) == "<¥0.01"
+    assert format_cost_rmb(0.095) == "¥0.10"
+
+    combined = analyzer._combine_usage([
+        {
+            "input_tokens": 10,
+            "input_tokens_details": {"audio_tokens": 2},
+            "output_tokens": 3,
+            "output_tokens_details": {"reasoning_tokens": 1},
+        },
+        {
+            "input_tokens": 20,
+            "input_tokens_details": {"audio_tokens": 4},
+            "output_tokens": 5,
+            "output_tokens_details": {"reasoning_tokens": 2},
+        },
+    ])
+    assert combined["input_tokens"] == 30
+    assert combined["input_tokens_details"]["audio_tokens"] == 6
+    assert combined["output_tokens_details"]["reasoning_tokens"] == 3
+
+    unavailable = estimate_cost_rmb("unknown-model", {
+        "input_tokens": 10,
+        "output_tokens": 2,
+        "total_tokens": 12,
+    })
+    assert unavailable["estimate_available"] is False
+    assert unavailable["cost_rmb_estimate"] is None
+    assert unavailable["cost_rmb_display"] == "不可用"
+
+    multi_model = estimate_cost_rmb("doubao-seed-2-0-lite-260428", {
+        "input_tokens": 2_000,
+        "output_tokens": 0,
+        "total_tokens": 2_000,
+        "usage_by_model": {
+            "doubao-seed-2-0-lite-260428": {
+                "input_tokens": 1_000,
+                "output_tokens": 0,
+                "total_tokens": 1_000,
+            },
+            "doubao-seed-2-0-mini-260428": {
+                "input_tokens": 1_000,
+                "output_tokens": 0,
+                "total_tokens": 1_000,
+            },
+        },
+    })
+    assert multi_model["cost_rmb_estimate"] == 0.0008
+    assert multi_model["cost_rmb_display"] == "<¥0.01"
+    assert len(multi_model["cost_breakdown_by_model"]) == 2
+
+
 def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
     import sys
     import time
@@ -1914,11 +2308,13 @@ def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
 
     assert analyzer.should_chunk_video(600) is False
     assert analyzer.should_chunk_video(601) is True
-    assert analyzer._long_overview_fps(1200) == 1.0
-    assert analyzer._long_overview_fps(1800) == 1.0
-    assert analyzer._ultra_long_threshold_sec() == 1230.0
-    assert analyzer._is_ultra_long_video(1230) is False
-    assert analyzer._is_ultra_long_video(1231) is True
+    assert analyzer._chunk_plan(300) == []
+    assert len(analyzer._chunk_plan(300, force_for_frame_budget=True)) == 2
+    assert analyzer._long_overview_fps(1200) == 2.0
+    assert analyzer._long_overview_fps(1800) == 2.0
+    assert analyzer._ultra_long_threshold_sec() == 615.0
+    assert analyzer._is_ultra_long_video(615) is False
+    assert analyzer._is_ultra_long_video(616) is True
     assert analyzer._is_ultra_long_video(1800) is True
     plan = analyzer._chunk_plan(601)
     assert len(plan) == 3
@@ -2015,6 +2411,7 @@ def test_status_writer_redacts_sensitive_fields(tmp: Path) -> None:
             "ok": True,
         },
     })
+    writer.update(cost_estimate={"cost_rmb_estimate": 0.09, "cost_rmb_display": "¥0.09"})
     writer.update(ok=False, stage="failed", error="failed with api_key=sk-error and resp-error")
 
     text = writer.path.read_text(encoding="utf-8")
@@ -2024,6 +2421,14 @@ def test_status_writer_redacts_sensitive_fields(tmp: Path) -> None:
     assert data["elapsed_sec"] >= 0
     assert data["task_duration_sec"] == data["elapsed_sec"]
     assert data["chunk_progress"]["2"]["chunk_uploaded"]["file_id"] == "file-safe"
+    assert [item["stage"] for item in data["audit_events"]] == [
+        "queued",
+        "chunk_uploaded",
+        "analyzing_done",
+        "cost_estimated",
+        "failed",
+    ]
+    assert [item["sequence"] for item in data["audit_events"]] == [1, 2, 3, 4, 5]
     assert "resp-secret" not in text
     assert "resp-old" not in text
     assert "sk-secret" not in text
@@ -2406,7 +2811,12 @@ def test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp: Path)
 
     assert strategy["ok"] is True
     assert all(item["recommended_fps"] == 2.0 for item in strategy["chunks"])
-    assert ("upload", 1.0, "doubao-seed-2-0-mini-260428") in calls
+    assert strategy["usage_by_model"]["doubao-seed-2-0-mini-260428"] == {
+        "input_tokens": 15,
+        "output_tokens": 5,
+        "total_tokens": 20,
+    }
+    assert ("upload", 2.0, "doubao-seed-2-0-mini-260428") in calls
     assert ("stream", "doubao-seed-2-0-mini-260428", "file-overview", None) in calls
     assert ("repair", "doubao-seed-2-0-mini-260428", "resp-overview", True) in calls
     assert any(stage == "repairing_overview_strategy" for stage, _ in progress)
@@ -2533,7 +2943,7 @@ def test_prepare_long_video_strategy_chunks_unsafe_full_overview(tmp: Path) -> N
         analyzer._call_text_responses = old_text
 
     assert len(upload_calls) == len(plan)
-    assert all(call[1] == 1.0 for call in upload_calls)
+    assert all(call[1] == 2.0 for call in upload_calls)
     assert len(stream_calls) == len(plan)
     assert synth_calls == [("doubao-seed-2-0-mini-260428", None, True)]
     assert strategy["ok"] is True
@@ -2566,6 +2976,7 @@ def test_strategy_log_redacts_sensitive_values(tmp: Path) -> None:
             "arkApiKey=sk-camel\n"
             "{\"api_key\":\"sk-json\",\"cookie\":\"sid=json\",\"response_id\":\"abc-json\"}\n"
             "response_id=resp-secret"
+            "\nhttps://example.test/api?access_token=query-secret&signature=sig-secret"
         ),
         "nested": {
             "response_id": "resp-nested",
@@ -2590,6 +3001,8 @@ def test_strategy_log_redacts_sensitive_values(tmp: Path) -> None:
     assert "sid=json" not in text
     assert "abc-json" not in text
     assert "resp-secret" not in text
+    assert "query-secret" not in text
+    assert "sig-secret" not in text
     assert "resp-nested" not in text
     assert "abc-camel-response" not in text
     assert "sk-plan-camel" not in text
@@ -3346,14 +3759,14 @@ def test_analyzer_ark_file_protocol(tmp: Path) -> None:
         analyzer._upload_with_preprocess(
             client,
             video,
-            fps=0.3,
+            fps=2.0,
             model="doubao-seed-2-1-pro-260628",
         )
     )
     assert result.id == "file-uploaded"
     assert client.files.create_kwargs["purpose"] == "user_data"
     preprocess = client.files.create_kwargs["preprocess_configs"]["video"]
-    assert preprocess == {"fps": 0.3, "model": "doubao-seed-2-1-pro-260628"}
+    assert preprocess == {"fps": 2.0, "model": "doubao-seed-2-1-pro-260628"}
 
     class FallbackFiles:
         def __init__(self) -> None:
@@ -3372,14 +3785,26 @@ def test_analyzer_ark_file_protocol(tmp: Path) -> None:
         analyzer._upload_with_preprocess(
             fallback_client,
             video,
-            fps=0.5,
+            fps=3.0,
             model="doubao-seed-2-1-pro-260628",
         )
     )
     assert fallback_result.id == "file-fallback"
     assert fallback_client.files.calls == 2
     fallback_preprocess = fallback_client.files.create_kwargs["extra_body"]["preprocess_configs"]["video"]
-    assert fallback_preprocess == {"fps": 0.5, "model": "doubao-seed-2-1-pro-260628"}
+    assert fallback_preprocess == {"fps": 3.0, "model": "doubao-seed-2-1-pro-260628"}
+
+    try:
+        asyncio.run(analyzer._upload_with_preprocess(
+            client,
+            video,
+            fps=1.0,
+            model="doubao-seed-2-1-pro-260628",
+        ))
+    except analyzer.AnalyzerError as e:
+        assert "2-5" in str(e)
+    else:
+        raise AssertionError("model video uploads must never use 1 FPS")
 
     safe_size = tmp / "500mb.mp4"
     with safe_size.open("wb") as f:
@@ -4544,6 +4969,11 @@ def main() -> int:
         test_analyzer_rejects_empty_response_text(tmp)
         test_websocket_config_writer(tmp)
         test_quality_fps_stays_5_until_safe_frame_target()
+        test_adaptive_sampling_regression_scenarios()
+        test_local_prescan_writes_reproduction_evidence(tmp)
+        test_analyzer_uses_adaptive_sampling_and_persists_provider_facts(tmp)
+        test_sampling_audit_keeps_truth_boundaries_and_redacts(tmp)
+        test_official_tiered_cost_and_display_rules()
         test_video_chunk_threshold_and_memory_store(tmp)
         test_status_writer_redacts_sensitive_fields(tmp)
         test_long_video_strategy_accepts_top_level_segments_and_partial_fallback()
