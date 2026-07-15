@@ -60,7 +60,7 @@ from downloader import (  # noqa: E402
     download_video, fetch_metadata,
 )
 from status_writer import StatusWriter, write_terminal  # noqa: E402
-from server.vault_writer import vault_write_transaction  # noqa: E402
+from server.vault_writer import VAULT_GIT_STATUS, vault_write_transaction  # noqa: E402
 
 DEFAULT_INGEST_INTENT = "knowledge_ingest"
 INGEST_PROFILE = {
@@ -843,7 +843,7 @@ def _write_to_vault_locked(
         section=profile["section"],
         tags=tags,
     )
-    return md_path, "not_managed"
+    return md_path, VAULT_GIT_STATUS
 
 
 def write_to_vault(
@@ -958,7 +958,7 @@ def _write_image_post_to_vault_locked(
         section=profile["section"],
         tags=tags,
     )
-    return md_path, "not_managed"
+    return md_path, VAULT_GIT_STATUS
 
 
 def write_image_post_to_vault(

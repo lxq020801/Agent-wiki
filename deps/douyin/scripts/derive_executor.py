@@ -41,11 +41,11 @@ from status_writer import StatusWriter, write_terminal
 
 try:
     from server.github_service import register_derived_repository
-    from server.vault_writer import vault_write_transaction
+    from server.vault_writer import VAULT_GIT_STATUS, vault_write_transaction
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
     from server.github_service import register_derived_repository
-    from server.vault_writer import vault_write_transaction
+    from server.vault_writer import VAULT_GIT_STATUS, vault_write_transaction
 
 
 DEFAULT_BRIDGE_ROOT = Path.home() / ".agent-wiki"
@@ -1478,7 +1478,7 @@ def _finish_existing_target(
         "confidence": target.confidence,
         "evidence": target.evidence + ["vault 中已存在同一目标资产，已避免重复写入"],
     }
-    git_status = "not_managed"
+    git_status = VAULT_GIT_STATUS
     touched = existing["touched"]
     _add_artifact(audit_files, "derive_write_result", _write_audit_json(
         audit_root,
@@ -1712,7 +1712,7 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
         "confidence": target.confidence,
         "evidence": target.evidence,
     }
-    git_status = "not_managed"
+    git_status = VAULT_GIT_STATUS
     github_integration = _register_github_target(target, md_path, config.vault_path)
     _add_artifact(audit_files, "derive_write_result", _write_audit_json(
         audit_root,
