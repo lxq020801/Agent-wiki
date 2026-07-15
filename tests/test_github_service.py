@@ -47,6 +47,15 @@ class MemoryTokenStore:
         self.token = ""
 
 
+class SilentWriteLossTokenStore(MemoryTokenStore):
+    def __init__(self) -> None:
+        super().__init__("")
+        self.set_calls = 0
+
+    def set(self, token: str) -> None:
+        self.set_calls += 1
+
+
 def repository(*, repository_id: int = 101, full_name: str = "openai/example", archived: bool = False) -> dict:
     owner, name = full_name.split("/", 1)
     return {
@@ -283,6 +292,66 @@ class GitHubServiceTests(unittest.TestCase):
                 if path.is_file():
                     self.assertNotIn("oauth-secret-token", path.read_text(encoding="utf-8", errors="ignore"))
 
+    def test_device_flow_rejects_silent_keychain_write_loss_and_persists_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            api = FakeAPI()
+            api.form_responses = [
+                {
+                    "device_code": "device-secret",
+                    "user_code": "ABCD-EFGH",
+                    "verification_uri": "https://github.com/login/device",
+                    "expires_in": 900,
+                    "interval": 5,
+                },
+                {"access_token": "oauth-secret-token", "token_type": "bearer"},
+            ]
+            store = SilentWriteLossTokenStore()
+            service = GitHubService(
+                runtime_root=root / "runtime",
+                config_path=root / "missing-config.toml",
+                client_id="Iv1Example123",
+                token_store=store,
+                api=api,
+            )
+
+            started = service.start_authorization()
+            with self.assertRaises(GitHubServiceError) as caught:
+                service.poll_authorization(started["flowId"])
+
+            self.assertEqual(caught.exception.code, "secure_store_failed")
+            self.assertEqual(caught.exception.details["stage"], "keychain_readback")
+            self.assertEqual(store.set_calls, 1)
+            self.assertTrue(store.deleted)
+            self.assertNotIn(("GET", "/user"), api.calls)
+            self.assertFalse(service.pending_flows)
+
+            status = service.status(validate=True)
+            self.assertEqual(status["state"], "authorization_failed")
+            self.assertFalse(status["authenticated"])
+            self.assertIsNone(status["account"])
+            self.assertEqual(status["authorizationState"], "failed")
+            self.assertEqual(status["lastAuthorizationError"]["stage"], "keychain_readback")
+
+            persisted = (root / "runtime" / "github" / "authorization.json").read_text(encoding="utf-8")
+            self.assertNotIn("oauth-secret-token", persisted)
+            self.assertNotIn("device-secret", persisted)
+            self.assertNotIn("deviceCode", persisted)
+            self.assertNotIn("access_token", persisted)
+            self.assertNotIn("Cookie", persisted)
+
+            reopened = GitHubService(
+                runtime_root=root / "runtime",
+                config_path=root / "missing-config.toml",
+                client_id="Iv1Example123",
+                token_store=MemoryTokenStore(),
+                api=FakeAPI(),
+            ).status(validate=True)
+            self.assertEqual(reopened["state"], "authorization_failed")
+            self.assertEqual(reopened["lastAuthorizationError"]["stage"], "keychain_readback")
+            self.assertFalse(reopened["authenticated"])
+            self.assertIsNone(reopened["account"])
+
     def test_device_flow_is_restored_without_requesting_a_second_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             api = FakeAPI()
@@ -413,6 +482,29 @@ class GitHubServiceTests(unittest.TestCase):
             active = service.status(validate=True)
             self.assertEqual(store.get_calls, 1)
             self.assertTrue(active["authenticated"])
+
+    def test_logout_invalidates_in_flight_status_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            api = BlockingAccountVerificationAPI()
+            service, store, _vault = self.make_service(Path(tmp), api=api)
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                validating = pool.submit(service.status, validate=True)
+                self.assertTrue(api.account_request_started.wait(timeout=1))
+
+                logged_out = service.logout()
+                self.assertFalse(logged_out["authenticated"])
+                self.assertEqual(logged_out["state"], "logged_out")
+
+                api.release_account_response.set()
+                validated = validating.result(timeout=2)
+
+            self.assertFalse(validated["authenticated"])
+            self.assertEqual(validated["state"], "logged_out")
+            self.assertEqual(validated["authorizationState"], "logged_out")
+            self.assertIsNone(validated["account"])
+            self.assertEqual(store.token, "")
+            self.assertFalse(service.status(validate=False)["authenticated"])
 
     def test_device_flow_denied_is_explicit_and_clears_pending_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -746,7 +838,7 @@ class GitHubServiceTests(unittest.TestCase):
         calls = []
 
         def runner(args, **kwargs):
-            calls.append(args)
+            calls.append((args, kwargs))
             stdout = "keychain-token\n" if "find-generic-password" in args else ""
             return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
@@ -754,13 +846,14 @@ class GitHubServiceTests(unittest.TestCase):
         self.assertEqual(store.get(), "keychain-token")
         store.set("new-token")
         store.delete()
-        self.assertEqual([call[1] for call in calls], [
+        self.assertEqual([call[0][1] for call in calls], [
             "find-generic-password",
             "add-generic-password",
             "delete-generic-password",
         ])
-        self.assertIn("-U", calls[1])
-        self.assertNotIn("new-token", calls[1])
+        self.assertIn("-U", calls[1][0])
+        self.assertNotIn("new-token", calls[1][0])
+        self.assertEqual(calls[1][1]["input"], "new-token\nnew-token\n")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -102,8 +103,10 @@ class MacOSKeychainTokenStore:
             text=True,
             check=False,
         )
-        if proc.returncode != 0:
+        if proc.returncode == 44:
             return ""
+        if proc.returncode != 0:
+            raise GitHubServiceError("secure_store_failed", "无法读取 macOS Keychain 中的 GitHub 凭证。")
         return str(proc.stdout or "").strip()
 
     def set(self, token: str) -> None:
@@ -121,7 +124,9 @@ class MacOSKeychainTokenStore:
                 self.service,
                 "-w",
             ],
-            input=token + "\n",
+            # A trailing -w prompts for the password twice. Supplying both
+            # lines over stdin keeps the token out of the process arguments.
+            input=f"{token}\n{token}\n",
             capture_output=True,
             text=True,
             check=False,
@@ -366,10 +371,13 @@ class GitHubService:
         self.github_root = self.runtime_root / "github"
         self.settings_path = self.github_root / "settings.json"
         self.registry_path = self.github_root / "repositories.json"
+        self.authorization_path = self.github_root / "authorization.json"
         self.pending_flows: dict[str, dict[str, Any]] = {}
         self.pending_refreshes: dict[str, dict[str, Any]] = {}
         self.import_batches: dict[str, dict[str, Any]] = {}
         self._account_cache: dict[str, Any] = {}
+        self._verified_token_hash = ""
+        self._auth_generation = 0
         self._authenticated_flow_id = ""
         self._token_presence_cache: dict[str, Any] = {"known": False, "present": False, "expiresAt": 0.0}
         self._write_lock = threading.RLock()
@@ -428,10 +436,108 @@ class GitHubService:
         _atomic_json(self.settings_path, settings)
         return self.status(validate=False)
 
+    def authorization_status(self) -> dict[str, Any]:
+        value = _read_json(self.authorization_path, {"state": "logged_out"})
+        state = str(value.get("state") or "logged_out")
+        if state not in {"logged_out", "waiting_for_user", "ready", "failed", "cancelled"}:
+            state = "logged_out"
+        result: dict[str, Any] = {"state": state}
+        error = value.get("lastAuthorizationError")
+        if isinstance(error, dict):
+            public_error = {
+                "code": str(error.get("code") or "authorization_failed")[:128],
+                "message": str(error.get("message") or "GitHub 授权失败。")[:1000],
+                "stage": str(error.get("stage") or "authorization")[:128],
+                "occurredAt": str(error.get("occurredAt") or "")[:128],
+            }
+            result["lastAuthorizationError"] = public_error
+        return result
+
+    def _write_authorization_state(
+        self,
+        state: str,
+        *,
+        error: GitHubServiceError | None = None,
+        stage: str = "",
+    ) -> None:
+        payload: dict[str, Any] = {
+            "state": state,
+            "updatedAt": datetime.now().isoformat(),
+        }
+        if error is not None:
+            payload["lastAuthorizationError"] = {
+                "code": error.code,
+                "message": error.message,
+                "stage": stage or str(error.details.get("stage") or "authorization"),
+                "occurredAt": datetime.now().isoformat(),
+            }
+        _atomic_json(self.authorization_path, payload)
+
+    @staticmethod
+    def _staged_error(error: Exception, stage: str) -> GitHubServiceError:
+        if isinstance(error, GitHubServiceError):
+            details = dict(error.details)
+            details["stage"] = stage
+            return GitHubServiceError(
+                error.code,
+                error.message,
+                retry_after=error.retry_after,
+                details=details,
+            )
+        return GitHubServiceError(
+            "authorization_failed",
+            "GitHub 授权失败。",
+            details={"stage": stage},
+        )
+
+    def _finish_authorization_failure(
+        self,
+        flow_id: str,
+        error: Exception,
+        *,
+        stage: str,
+    ) -> GitHubServiceError:
+        staged = self._staged_error(error, stage)
+        self.pending_flows.pop(flow_id, None)
+        self._write_authorization_state("failed", error=staged, stage=stage)
+        return staged
+
+    def _clear_authentication_cache(self) -> None:
+        self._account_cache = {}
+        self._verified_token_hash = ""
+
+    def _mark_token_verified(self, token: str, account: dict[str, str]) -> None:
+        self._verified_token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        self._account_cache = dict(account)
+        self._token_presence_cache = {"known": True, "present": True, "expiresAt": self.clock() + 30}
+
+    def _token_is_verified(self, token: str) -> bool:
+        if not token or not self._verified_token_hash or not self._account_cache.get("login"):
+            return False
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        return hmac.compare_digest(digest, self._verified_token_hash)
+
+    def _validated_account(self, token: str) -> dict[str, str]:
+        user, _ = self.api.request("GET", "/user", token=token)
+        if not isinstance(user, dict) or not str(user.get("login") or "").strip():
+            raise GitHubServiceError("invalid_response", "GitHub 账号验证响应不完整。")
+        return {
+            "login": str(user.get("login") or ""),
+            "name": str(user.get("name") or ""),
+        }
+
+    def _delete_token_quietly(self) -> None:
+        with contextlib.suppress(Exception):
+            self.token_store.delete()
+
     def _token(self) -> str:
         token = self.token_store.get()
         if not token:
+            self._clear_authentication_cache()
+            self._token_presence_cache = {"known": True, "present": False, "expiresAt": self.clock() + 30}
             raise GitHubServiceError("auth_required", "请先登录 GitHub。")
+        if self._verified_token_hash and not self._token_is_verified(token):
+            self._clear_authentication_cache()
         self._token_presence_cache = {"known": True, "present": True, "expiresAt": self.clock() + 30}
         return token
 
@@ -441,23 +547,38 @@ class GitHubService:
         except GitHubServiceError as exc:
             if exc.code == "auth_expired":
                 self.token_store.delete()
-                self._account_cache = {}
+                self._clear_authentication_cache()
                 self._token_presence_cache = {"known": True, "present": False, "expiresAt": self.clock() + 30}
+                staged = self._staged_error(exc, "token_validation")
+                self._write_authorization_state("failed", error=staged, stage="token_validation")
             raise
 
     def status(self, *, validate: bool = False) -> dict[str, Any]:
         configured = self.configuration_status()
         authenticated = False
-        account = dict(self._account_cache) if self._account_cache else None
+        account = None
+        token = ""
+        token_present = False
+        validation_generation = None
+        if validate:
+            with self._write_lock:
+                validation_generation = self._auth_generation
         try:
             if not validate and not self._token_presence_cache.get("known"):
-                token = ""
+                token_present = False
             elif not validate and self.clock() < float(self._token_presence_cache.get("expiresAt") or 0):
-                token = "cached-presence" if self._token_presence_cache.get("present") else ""
+                token_present = bool(self._token_presence_cache.get("present"))
+                authenticated = bool(token_present and self._verified_token_hash and self._account_cache.get("login"))
             else:
                 token = self.token_store.get()
+                token_present = bool(token)
                 self._token_presence_cache = {"known": True, "present": bool(token), "expiresAt": self.clock() + 30}
+                if not token:
+                    self._clear_authentication_cache()
+                elif not validate:
+                    authenticated = self._token_is_verified(token)
         except GitHubServiceError as exc:
+            authorization = self.authorization_status()
             return {
                 "ok": False,
                 "state": exc.code,
@@ -466,29 +587,61 @@ class GitHubService:
                 "account": None,
                 "settings": self.settings(),
                 "activeAuthorization": self.active_authorization(),
+                "authorizationState": authorization["state"],
+                "lastAuthorizationError": authorization.get("lastAuthorizationError"),
                 "message": exc.message,
             }
-        if token:
-            authenticated = True
-            if validate:
-                try:
-                    user, _ = self.api.request("GET", "/user", token=token)
-                    account = {"login": str(user.get("login") or ""), "name": str(user.get("name") or "")}
-                    self._account_cache = dict(account)
-                except GitHubServiceError as exc:
-                    if exc.code == "auth_expired":
-                        self.token_store.delete()
-                        authenticated = False
-                        account = None
-                        self._account_cache = {}
-                        self._token_presence_cache = {"known": True, "present": False, "expiresAt": self.clock() + 30}
+        if token and validate:
+            try:
+                account = self._validated_account(token)
+                with self._write_lock:
+                    if validation_generation == self._auth_generation:
+                        self._mark_token_verified(token, account)
+                        self._write_authorization_state("ready")
+                        authenticated = True
                     else:
-                        raise
+                        token = ""
+                        token_present = False
+                        account = None
+                        self._clear_authentication_cache()
+                        self._token_presence_cache = {
+                            "known": True,
+                            "present": False,
+                            "expiresAt": self.clock() + 30,
+                        }
+            except GitHubServiceError as exc:
+                with self._write_lock:
+                    validation_is_current = validation_generation == self._auth_generation
+                    if validation_is_current and exc.code == "auth_expired":
+                        self._delete_token_quietly()
+                        self._clear_authentication_cache()
+                        self._token_presence_cache = {"known": True, "present": False, "expiresAt": self.clock() + 30}
+                        staged = self._staged_error(exc, "account_validation")
+                        self._write_authorization_state("failed", error=staged, stage="account_validation")
+                if not validation_is_current:
+                    token = ""
+                    token_present = False
+                    account = None
+                elif exc.code != "auth_expired":
+                    raise
+        elif authenticated:
+            account = dict(self._account_cache)
+        if not authenticated:
+            account = None
         token_known = bool(self._token_presence_cache.get("known"))
+        authorization = self.authorization_status()
         state = (
             "ready"
             if authenticated
-            else ("unchecked" if configured["configured"] and not token_known else ("logged_out" if configured["configured"] else "not_configured"))
+            else (
+                "authorization_failed"
+                if configured["configured"] and authorization.get("lastAuthorizationError")
+                else (
+                    "unchecked"
+                    if configured["configured"] and (not token_known or token_present)
+                    else ("logged_out" if configured["configured"] else "not_configured")
+                )
+            )
         )
         active_import = None
         for batch in reversed(list(self.import_batches.values())):
@@ -504,8 +657,16 @@ class GitHubService:
             "settings": self.settings(),
             "activeImport": active_import,
             "activeAuthorization": None if authenticated else self.active_authorization(),
+            "authorizationState": "ready" if authenticated else authorization["state"],
+            "lastAuthorizationError": None if authenticated else authorization.get("lastAuthorizationError"),
             "message": configured.get("message") or (
-                "" if authenticated else ("打开 GitHub 设置后检查登录状态。" if state == "unchecked" else "尚未登录 GitHub。")
+                ""
+                if authenticated
+                else (
+                    str((authorization.get("lastAuthorizationError") or {}).get("message") or "GitHub 登录状态尚未验证。")
+                    if state in {"unchecked", "authorization_failed"}
+                    else "尚未登录 GitHub。"
+                )
             ),
         }
 
@@ -517,12 +678,23 @@ class GitHubService:
             active = self.active_authorization()
             if active:
                 return active
-            data = self.api.form_post(GITHUB_DEVICE_CODE_URL, {"client_id": client_id})
+            try:
+                data = self.api.form_post(GITHUB_DEVICE_CODE_URL, {"client_id": client_id})
+            except Exception as exc:
+                staged = self._staged_error(exc, "device_code_request")
+                self._write_authorization_state("failed", error=staged, stage="device_code_request")
+                raise staged from exc
             device_code = str(data.get("device_code") or "")
             user_code = str(data.get("user_code") or "")
             verification_uri = str(data.get("verification_uri_complete") or data.get("verification_uri") or "")
             if not device_code or not user_code or not verification_uri:
-                raise GitHubServiceError("invalid_response", "GitHub Device Flow 响应不完整。")
+                error = GitHubServiceError(
+                    "invalid_response",
+                    "GitHub Device Flow 响应不完整。",
+                    details={"stage": "device_code_request"},
+                )
+                self._write_authorization_state("failed", error=error, stage="device_code_request")
+                raise error
             flow_id = uuid.uuid4().hex
             expires_in = max(1, _safe_int(data.get("expires_in")) or 900)
             interval = max(5, _safe_int(data.get("interval")) or 5)
@@ -542,6 +714,7 @@ class GitHubService:
                 if now < float(value.get("expiresAt") or 0)
             }
             self.pending_flows[flow_id] = flow
+            self._write_authorization_state("waiting_for_user")
             return self._public_authorization(flow_id, flow)
 
     def poll_authorization(self, flow_id: str) -> dict[str, Any]:
@@ -552,8 +725,12 @@ class GitHubService:
                 raise GitHubServiceError("authorization_missing", "GitHub 授权已取消或不存在，请重新开始。")
             now = self.clock()
             if now >= float(flow["expiresAt"]):
-                self.pending_flows.pop(flow_id, None)
-                raise GitHubServiceError("authorization_expired", "GitHub 授权已超时，请重新开始。")
+                error = GitHubServiceError("authorization_expired", "GitHub 授权已超时，请重新开始。")
+                raise self._finish_authorization_failure(
+                    flow_id,
+                    error,
+                    stage="device_code_expired",
+                )
             if now < float(flow.get("nextPollAt") or 0):
                 return {
                     "ok": True,
@@ -609,28 +786,76 @@ class GitHubService:
                 flow["nextPollAt"] = now + interval
                 return {"ok": True, "state": "authorization_pending", "flowId": flow_id, "retryAfter": interval}
             if error in {"access_denied", "expired_token", "incorrect_device_code"}:
-                self.pending_flows.pop(flow_id, None)
                 code = "authorization_denied" if error == "access_denied" else "authorization_expired"
                 message = "你已拒绝 GitHub 授权。" if error == "access_denied" else "GitHub 授权已超时，请重新开始。"
-                raise GitHubServiceError(code, message)
+                raise self._finish_authorization_failure(
+                    flow_id,
+                    GitHubServiceError(code, message),
+                    stage="token_exchange",
+                )
             if error:
-                self.pending_flows.pop(flow_id, None)
-                raise GitHubServiceError("authorization_failed", str(data.get("error_description") or "GitHub 授权失败。"))
+                raise self._finish_authorization_failure(
+                    flow_id,
+                    GitHubServiceError(
+                        "authorization_failed",
+                        str(data.get("error_description") or "GitHub 授权失败。"),
+                    ),
+                    stage="token_exchange",
+                )
             token = str(data.get("access_token") or "")
             if not token:
                 flow["nextPollAt"] = now + interval
                 raise GitHubServiceError("invalid_response", "GitHub 未返回有效登录凭证。")
-            self.token_store.set(token)
-            self._token_presence_cache = {"known": True, "present": True, "expiresAt": self.clock() + 30}
             try:
-                user, _ = self.api.request("GET", "/user", token=token)
-            except Exception:
-                self.token_store.delete()
-                self.pending_flows.pop(flow_id, None)
-                raise
+                self.token_store.set(token)
+            except Exception as exc:
+                self._delete_token_quietly()
+                fallback = exc if isinstance(exc, GitHubServiceError) else GitHubServiceError(
+                    "secure_store_failed",
+                    "GitHub 凭证无法写入 macOS Keychain。",
+                )
+                raise self._finish_authorization_failure(
+                    flow_id,
+                    fallback,
+                    stage="keychain_write",
+                ) from exc
+            try:
+                stored_token = self.token_store.get()
+            except Exception as exc:
+                self._delete_token_quietly()
+                fallback = exc if isinstance(exc, GitHubServiceError) else GitHubServiceError(
+                    "secure_store_failed",
+                    "无法读取 macOS Keychain 中的 GitHub 凭证。",
+                )
+                raise self._finish_authorization_failure(
+                    flow_id,
+                    fallback,
+                    stage="keychain_readback",
+                ) from exc
+            if not stored_token or not hmac.compare_digest(stored_token, token):
+                self._delete_token_quietly()
+                raise self._finish_authorization_failure(
+                    flow_id,
+                    GitHubServiceError(
+                        "secure_store_failed",
+                        "GitHub 凭证写入后无法从 macOS Keychain 读回。",
+                    ),
+                    stage="keychain_readback",
+                )
+            try:
+                account = self._validated_account(stored_token)
+            except Exception as exc:
+                self._delete_token_quietly()
+                self._clear_authentication_cache()
+                raise self._finish_authorization_failure(
+                    flow_id,
+                    exc,
+                    stage="account_validation",
+                ) from exc
             self.pending_flows.pop(flow_id, None)
             self._authenticated_flow_id = flow_id
-            self._account_cache = {"login": str(user.get("login") or ""), "name": str(user.get("name") or "")}
+            self._mark_token_verified(stored_token, account)
+            self._write_authorization_state("ready")
             return {"ok": True, "state": "ready", "authenticated": True, "account": dict(self._account_cache)}
 
     def cancel_authorization(self, flow_id: str) -> dict[str, Any]:
@@ -640,17 +865,20 @@ class GitHubService:
             if self._authenticated_flow_id == flow_id:
                 self.token_store.delete()
                 self._authenticated_flow_id = ""
-                self._account_cache = {}
+                self._clear_authentication_cache()
                 self._token_presence_cache = {"known": True, "present": False, "expiresAt": self.clock() + 30}
+            self._write_authorization_state("cancelled")
         return {"ok": True, "state": "cancelled"}
 
     def logout(self) -> dict[str, Any]:
         with self._write_lock:
+            self._auth_generation += 1
             self.pending_flows.clear()
             self.token_store.delete()
             self._authenticated_flow_id = ""
-            self._account_cache = {}
+            self._clear_authentication_cache()
             self._token_presence_cache = {"known": True, "present": False, "expiresAt": self.clock() + 30}
+            self._write_authorization_state("logged_out")
         return self.status(validate=False)
 
     def search_repositories(self, query: Any, *, page: Any = 1, per_page: Any = 20) -> dict[str, Any]:

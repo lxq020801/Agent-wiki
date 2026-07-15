@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from server.websocket_server import LibrarianServer
-from server.github_service import GitHubServiceError
+from server.github_service import GitHubService, GitHubServiceError
 
 
 class FakeWebSocket:
@@ -97,6 +97,42 @@ class BackgroundAuthGitHubService(FakeGitHubService):
             "authenticated": True,
             "account": {"login": "octocat"},
         }
+
+
+class SilentWriteLossTokenStore:
+    def __init__(self) -> None:
+        self.deleted = False
+
+    def get(self):
+        return ""
+
+    def set(self, token):
+        return None
+
+    def delete(self):
+        self.deleted = True
+
+
+class CompletedDeviceFlowAPI:
+    def __init__(self) -> None:
+        self.form_calls = 0
+        self.user_calls = 0
+
+    def form_post(self, url, values):
+        self.form_calls += 1
+        if self.form_calls == 1:
+            return {
+                "device_code": "device-secret",
+                "user_code": "ABCD-EFGH",
+                "verification_uri": "https://github.com/login/device",
+                "expires_in": 900,
+                "interval": 5,
+            }
+        return {"access_token": "oauth-secret-token", "token_type": "bearer"}
+
+    def request(self, method, path, *, token, **kwargs):
+        self.user_calls += 1
+        return {"login": "octocat", "name": "The Octocat"}, {}
 
 
 class ActiveAuthorizationGitHubService(FakeGitHubService):
@@ -235,6 +271,62 @@ class GitHubProtocolTests(unittest.TestCase):
 
             self.assertEqual(service.poll_calls, 2)
             self.assertTrue(task.done())
+
+        asyncio.run(scenario())
+
+    def test_background_keychain_failure_survives_popup_disconnect_and_reopen(self) -> None:
+        async def scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                store = SilentWriteLossTokenStore()
+                api = CompletedDeviceFlowAPI()
+                service = GitHubService(
+                    runtime_root=root / "runtime",
+                    config_path=root / "missing-config.toml",
+                    client_id="Iv1Example123",
+                    token_store=store,
+                    api=api,
+                )
+                server = LibrarianServer(enable_task_runner=False, github_service=service)
+                socket = FakeWebSocket()
+                server.clients.add(socket)
+                server.client_compatibility[socket] = {"state": "compatible", "canOperate": True}
+
+                with mock.patch(
+                    "server.websocket_server.asyncio.sleep",
+                    new=mock.AsyncMock(return_value=None),
+                ):
+                    await server.handle_message(socket, {
+                        "type": "github_auth_start",
+                        "requestId": "auth-start",
+                    })
+                    task = server.github_auth_tasks[next(iter(server.github_auth_tasks))]
+                    server.clients.clear()
+                    await task
+
+                self.assertTrue(task.done())
+                self.assertTrue(store.deleted)
+                self.assertEqual(api.user_calls, 0)
+
+                reopened = FakeWebSocket()
+                server.clients.add(reopened)
+                server.client_compatibility[reopened] = {"state": "compatible", "canOperate": True}
+                await server.handle_message(reopened, {
+                    "type": "github_status_request",
+                    "requestId": "status-after-reopen",
+                })
+
+                result = reopened.messages[-1]["result"]
+                self.assertEqual(reopened.messages[-1]["type"], "github_status")
+                self.assertEqual(result["state"], "authorization_failed")
+                self.assertFalse(result["authenticated"])
+                self.assertIsNone(result["account"])
+                self.assertEqual(result["lastAuthorizationError"]["code"], "secure_store_failed")
+                self.assertEqual(result["lastAuthorizationError"]["stage"], "keychain_readback")
+                serialized = json.dumps(result)
+                self.assertNotIn("oauth-secret-token", serialized)
+                self.assertNotIn("device-secret", serialized)
+                self.assertNotIn("deviceCode", serialized)
 
         asyncio.run(scenario())
 
