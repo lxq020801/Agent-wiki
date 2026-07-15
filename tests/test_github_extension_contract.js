@@ -21,7 +21,6 @@ for (const id of [
   'github-copy-code',
   'github-device-expiry',
   'github-auto-star',
-  'github-search-results',
   'github-stars-list',
   'github-select-all',
   'github-import-selected',
@@ -33,19 +32,24 @@ for (const id of [
   assert.match(html, new RegExp(`id="${id}"`), `missing GitHub control: ${id}`);
 }
 
-assert.match(html, /<main class="view" id="github-view"[\s\S]*id="github-search-tool"[\s\S]*id="github-stars-tool"/);
+assert.match(html, /<main class="view" id="github-view"[\s\S]*id="github-stars-tool"/);
+assert.match(html, /data-lucide-icon="github"/);
+assert.match(html, />GitHub 资产</);
+assert.match(html, />GitHub 资产管理</);
+assert.match(html, />资产创建后自动 Star</);
+assert.doesNotMatch(html, /id="github-search-(?:tool|query|results)"|id="github-search"|>仓库搜索</);
+assert.doesNotMatch(html + js, /GitHub 项目|项目资料|项目刷新/);
 assert.doesNotMatch(html, /class="settings-card"[^>]*data-target="github-settings"/);
 assert.doesNotMatch(html, /id="github-settings"/);
 const settingsIndexMarkup = html.slice(html.indexOf('id="settings-index-view"'), html.indexOf('id="settings-detail-view"'));
 const settingsDetailMarkup = html.slice(html.indexOf('id="settings-detail-view"'), html.indexOf('id="github-view"'));
 assert.doesNotMatch(settingsIndexMarkup, /GitHub|github/i);
-assert.doesNotMatch(settingsDetailMarkup, /github-search-tool|github-stars-tool/);
+assert.doesNotMatch(settingsDetailMarkup, /github-stars-tool/);
 
 for (const type of [
   'github_auth_start',
   'github_auth_cancel',
   'github_logout',
-  'github_repository_search',
   'github_stars_request',
   'github_import_stars',
   'github_import_cancel',
@@ -53,23 +57,22 @@ for (const type of [
   'github_refresh_confirm',
   'github_refresh_cancel'
 ]) {
-  assert.match(js, new RegExp(`type: '${type}'`), `missing GitHub message: ${type}`);
+  assert.match(js, new RegExp(`\\b[A-Z_]+: '${type}'`), `missing GitHub message constant: ${type}`);
 }
 
 assert.doesNotMatch(js, /chrome\.storage\.(?:local|session)\.(?:set|get)\([^\n]*(?:githubToken|accessToken|deviceCode)/i);
 assert.doesNotMatch(html + js, /github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{20,}/);
 assert.match(js, /const POPUP_ROUTE_STORAGE_KEY = 'popupRoute'/);
 assert.match(js, /function popupRouteStorage\(\)[\s\S]*?chrome\.storage\?\.session/);
-assert.match(js, /storage\.set\(\{ \[POPUP_ROUTE_STORAGE_KEY\]: GITHUB_ROUTE \}\)/);
-assert.match(js, /storage\.remove\(POPUP_ROUTE_STORAGE_KEY\)/);
-assert.match(js, /function restorePopupRoute\(\)[\s\S]*?openGithubPage\(\{ persist: false, focus: false \}\)/);
-assert.match(js, /function closeToHome\(\)[\s\S]*?clearPopupRoute\(\)/);
-assert.match(js, /function openGithubPage\([\s\S]*?if \(persist\) void persistGithubRoute\(\)/);
-assert.match(js, /async function startGithubAuthorization\(\)[\s\S]*?await persistGithubRoute\(\)/);
+assert.match(js, /storage\.set\(\{ \[POPUP_ROUTE_STORAGE_KEY\]: sanitizePopupRoute\(route\) \}\)/);
+assert.match(js, /function restorePopupRoute\(\)[\s\S]*?sanitizePopupRoute\(stored\[POPUP_ROUTE_STORAGE_KEY\]\)/);
+assert.match(js, /function closeToHome\(\)[\s\S]*?persistPopupRoute\(\{ view: POPUP_VIEWS\.HOME \}\)/);
+assert.match(js, /function openGithubPage\([\s\S]*?persistPopupRoute\(\{ view: POPUP_VIEWS\.GITHUB \}\)/);
+assert.match(js, /async function startGithubAuthorization\(\)[\s\S]*?persistPopupRoute\(\{ view: POPUP_VIEWS\.GITHUB \}\)/);
 const routeStorageContract = js.slice(js.indexOf('function popupRouteStorage'), js.indexOf('async function flushPendingSync'));
-assert.doesNotMatch(routeStorageContract, /storage\.local|transientStorage|token|deviceCode|userCode/i);
+assert.doesNotMatch(routeStorageContract, /storage\.local|transientStorage|apiKey|token|deviceCode|userCode|verification/i);
 assert.doesNotMatch(js, /openSettingsDetail\(['"]github-settings/);
-assert.match(js, /\['home-view', 'settings-index-view', 'settings-detail-view', 'github-view'\]/);
+assert.match(js, /HOME: 'home-view'[\s\S]*SETTINGS_INDEX: 'settings-index-view'[\s\S]*SETTINGS_DETAIL: 'settings-detail-view'[\s\S]*GITHUB: 'github-view'/);
 assert.match(js, /homeSummary\.textContent = login \? `@\$\{login\}` : '已登录'/);
 assert.match(js, /copy\.textContent = login \? `@\$\{login\}` : '已登录'/);
 assert.match(js, /case 'handshake_ack':[\s\S]*?requestStatus\(\);[\s\S]*?requestGithubValidationAfterHandshake\(compatibility\)/);
