@@ -1611,20 +1611,22 @@ select:focus {
 
 .derived-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
 }
 
 .derived-head strong {
+  flex: 1 1 0;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   color: var(--text);
   font-size: 11px;
+  line-height: 1.35;
   overflow-wrap: anywhere;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .derived-status {

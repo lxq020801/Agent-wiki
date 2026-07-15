@@ -76,7 +76,14 @@ assert.match(css, /\.view\s*\{[\s\S]*?overflow-y:\s*auto/);
 assert.match(css, /\.task-head\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto/);
 assert.match(css, /\.task-head strong\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
 assert.match(css, /button\.primary,[\s\S]*?button\.secondary\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
+const derivedTitleRule = css.match(/\.derived-head strong\s*\{([^}]*)\}/)?.[1] || '';
+assert.match(derivedTitleRule, /flex:\s*1 1 0/);
+assert.match(derivedTitleRule, /overflow-wrap:\s*anywhere/);
+assert.match(derivedTitleRule, /white-space:\s*normal/);
+assert.doesNotMatch(derivedTitleRule, /overflow:\s*hidden|text-overflow:\s*ellipsis|white-space:\s*nowrap/);
+assert.match(css, /\.derived-actions\s*\{[^}]*flex-wrap:\s*wrap/);
 assert.match(visualMock, /mock-account-with-an-intentionally-very-long-login-name/);
+assert.match(visualMock, /超长派生候选名称也必须稳定换行且不挤压确认与忽略按钮/);
 assert.match(visualMock, /https:\/\/mock\.invalid\//);
 assert.doesNotMatch(visualMock, /fetch\(|WebSocket|chrome\.(?:runtime|storage|tabs)|github\.com|douyin\.com/);
 
