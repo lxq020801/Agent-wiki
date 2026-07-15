@@ -4831,6 +4831,7 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
             assert target_stem in all_stems, target_stem
     assert any(update.get("stage") == "resolving_target" for update in sw.updates)
     assert summary["git_status"] == "not_managed"
+    assert not (vault / ".git").exists()
 
 
 def test_derive_executor_main_preserves_derived_ingest_status(tmp: Path) -> None:

@@ -97,6 +97,7 @@ python3.11 server/launcher.py status
 | 扩展 -> Agent | `cookie_update` | 写 Douyin Cookie 文件 |
 | 扩展 -> Agent | `task_request` | 提交知识入库来源和页面线索 |
 | 扩展 -> Agent | `task_status_request` | 拉取任务进度 |
+| 扩展 -> Agent | `github_*` | GitHub Device Flow、仓库搜索、Stars 导入与手动刷新 |
 | Agent -> 扩展 | `agent_ready` | 服务已连接 |
 | Agent -> 扩展 | `status_snapshot` | 当前状态快照 |
 | Agent -> 扩展 | `vault_status` | vault 识别结果 |
@@ -105,6 +106,7 @@ python3.11 server/launcher.py status
 | Agent -> 扩展 | `cookie_synced` | Cookie 已写入 |
 | Agent -> 扩展 | `task_accepted` / `task_rejected` | 任务进入队列或被拒绝 |
 | Agent -> 扩展 | `task_status_snapshot` | 任务进度快照 |
+| Agent -> 扩展 | `github_status` / `github_*_results` | GitHub 登录、列表、批量进度与刷新结果 |
 
 `task_request` 只能提交 URL 和页面线索，不能提交 Cookie、API Key、质量档或业务编排步骤。
 
@@ -119,6 +121,7 @@ python3.11 server/launcher.py status
 - 显示连接状态
 - 提供任务入口：`知识入库`
 - 展示任务进度和结果状态
+- 提供 GitHub 网页授权、Stars 选择导入和手动刷新确认
 
 扩展不负责：
 
@@ -184,3 +187,11 @@ python3.11 tests/test_p0_static.py
 ```
 
 如果要看当前配置是否能落盘、WebSocket 是否能写入、Cookie 权限是否正常，就优先看 `server/websocket_server.py` 和 `deps/douyin/scripts/config_loader.py` 的真实字段名，不要凭旧记忆猜。
+
+GitHub 联动的 mock 测试使用：
+
+```bash
+python3.11 tests/test_github_service.py
+python3.11 tests/test_github_protocol.py
+node tests/test_github_extension_contract.js
+```

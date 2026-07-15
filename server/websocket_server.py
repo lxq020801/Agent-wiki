@@ -29,6 +29,7 @@ from install.vault_discovery import (
     score_vault,
     write_vault_path_to_config,
 )
+from server.github_service import GitHubService, GitHubServiceError
 
 
 PRODUCT_ID = "agent-wiki"
@@ -45,6 +46,19 @@ CONTROL_MUTATION_TYPES = {
     "model_check",
     "task_request",
     "derived_task_action",
+    "github_status_request",
+    "github_auth_start",
+    "github_auth_poll",
+    "github_auth_cancel",
+    "github_logout",
+    "github_settings_update",
+    "github_repository_search",
+    "github_stars_request",
+    "github_import_stars",
+    "github_import_cancel",
+    "github_refresh_check",
+    "github_refresh_confirm",
+    "github_refresh_cancel",
 }
 
 
@@ -78,9 +92,16 @@ def _source_revision(project_root):
 
 def _source_build_id(server_source):
     digest = hashlib.sha256()
-    try:
-        digest.update(Path(server_source).read_bytes())
-    except OSError:
+    sources = [Path(server_source), Path(server_source).with_name("github_service.py")]
+    loaded = False
+    for source in sources:
+        try:
+            digest.update(source.name.encode("utf-8"))
+            digest.update(source.read_bytes())
+            loaded = True
+        except OSError:
+            continue
+    if not loaded:
         digest.update(f"{PRODUCT_ID}:{PRODUCT_VERSION}:{PROTOCOL_VERSION}".encode("ascii"))
     return f"src-{digest.hexdigest()[:16]}"
 
@@ -561,6 +582,7 @@ class LibrarianServer:
         enable_task_runner=True,
         task_concurrency=None,
         runtime_identity=None,
+        github_service=None,
     ):
         self.host = host
         self.port = port
@@ -582,6 +604,11 @@ class LibrarianServer:
         self.queued_task_files = set()
         self.running_task_ids = set()
         self.current_task_id = None
+        self.github_service = github_service or GitHubService(
+            runtime_root=self.runtime_root,
+            config_path=self.runtime_root / "config.toml",
+        )
+        self.github_import_tasks = set()
         
     async def handle_client(self, websocket):
         """处理单个客户端连接"""
@@ -614,6 +641,11 @@ class LibrarianServer:
                     'extension_task_ingest',
                     'task_status',
                     'derived_task_action',
+                    'github_device_flow',
+                    'github_repository_search',
+                    'github_star_import',
+                    'github_manual_refresh',
+                    'github_repository_dedupe',
                 ]
             }))
             await websocket.send(json.dumps({
@@ -780,9 +812,158 @@ class LibrarianServer:
                 'tasks': await asyncio.to_thread(self.task_status_snapshot),
                 'timestamp': datetime.now().isoformat(),
             })
+
+        elif msg_type.startswith('github_'):
+            await self.handle_github_message(websocket, msg)
             
         else:
             log(f"[Server] 未知消息类型: {msg_type}")
+
+    async def handle_github_message(self, websocket, msg):
+        """Handle GitHub control messages without exposing OAuth credentials."""
+        msg_type = str(msg.get('type') or '')
+        try:
+            if msg_type == 'github_status_request':
+                result = await asyncio.to_thread(self.github_service.status, validate=True)
+                reply_type = 'github_status'
+            elif msg_type == 'github_auth_start':
+                result = await asyncio.to_thread(self.github_service.start_authorization)
+                reply_type = 'github_auth_state'
+            elif msg_type == 'github_auth_poll':
+                result = await asyncio.to_thread(
+                    self.github_service.poll_authorization,
+                    str(msg.get('flowId') or ''),
+                )
+                reply_type = 'github_auth_state'
+            elif msg_type == 'github_auth_cancel':
+                result = await asyncio.to_thread(
+                    self.github_service.cancel_authorization,
+                    str(msg.get('flowId') or ''),
+                )
+                reply_type = 'github_auth_state'
+            elif msg_type == 'github_logout':
+                result = await asyncio.to_thread(self.github_service.logout)
+                reply_type = 'github_status'
+            elif msg_type == 'github_settings_update':
+                result = await asyncio.to_thread(
+                    self.github_service.update_settings,
+                    auto_star=bool(msg.get('autoStar')),
+                )
+                reply_type = 'github_status'
+            elif msg_type == 'github_repository_search':
+                result = await asyncio.to_thread(
+                    self.github_service.search_repositories,
+                    msg.get('query'),
+                    page=msg.get('page', 1),
+                    per_page=msg.get('perPage', 20),
+                )
+                reply_type = 'github_repository_results'
+            elif msg_type == 'github_stars_request':
+                result = await asyncio.to_thread(
+                    self.github_service.starred_repositories,
+                    page=msg.get('page', 1),
+                    per_page=msg.get('perPage', 50),
+                )
+                reply_type = 'github_stars_results'
+            elif msg_type == 'github_import_stars':
+                result = await asyncio.to_thread(
+                    self.github_service.create_import_batch,
+                    msg.get('repositories'),
+                )
+                reply_type = 'github_import_accepted'
+                task = asyncio.create_task(self._run_github_import(result['id']))
+                self.github_import_tasks.add(task)
+                task.add_done_callback(self.github_import_tasks.discard)
+            elif msg_type == 'github_import_cancel':
+                result = await asyncio.to_thread(
+                    self.github_service.cancel_import_batch,
+                    str(msg.get('batchId') or ''),
+                )
+                reply_type = 'github_import_progress'
+            elif msg_type == 'github_refresh_check':
+                result = await asyncio.to_thread(
+                    self.github_service.check_refresh,
+                    msg.get('repository') or {},
+                )
+                reply_type = 'github_refresh_state'
+            elif msg_type == 'github_refresh_confirm':
+                result = await asyncio.to_thread(
+                    self.github_service.confirm_refresh,
+                    str(msg.get('refreshId') or ''),
+                )
+                reply_type = 'github_refresh_state'
+            elif msg_type == 'github_refresh_cancel':
+                result = await asyncio.to_thread(
+                    self.github_service.cancel_refresh,
+                    str(msg.get('refreshId') or ''),
+                )
+                reply_type = 'github_refresh_state'
+            else:
+                raise GitHubServiceError('message_unsupported', '不支持的 GitHub 操作。')
+        except GitHubServiceError as exc:
+            result = exc.public_payload()
+            reply_type = 'github_error'
+            result['requestType'] = msg_type
+        await websocket.send(json.dumps({
+            'type': reply_type,
+            'result': result,
+            'requestId': msg.get('requestId'),
+            'timestamp': datetime.now().isoformat(),
+        }, ensure_ascii=False))
+
+    async def _run_github_import(self, batch_id):
+        batch = self.github_service.import_batches.get(batch_id)
+        if not batch:
+            return
+        batch['state'] = 'running'
+        await self.broadcast({
+            'type': 'github_import_progress',
+            'result': self.github_service.public_batch(batch),
+            'timestamp': datetime.now().isoformat(),
+        })
+        for identity in list(batch.get('items') or []):
+            if batch.get('cancelled'):
+                batch['state'] = 'cancelled'
+                break
+            try:
+                result = await asyncio.to_thread(
+                    self.github_service.ingest_repository,
+                    identity,
+                    ingest_intent='manual',
+                )
+            except GitHubServiceError as exc:
+                item = {
+                    'ok': False,
+                    'repository': identity,
+                    'code': exc.code,
+                    'message': exc.message,
+                }
+                batch['failed'] += 1
+            except Exception as exc:
+                item = {
+                    'ok': False,
+                    'repository': identity,
+                    'code': 'import_failed',
+                    'message': type(exc).__name__,
+                }
+                batch['failed'] += 1
+            else:
+                item = result
+                batch['succeeded'] += 1
+            batch['completed'] += 1
+            batch['results'].append(item)
+            await self.broadcast({
+                'type': 'github_import_progress',
+                'result': self.github_service.public_batch(batch),
+                'timestamp': datetime.now().isoformat(),
+            })
+        if batch['state'] != 'cancelled':
+            batch['state'] = 'completed'
+        await self.broadcast({
+            'type': 'github_import_progress',
+            'result': self.github_service.public_batch(batch),
+            'timestamp': datetime.now().isoformat(),
+        })
 
     async def broadcast(self, payload):
         """向所有已连接扩展广播状态。断开的客户端会被清理。"""
@@ -1621,6 +1802,19 @@ class LibrarianServer:
                 'ignored': sum(1 for item in derived_tasks if item.get('status') == 'ignored'),
                 'needsTarget': sum(1 for item in derived_tasks if item.get('status') == 'needs_target'),
             }
+        github_integration = status.get('github_integration') if isinstance(status.get('github_integration'), dict) else {}
+        github_star = github_integration.get('autoStar') if isinstance(github_integration.get('autoStar'), dict) else {}
+        public_github_integration = {
+            'ok': bool(github_integration.get('ok')),
+            'code': str(github_integration.get('code') or ''),
+            'message': str(github_integration.get('message') or ''),
+            'autoStar': {
+                'attempted': bool(github_star.get('attempted')),
+                'ok': bool(github_star.get('ok')),
+                'code': str(github_star.get('code') or ''),
+                'message': str(github_star.get('message') or ''),
+            } if github_star else {},
+        } if github_integration else {}
         return {
             'id': status.get('id'),
             'type': status.get('type') or '',
@@ -1648,6 +1842,7 @@ class LibrarianServer:
             'parentTaskId': status.get('parent_task_id') or '',
             'derivedCandidateId': status.get('derived_candidate_id') or '',
             'derivedTask': status.get('derived_task') if isinstance(status.get('derived_task'), dict) else {},
+            'githubIntegration': public_github_integration,
         }
 
     def task_status_snapshot(self, limit=20):
@@ -1715,6 +1910,7 @@ class LibrarianServer:
             _provider_default(provider, 'fallback'),
         )
         existing_vault_path = _simple_config_value(config_path, 'vault', 'path')
+        existing_github_client_id = _simple_config_value(config_path, 'github', 'client_id')
         existing_task_concurrency = _simple_config_value(
             config_path,
             'server',
@@ -1815,6 +2011,9 @@ endpoint = "{_toml_escape(doubao_endpoint)}"
 
 [provider]
 active = "{_toml_escape(provider)}"
+
+[github]
+client_id = "{_toml_escape(existing_github_client_id)}"
 
 [models]
 analyzer = "{_toml_escape(model)}"
@@ -2041,6 +2240,7 @@ task_concurrency = {int(task_concurrency)}
             'videoAnalysis': self.video_analysis_status(),
             'cookie': self.cookie_status(),
             'tasks': self.task_status_snapshot(),
+            'github': self.github_service.status(validate=False),
         }
 
     def discover_and_persist_vault(self, hint=''):

@@ -242,7 +242,12 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
     "model_health_check",
     "extension_task_ingest",
     "task_status",
-    "derived_task_action"
+    "derived_task_action",
+    "github_device_flow",
+    "github_repository_search",
+    "github_star_import",
+    "github_manual_refresh",
+    "github_repository_dedupe"
   ]
 }
 ```
@@ -430,6 +435,58 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 ### `vault_status` / `model_status` / `config_synced` / `cookie_synced`
 
 分别确认知识库识别、模型健康检查、配置落盘、Cookie 落盘。
+
+## GitHub 联动消息
+
+所有 `github_*` 请求都必须先通过版本握手。服务端响应不得包含 access token、device code、Authorization header 或完整 OAuth 响应。
+
+### 登录与设置
+
+- `github_status_request` -> `github_status`：校验 Keychain token 并返回配置状态、登录账号摘要和 `autoStar`。
+- `github_auth_start` -> `github_auth_state`：返回 `flowId`、`userCode`、GitHub 官方 `verificationUri`、轮询间隔和过期时间。
+- `github_auth_poll`：传 `flowId`；返回等待、成功、拒绝或超时状态。token 由服务端直接写入 macOS Keychain。
+- `github_auth_cancel`：取消内存中的授权流程。
+- `github_logout`：删除 Keychain token。
+- `github_settings_update`：只接受布尔值 `autoStar`；默认关闭。
+
+### 仓库搜索与 Stars
+
+```json
+{
+  "type": "github_repository_search",
+  "requestId": "github-search-...",
+  "query": "langgraph",
+  "page": 1,
+  "perPage": 20
+}
+```
+
+`github_repository_results` 返回分页、总数和公开仓库摘要。已入库项额外带 `ingested` 与相对 `assetPath`。限流统一返回 `github_error`，其中 `code = "rate_limited"`，并可带 `retryAfter`。
+
+`github_stars_request` / `github_stars_results` 使用同样的仓库公开投影，并返回 `hasNext`。私有仓库不会进入列表。
+
+### Stars 批量导入
+
+```json
+{
+  "type": "github_import_stars",
+  "repositories": [
+    {"id": 123, "fullName": "owner/repo"}
+  ]
+}
+```
+
+服务端重新向 GitHub API 按 ID 读取每个仓库，不信任扩展提交的元数据。`github_import_accepted` 返回批次 ID；后续 `github_import_progress` 包含 `total`、`completed`、`succeeded`、`failed` 和逐项结果。`github_import_cancel` 只取消尚未开始的项，不回滚已经成功写入的资产。
+
+### 手动刷新
+
+`github_refresh_check` 接受 `{id, fullName}`，只比较资料，不写资产。无变化返回 `state = "no_changes"`；有变化返回 `state = "confirmation_required"`、`refreshId` 和字段摘要。
+
+只有 `github_refresh_confirm` 能使用 `refreshId` 一次性应用这批变化。`github_refresh_cancel` 删除待确认快照。确认 15 分钟后失效，必须重新检查。
+
+### 去重与自动 Star
+
+所有入口共享 repository ID 优先、规范化 `owner/repo` 兜底的登记表。正式 GitHub 派生在资产与索引成功写入后调用同一登记钩子。自动 Star 只发生在正式派生成功之后；Stars 导入不重复 Star，GitHub Star API 失败也不改变知识入库成功状态。GitHub 首次写入、Stars 导入和确认刷新都不会执行自动 Git 操作。
 
 ## 边界
 

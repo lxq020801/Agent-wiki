@@ -90,6 +90,10 @@
         <span class="status-dot inline-dot warning" id="settings-cookie-dot"></span>
         <span><b>Cookie</b><em id="settings-cookie-summary">未同步</em></span>
       </button>
+      <button class="settings-card" type="button" data-target="github-settings">
+        <span class="status-dot inline-dot warning" id="settings-github-dot"></span>
+        <span><b>GitHub</b><em id="settings-github-summary">未登录</em></span>
+      </button>
       <button class="settings-card" type="button" data-target="task-settings">
         <span class="status-dot inline-dot warning" id="settings-tasks-dot"></span>
         <span><b>任务状态</b><em id="settings-tasks-summary">暂无任务</em></span>
@@ -224,6 +228,90 @@
       </div>
       <button class="primary" id="grab-cookie" type="button">抓取抖音 Cookie</button>
       <div class="hint persistent" id="cookie-hint"></div>
+    </section>
+
+    <section class="settings-group detail-section" id="github-settings" data-title="GitHub" tabindex="-1" hidden>
+      <div class="section-heading inline">
+        <div>
+          <h3>GitHub</h3>
+          <p id="github-account-copy">检查登录状态后可搜索仓库和导入 Stars。</p>
+        </div>
+        <button class="secondary small" id="refresh-github-status" type="button">刷新</button>
+      </div>
+
+      <div class="github-auth-actions button-row">
+        <button class="primary" id="github-login" type="button">登录 GitHub</button>
+        <button class="secondary" id="github-logout" type="button" hidden>退出登录</button>
+      </div>
+
+      <div class="github-device-panel" id="github-device-panel" hidden>
+        <p>在 GitHub 授权页输入此代码</p>
+        <code id="github-user-code"></code>
+        <div class="button-row">
+          <button class="primary" id="github-open-authorization" type="button">打开 GitHub</button>
+          <button class="secondary" id="github-cancel-authorization" type="button">取消</button>
+        </div>
+      </div>
+
+      <label class="toggle-row" for="github-auto-star">
+        <span>
+          <b>派生成功后自动 Star</b>
+          <small>默认关闭；Star 失败不会阻断知识入库。</small>
+        </span>
+        <input type="checkbox" id="github-auto-star">
+      </label>
+
+      <div class="github-tool" id="github-search-tool">
+        <div class="section-heading compact">
+          <h3>仓库搜索</h3>
+          <p>使用 GitHub 官方 API 解析项目名称。</p>
+        </div>
+        <div class="inline-input-action">
+          <input type="search" id="github-search-query" placeholder="owner/repo 或项目名称">
+          <button class="secondary small" id="github-search" type="button">搜索</button>
+        </div>
+        <div class="github-list" id="github-search-results">
+          <div class="empty">登录后可搜索仓库</div>
+        </div>
+      </div>
+
+      <div class="github-tool" id="github-stars-tool">
+        <div class="section-heading inline compact">
+          <div>
+            <h3>导入我的 Stars</h3>
+            <p id="github-selection-count">已选择 0 个</p>
+          </div>
+          <button class="secondary small" id="github-load-stars" type="button">读取</button>
+        </div>
+        <label class="select-all-row" for="github-select-all">
+          <input type="checkbox" id="github-select-all">
+          <span>全选当前列表</span>
+        </label>
+        <div class="github-list" id="github-stars-list">
+          <div class="empty">尚未读取 Stars</div>
+        </div>
+        <button class="secondary small load-more" id="github-load-more-stars" type="button" hidden>加载更多</button>
+        <div class="button-row github-import-actions">
+          <button class="primary" id="github-import-selected" type="button" disabled>导入所选</button>
+          <button class="secondary" id="github-cancel-import" type="button" hidden>取消导入</button>
+        </div>
+        <div class="github-progress" id="github-import-progress" hidden>
+          <div><span id="github-progress-copy">等待开始</span><b id="github-progress-count">0 / 0</b></div>
+          <progress id="github-progress-bar" value="0" max="1"></progress>
+          <div class="github-import-results" id="github-import-results"></div>
+        </div>
+      </div>
+
+      <div class="github-refresh-panel" id="github-refresh-panel" hidden>
+        <h3 id="github-refresh-title">发现项目资料变化</h3>
+        <ul id="github-refresh-changes"></ul>
+        <div class="button-row">
+          <button class="primary" id="github-confirm-refresh" type="button">确定更新</button>
+          <button class="secondary" id="github-cancel-refresh" type="button">取消</button>
+        </div>
+      </div>
+
+      <div class="hint persistent" id="github-hint" role="status" aria-live="polite"></div>
     </section>
 
     <section class="settings-group detail-section" id="task-settings" data-title="任务状态" tabindex="-1" hidden>

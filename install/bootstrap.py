@@ -46,6 +46,10 @@ BOOTSTRAP_CONFIG_TEMPLATE = """\
 # 固定使用普通豆包 / 火山方舟 API
 active = "doubao"
 
+[github]
+# GitHub App Device Flow client ID（非 secret）；也可用 AGENT_WIKI_GITHUB_CLIENT_ID
+client_id = ""
+
 [ark]
 # 普通方舟 API Key（provider.active = "doubao" 时使用）
 api_key = ""
@@ -174,6 +178,7 @@ def ensure_runtime_dirs(result: CheckResult) -> None:
         "cache/videos",
         "handshake",
         "logs",
+        "github",
     ]:
         path = RUNTIME_ROOT / rel
         path.mkdir(parents=True, exist_ok=True)
@@ -194,6 +199,9 @@ def ensure_config_template(result: CheckResult) -> None:
     result.actions.append(f"config template created: {CONFIG_PATH}")
     result.missing_user_actions.append(
         "Open the extension and fill the selected provider API Key plus Obsidian vault path."
+    )
+    result.missing_user_actions.append(
+        "Configure AGENT_WIKI_GITHUB_CLIENT_ID before using GitHub Device Flow."
     )
 
 

@@ -39,6 +39,12 @@ from ingest import (
 )
 from status_writer import StatusWriter, write_terminal
 
+try:
+    from server.github_service import register_derived_repository
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from server.github_service import register_derived_repository
+
 
 DEFAULT_BRIDGE_ROOT = Path.home() / ".agent-wiki"
 _AUDIT_ROOT_NAME = "run-artifacts"
@@ -1091,6 +1097,8 @@ def _existing_asset_for_target(vault_path: Path, target: ResolvedTarget) -> tupl
     asset_root = vault_path / "知识资产"
     if not asset_root.exists():
         return None, ""
+    target_repo = target.raw.get("repo") if target.kind == "github_project" and isinstance(target.raw, dict) else {}
+    target_repository_id = int(target_repo.get("id") or 0) if isinstance(target_repo, dict) else 0
     for md in asset_root.glob("**/*.md"):
         try:
             text = md.read_text(encoding="utf-8", errors="ignore")
@@ -1099,7 +1107,13 @@ def _existing_asset_for_target(vault_path: Path, target: ResolvedTarget) -> tupl
         fm = _frontmatter_block(text)
         if not fm:
             continue
-        if canonical not in _frontmatter_target_values(fm):
+        stored_repository_id = _frontmatter_value(fm, "repository_id")
+        same_repository_id = bool(
+            target_repository_id
+            and stored_repository_id.isdigit()
+            and int(stored_repository_id) == target_repository_id
+        )
+        if not same_repository_id and canonical not in _frontmatter_target_values(fm):
             continue
         title = _frontmatter_value(fm, "title") or md.stem
         return md, title
@@ -1210,6 +1224,8 @@ ingest_intent: derived_ingest
 title: "{_yaml_escape(title)}"
 source_url: "{_yaml_escape(target.url)}"
 repo: "{_yaml_escape(target.url)}"
+repository_id: {int(repo.get("id") or 0)}
+repository_full_name: "{_yaml_escape(repo.get("full_name") or "")}"
 language: "{_yaml_escape(repo.get("language") or "")}"
 stars: {int(repo.get("stargazers_count") or 0)}
 forks: {int(repo.get("forks_count") or 0)}
@@ -1584,6 +1600,22 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
         child_link=child_link,
     ))
     git_status = "not_managed"
+    github_integration: dict[str, Any] = {}
+    if target.kind == "github_project" and isinstance(target.raw.get("repo"), dict):
+        try:
+            github_integration = register_derived_repository(
+                target.raw["repo"],
+                md_path,
+                config.vault_path,
+                readme=str(target.raw.get("readme") or ""),
+            )
+        except Exception as exc:
+            # Registry or Star failures remain advisory after the asset is written.
+            github_integration = {
+                "ok": False,
+                "code": "github_post_write_hook_failed",
+                "message": type(exc).__name__,
+            }
     _add_artifact(audit_files, "derive_write_result", _write_audit_json(
         audit_root,
         "06-write-result.json",
@@ -1596,6 +1628,7 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
             "git_status": git_status,
             "touched": [str(path) for path in touched],
             "cost": cost,
+            "github_integration": github_integration,
         },
     ))
     _add_artifact(audit_files, "derive_linkback", _write_audit_json(
@@ -1620,6 +1653,7 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
         "parent_asset_path": str(parent_path) if parent_path else "",
         "asset_link": child_link,
         "cost": cost,
+        "github_integration": github_integration,
         "audit_artifacts": _artifact_index(audit_root, audit_files),
     }
 
