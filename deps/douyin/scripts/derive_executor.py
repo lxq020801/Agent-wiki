@@ -29,8 +29,9 @@ from config_loader import Config, ConfigError, load_config
 from cost_estimator import estimate_cost_rmb
 from ingest import (
     _asset_title,
+    _content_tags,
     _ensure_vault_structure,
-    _git_commit,
+    mark_derived_candidate_executed,
     _schema_asset_id,
     _slug_for_vault,
     _summary_from_text,
@@ -1116,12 +1117,17 @@ def _format_yaml_list(values: list[str]) -> str:
     return "[" + ", ".join(json.dumps(v, ensure_ascii=False) for v in clean) + "]"
 
 
-def _tag_list(target_type: str) -> tuple[str, ...]:
-    if target_type == "github_project":
-        return ("github", "project", "derived-asset")
-    if target_type == "official_doc":
-        return ("webpage", "official-doc", "derived-asset")
-    return ("webpage", "web-research", "derived-asset")
+def _tag_list(target_type: str, content: str = "") -> tuple[str, ...]:
+    tags = _content_tags(content)
+    auxiliary = {
+        "github_project": ("project", "derived-asset", "github"),
+        "official_doc": ("official-doc", "derived-asset", "webpage"),
+        "web_research": ("web-research", "derived-asset", "webpage"),
+    }.get(target_type, ("derived-asset", "webpage"))
+    for tag in auxiliary:
+        if tag not in tags:
+            tags.append(tag)
+    return tuple(tags)
 
 
 def _build_prompt(task: dict[str, Any], candidate: dict[str, Any], target: ResolvedTarget, parent_link: str) -> str:
@@ -1163,7 +1169,8 @@ def _build_prompt(task: dict[str, Any], candidate: dict[str, Any], target: Resol
     }
     return (
         "你是 Obsidian 知识资产派生工具。请基于给定来源生成一篇中文 Markdown 子资产正文。\n"
-        "要求：不要输出 frontmatter；不要编造；不确定处明确标注；内容要可复用、可执行、可验证。\n"
+        "要求：不要输出 frontmatter；不要编造；不确定处明确标注；内容要可复用、可执行、可验证。"
+        "来源事实必须归因到仓库、README 或网页；AI 判断单列并使用限定语，不得写成来源无法支持的绝对结论。\n"
         f"必须包含这些信息：{required}。\n\n"
         f"父资产与派生上下文：\n{json.dumps(context, ensure_ascii=False, indent=2)}\n\n"
         f"目标来源材料：\n{source_block}\n"
@@ -1179,11 +1186,12 @@ def _child_frontmatter(
     title: str,
     summary: str,
     parent_link: str,
-    body_usage: dict[str, Any],
+    body_text: str,
 ) -> tuple[str, Path, tuple[str, ...]]:
     date = datetime.now().strftime("%Y%m%d")
     target_type = str(candidate.get("targetType") or candidate.get("target_type") or target.kind)
-    tags = _tag_list(target_type)
+    target_material = json.dumps(target.raw, ensure_ascii=False)[:50000]
+    tags = _tag_list(target_type, f"{title}\n{target_material}\n{body_text}")
     if target_type == "github_project":
         asset_id = _schema_asset_id(config.vault_path, date, "github")
         rel_dir = Path("知识资产/GitHub项目")
@@ -1217,18 +1225,10 @@ weight: 100
 status: active
 derived_kind: github_project
 derived_from: {_format_yaml_list([parent_link] if parent_link else [])}
-parent_task_id: "{_yaml_escape(task.get("parent_task_id") or task.get("parentTaskId") or "")}"
-parent_candidate_id: "{_yaml_escape(candidate.get("id") or "")}"
 parent_source_url: "{_yaml_escape(task.get("parent_source_url") or task.get("parentSourceUrl") or "")}"
 verification_status: partially_verified
 evidence_level: primary
-reusable_score: 3
-executable_score: 3
 related: {_format_yaml_list([parent_link] if parent_link else [])}
-model: "{_yaml_escape(config.analyzer_model)}"
-input_tokens: {int(body_usage.get("input_tokens") or 0)}
-output_tokens: {int(body_usage.get("output_tokens") or 0)}
-total_tokens: {int(body_usage.get("total_tokens") or 0)}
 ---
 """
         return frontmatter, md_path, tags
@@ -1259,18 +1259,10 @@ weight: 100
 status: active
 derived_kind: {derived_kind}
 derived_from: {_format_yaml_list([parent_link] if parent_link else [])}
-parent_task_id: "{_yaml_escape(task.get("parent_task_id") or task.get("parentTaskId") or "")}"
-parent_candidate_id: "{_yaml_escape(candidate.get("id") or "")}"
 parent_source_url: "{_yaml_escape(task.get("parent_source_url") or task.get("parentSourceUrl") or "")}"
 verification_status: partially_verified
 evidence_level: {"official" if target_type == "official_doc" else "secondary"}
-reusable_score: 3
-executable_score: 2
 related: {_format_yaml_list([parent_link] if parent_link else [])}
-model: "{_yaml_escape(config.analyzer_model)}"
-input_tokens: {int(body_usage.get("input_tokens") or 0)}
-output_tokens: {int(body_usage.get("output_tokens") or 0)}
-total_tokens: {int(body_usage.get("total_tokens") or 0)}
 ---
 """
     return frontmatter, md_path, tags
@@ -1445,10 +1437,20 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
         relation = str(candidate.get("relationType") or "派生资产")
         touched = _link_parent_child(parent_path, existing_path, existing_title or existing_path.stem, relation)
         touched.extend(_link_child_back_to_parent(parent_path, existing_path, parent_link, relation))
-        git_status = "existing_asset"
-        if touched:
-            git_status = _git_commit(config.vault_path, existing_title or existing_path.stem, touched, asset_type="derived_ingest")
         child_link = _asset_link(existing_path, existing_title or existing_path.stem)
+        resolved_summary = {
+            "url": target.url,
+            "title": target.title,
+            "kind": target.kind,
+            "confidence": target.confidence,
+            "evidence": target.evidence + ["vault 中已存在同一目标资产，已避免重复写入"],
+        }
+        touched.extend(mark_derived_candidate_executed(
+            parent_path,
+            candidate_name=str(candidate.get("name") or target.title),
+            child_link=child_link,
+        ))
+        git_status = "not_managed"
         _add_artifact(audit_files, "derive_write_result", _write_audit_json(
             audit_root,
             "06-write-result.json",
@@ -1476,13 +1478,7 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
             "git_status": git_status,
             "candidate_id": candidate.get("id"),
             "target_type": candidate.get("targetType") or candidate.get("target_type"),
-            "resolved_target": {
-                "url": target.url,
-                "title": target.title,
-                "kind": target.kind,
-                "confidence": target.confidence,
-                "evidence": target.evidence + ["vault 中已存在同一目标资产，已避免重复写入"],
-            },
+            "resolved_target": resolved_summary,
             "parent_asset_path": str(parent_path) if parent_path else "",
             "asset_link": child_link,
             "cost": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost_rmb_estimate": 0.0},
@@ -1556,7 +1552,7 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
         title=title,
         summary=summary,
         parent_link=parent_link,
-        body_usage=usage,
+        body_text=body,
     )
     md_path.parent.mkdir(parents=True, exist_ok=True)
     if md_path.exists():
@@ -1574,8 +1570,20 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
     relation = str(candidate.get("relationType") or "派生资产")
     parent_touched = _link_parent_child(parent_path, md_path, title, relation)
     touched.extend(parent_touched)
-    git_status = _git_commit(config.vault_path, title, touched, asset_type="derived_ingest")
     child_link = _asset_link(md_path, title)
+    resolved_summary = {
+        "url": target.url,
+        "title": target.title,
+        "kind": target.kind,
+        "confidence": target.confidence,
+        "evidence": target.evidence,
+    }
+    touched.extend(mark_derived_candidate_executed(
+        parent_path,
+        candidate_name=str(candidate.get("name") or target.title),
+        child_link=child_link,
+    ))
+    git_status = "not_managed"
     _add_artifact(audit_files, "derive_write_result", _write_audit_json(
         audit_root,
         "06-write-result.json",
@@ -1608,13 +1616,7 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
         "git_status": git_status,
         "candidate_id": candidate.get("id"),
         "target_type": candidate.get("targetType") or candidate.get("target_type"),
-        "resolved_target": {
-            "url": target.url,
-            "title": target.title,
-            "kind": target.kind,
-            "confidence": target.confidence,
-            "evidence": target.evidence,
-        },
+        "resolved_target": resolved_summary,
         "parent_asset_path": str(parent_path) if parent_path else "",
         "asset_link": child_link,
         "cost": cost,

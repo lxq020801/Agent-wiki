@@ -1,7 +1,7 @@
 # WebSocket 控制面协议
 
 > 扩展只做辅助控制台和任务入口。入库任务可以由扩展提交，但下载、
-> 分析、写库、状态和 git commit 仍由 Agent 本地执行层完成。
+> 分析、写库和状态仍由 Agent 本地执行层完成；vault Git 不由入库任务自动操作。
 
 ## 连接
 
@@ -397,7 +397,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 }
 ```
 
-完整评分、证据、验收标准、去重信息、父资产追溯信息和 prompt/source material 不通过 WebSocket 全量返回；它们写入 vault 的 `系统记录/派生任务候选/*.json` 以及 runtime 的 `run-artifacts/{task_id}/05-derive/` / `run-artifacts/{child_task_id}/05-derive-executor/`。
+完整评分、证据、验收标准、去重信息、父资产追溯信息和 prompt/source material 不通过 WebSocket 全量返回；它们写入 runtime 的 `run-artifacts/{task_id}/05-derive/` / `run-artifacts/{child_task_id}/05-derive-executor/`，不作为普通入库的额外 vault 文件。
 
 ### `derived_task_action_done` / `derived_task_action_rejected`
 

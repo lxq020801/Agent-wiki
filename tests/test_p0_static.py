@@ -376,11 +376,42 @@ class FakeImageResult:
     truncated: bool = False
 
 
+def _fake_config(tmp: Path, vault: Path, runtime_name: str = "test-runtime"):
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from config_loader import Config
+
+    runtime = tmp / runtime_name
+    runtime.mkdir(parents=True, exist_ok=True)
+    return Config(
+        ark_api_key="test",
+        ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
+        analyzer_model="doubao-seed-2-0-lite-260428",
+        analyzer_fallback="doubao-seed-2-0-mini-260428",
+        strategy_model="doubao-seed-2-0-mini-260428",
+        default_quality="quality",
+        balanced_target_frames=240,
+        quality_target_frames=1250,
+        fps_min=0.2,
+        fps_max=5.0,
+        file_active_timeout_sec=120,
+        cookie_path=runtime / "cookie" / "douyin.txt",
+        vault_path=vault,
+        vault_relative_root="知识资产/知识入库",
+        server_enabled=True,
+        server_host="127.0.0.1",
+        server_port=8765,
+        config_file=runtime / "config.toml",
+    )
+
+
 def _derived_candidate_json(*, name: str = "LangGraph", url: str = "https://github.com/langchain-ai/langgraph") -> str:
     return json.dumps({
         "candidates": [
             {
                 "name": name,
+                "subject_role": "primary",
                 "target_type": "github_project",
                 "target_url": url,
                 "subtype": "",
@@ -405,7 +436,7 @@ def _derived_candidate_json(*, name: str = "LangGraph", url: str = "https://gith
     }, ensure_ascii=False)
 
 
-def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
+def test_derive_strategy_keeps_all_primary_candidates_dedupes_and_redacts(tmp: Path) -> None:
     import sys
 
     os.environ["AGENT_WIKI_HOME"] = str(tmp / "derive-runtime")
@@ -434,6 +465,7 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
     candidates = [
         {
             "name": "LangGraph",
+            "subject_role": "primary",
             "target_type": "github_project",
             "target_url": "https://github.com/langchain-ai/langgraph/tree/main?utm_source=douyin",
             "reason": "父视频用它解释 Agent Harness 状态图。",
@@ -443,6 +475,7 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
         },
         {
             "name": "LangGraph duplicate",
+            "subject_role": "primary",
             "target_type": "github_project",
             "target_url": "https://github.com/langchain-ai/langgraph/issues/1",
             "reason": "重复线索，分数更低，应被同源去重。",
@@ -454,11 +487,13 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
     for index in range(9):
         candidates.append({
             "name": f"Official API Doc {index}",
+            "subject_role": "primary",
             "target_type": "official_doc",
             "target_url": f"https://example.com/docs/api/{index}?utm_campaign=x",
             "subtype": "api_doc",
             "reason": f"第 {index} 个官方文档线索，用于核验 API 参数。",
             "evidence": [f"时间码 0{index}:10 出现文档名"],
+            "confidence": 0.9,
             "scores": high_scores,
             "requires_confirmation": False,
         })
@@ -503,7 +538,8 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
     )
 
     assert decision["enabled"] is True
-    assert len(decision["items"]) <= 3
+    assert len(decision["items"]) == 10
+    assert decision["limits"] == {"candidates": None}
     assert decision["counts"]["suppressed"] >= 1
     assert len({item["dedupe_key"] for item in decision["items"]}) == len(decision["items"])
     existing_items = [
@@ -518,7 +554,7 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
     assert all(item.get("execution_status") != "queued" for item in decision["items"])
 
     public = public_derived_tasks(decision)
-    assert len(public) <= 3
+    assert len(public) == 10
     assert all(item["status"] in {"candidate", "existing_related"} for item in public)
     assert all(item["decision"] == "candidate" for item in public)
     log_text = (tmp / "derive-runtime" / "logs" / "derive-strategy-events.jsonl").read_text(encoding="utf-8")
@@ -570,6 +606,7 @@ def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp
         "candidates": [
             {
                 "name": "LangGraph",
+                "subject_role": "primary",
                 "target_type": "github_project",
                 "mentioned_context": "视频说 LangGraph 用于 Agent 状态图和工作流编排。",
                 "reason": "这是父视频方法可执行化的关键项目。",
@@ -580,6 +617,7 @@ def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp
             },
             {
                 "name": "Some API Docs",
+                "subject_role": "primary",
                 "target_type": "official_doc",
                 "mentioned_context": "视频提到某个 API，但没有给链接。",
                 "reason": "需要官方文档核验。",
@@ -635,6 +673,7 @@ def test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp: Path) -> No
         "candidates": [
             {
                 "name": "Official Docs",
+                "subject_role": "primary",
                 "target_type": "official_doc",
                 "target_url": "https://docs.example.com/api?token=secret&utm_source=x",
                 "reason": "需要核验 API 参数。",
@@ -644,6 +683,7 @@ def test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp: Path) -> No
             },
             {
                 "name": "Credential Repo",
+                "subject_role": "primary",
                 "target_type": "github_project",
                 "target_url": "https://user:pass@github.com/langchain-ai/langgraph",
                 "reason": "视频说它用于状态图。",
@@ -683,12 +723,144 @@ def test_knowledge_prompts_do_not_force_github_manual_confirmation() -> None:
     image_prompt = (SCRIPTS / "prompts" / "image_post_knowledge_ingest.md").read_text(encoding="utf-8")
     for prompt in (video_prompt, image_prompt):
         assert '"requires_confirmation": false' in prompt
-        assert "最多给 `3` 个强候选" in prompt
-        assert "默认不要生成派生候选" in prompt
-        assert "高置信 GitHub 项目候选可以设为 `false`" in prompt
-        assert "由执行层通过 GitHub API + README 解析" in prompt
+        assert "不设候选数量上限" in prompt
+        assert "主要介绍对象" in prompt
+        assert "顺带提及" in prompt
+        assert "案例" in prompt
+        assert "即使缺 URL，也可以设为 `false`" in prompt
+        assert "GitHub API 搜索解析" in prompt
+        assert "## 简洁概括" in prompt
+        assert "## 完整内容整理" in prompt
+        assert "## AI 分析" in prompt
+        assert '"subject_role": "primary"' in prompt
         assert '"evidence_strength": 5' in prompt
         assert '"ambiguity_inverse": 4' in prompt
+
+
+def test_derive_strategy_keeps_four_primary_projects_and_suppresses_incidental(tmp: Path) -> None:
+    import sys
+
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "four-project-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    from derive_strategy import derive_tasks_from_analysis, public_derived_tasks
+
+    scores = {
+        "knowledge_value": 5,
+        "parent_dependency": 5,
+        "evidence_strength": 5,
+        "actionability": 5,
+        "freshness_risk": 4,
+        "novelty": 5,
+        "asset_fit": 5,
+        "cost_risk_inverse": 5,
+        "ambiguity_inverse": 4,
+    }
+    names = ["ChatCut", "video-use", "HyperFrames", "Remotion"]
+    candidates = [
+        {
+            "name": name,
+            "subject_role": "primary",
+            "target_type": "github_project",
+            "parent_context": f"视频把 {name} 作为案例逐一重点介绍和演示。",
+            "reason": f"{name} 是视频的主要介绍对象。",
+            "evidence": [f"画面和口播连续展示 {name} 的功能与使用方式"],
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "scores": scores,
+        }
+        for name in names
+    ]
+    candidates.append({
+        "name": "FFmpeg",
+        "subject_role": "mentioned",
+        "target_type": "github_project",
+        "parent_context": "视频只在说明依赖时顺带提及 FFmpeg。",
+        "reason": "这是背景依赖，不是主要介绍对象。",
+        "evidence": ["安装命令中出现一次"],
+        "confidence": 0.95,
+        "scores": scores,
+    })
+    analysis = "## 派生决策 JSON\n```json\n" + json.dumps(
+        {"candidates": candidates}, ensure_ascii=False
+    ) + "\n```"
+    vault = tmp / "four-project-vault"
+    vault.mkdir()
+    decision = derive_tasks_from_analysis(
+        analysis,
+        source_id="four-projects",
+        source_url="https://v.douyin.com/four-projects/",
+        source_media="douyin_video",
+        ingest_intent="knowledge_ingest",
+        vault_path=vault,
+        task_id="four-project-task",
+    )
+
+    public = public_derived_tasks(decision)
+    assert [item["name"] for item in public] == names
+    assert all(item["autoEligible"] for item in public)
+    assert all(item["status"] == "auto_ready" for item in public)
+    assert decision["counts"]["retained"] == 4
+    assert decision["counts"]["suppressed"] == 1
+    audit_path = tmp / "four-project-runtime" / decision["audit_artifacts"]["files"]["derive_scored_retained_candidates"]
+    assert "object_not_primary_subject" in audit_path.read_text(encoding="utf-8")
+
+
+def test_derive_executor_github_search_failure_and_ambiguity_are_mocked(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import derive_executor
+
+    original = derive_executor._json_request
+    try:
+        derive_executor._json_request = lambda url, timeout=20: {"items": []}
+        try:
+            derive_executor.resolve_github_target({"name": "MissingProject"})
+        except derive_executor.DeriveError as exc:
+            assert exc.kind == "needs_target"
+            assert exc.recoverable is True
+        else:
+            raise AssertionError("missing GitHub result must stay pending")
+
+        repos = [
+            {
+                "name": "tool-one",
+                "full_name": "one/tool-one",
+                "description": "video editing tool",
+                "stargazers_count": 10,
+                "owner": {"login": "one"},
+                "html_url": "https://github.com/one/tool-one",
+            },
+            {
+                "name": "tool-two",
+                "full_name": "two/tool-two",
+                "description": "video editing tool",
+                "stargazers_count": 10,
+                "owner": {"login": "two"},
+                "html_url": "https://github.com/two/tool-two",
+            },
+        ]
+
+        def fake_request(url: str, *, timeout: int = 20):
+            if "search/repositories" in url:
+                return {"items": repos}
+            if url.endswith("/readme"):
+                return {"content": ""}
+            return repos[0] if "/one/" in url else repos[1]
+
+        derive_executor._json_request = fake_request
+        try:
+            derive_executor.resolve_github_target({
+                "name": "Tool",
+                "parentContext": "视频主要介绍一个视频编辑工具，但没有给出作者。",
+            })
+        except derive_executor.DeriveError as exc:
+            assert exc.kind == "ambiguous_target"
+            assert "补充明确 GitHub URL" in exc.hint
+        else:
+            raise AssertionError("non-unique GitHub match must require confirmation")
+    finally:
+        derive_executor._json_request = original
 
 
 def test_vault_write_schema(tmp: Path) -> None:
@@ -741,14 +913,109 @@ def test_vault_write_schema(tmp: Path) -> None:
     assert "source_media: douyin_video" in text
     assert "ingest_intent: knowledge_ingest" in text
     assert "source_url:" in text
-    assert "tags: [douyin, knowledge-asset, case-study, video-analysis]" in text
+    assert "tags: [ai-agent, knowledge-asset, video-analysis, douyin]" in text
+    assert 'source_id: "1234567890123456789"' in text
+    assert "## 简洁概括" in text
+    assert "## 完整内容整理" in text
+    assert "## AI 分析" in text
+    assert "### 派生状态（系统）" in text
+    assert re.findall(r"^##\s+", text, re.MULTILINE) == ["## ", "## ", "## "]
+    assert "model:" not in text
+    assert "input_tokens:" not in text
+    assert "cost_rmb_estimate:" not in text
     index = vault / "index.md"
     assert index.exists()
     index_text = index.read_text(encoding="utf-8")
     assert "## 知识入库" in index_text
     assert "[[" in index_text
-    assert git_status in {"committed", "no changes to commit"}
-    assert (vault / ".git").exists()
+    assert git_status == "not_managed"
+    assert not (vault / ".git").exists()
+    assert not (vault / "rules").exists()
+    assert not (vault / "templates").exists()
+    assert not (vault / "SCHEMA.md").exists()
+    assert not (vault / ".gitignore").exists()
+
+
+def test_duplicate_source_ingest_is_idempotent_and_preserves_existing_git(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from ingest import write_to_vault
+
+    vault = tmp / "duplicate-vault"
+    vault.mkdir()
+    git_dir = vault / ".git"
+    git_dir.mkdir()
+    head = git_dir / "HEAD"
+    head.write_text("ref: refs/heads/user-history\n", encoding="utf-8")
+    video = tmp / "duplicate.mp4"
+    video.write_bytes(b"original-video")
+    cfg = _fake_config(tmp, vault, "duplicate-runtime")
+    result = FakeResult(text=(
+        "## 简洁概括\n展示 Agent 知识入库流程。\n\n"
+        "## 完整内容整理\n视频逐步说明抓取、分析和写入。\n\n"
+        "## AI 分析\n从当前来源看，这套流程可能适合个人知识管理。\n\n"
+        "## 派生决策 JSON\n```json\n{\"candidates\": []}\n```"
+    ))
+
+    first_path, first_status = write_to_vault(
+        cfg, FakeMeta(), video, result,
+        {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+    )
+    first_text = first_path.read_text(encoding="utf-8")
+    second_path, second_status = write_to_vault(
+        cfg, FakeMeta(), video,
+        FakeResult(text="这个内容不应覆盖第一次入库。"),
+        {"input_tokens": 99, "output_tokens": 99, "total_tokens": 198},
+    )
+
+    assert first_status == "not_managed"
+    assert second_status == "existing_source"
+    assert second_path == first_path
+    assert first_path.read_text(encoding="utf-8") == first_text
+    assert len(list((vault / "知识资产" / "知识入库").glob("*.md"))) == 1
+    assert "资产总数：1" in (vault / "index.md").read_text(encoding="utf-8")
+    assert head.read_text(encoding="utf-8") == "ref: refs/heads/user-history\n"
+
+
+def test_index_count_only_includes_valid_indexed_assets(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from ingest import _update_index, write_to_vault
+
+    vault = tmp / "index-count-vault"
+    vault.mkdir()
+    video = tmp / "index-count.mp4"
+    video.write_bytes(b"video")
+    cfg = _fake_config(tmp, vault, "index-count-runtime")
+    md_path, _ = write_to_vault(
+        cfg, FakeMeta(), video, FakeResult(),
+        {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+    )
+    orphan = vault / "知识资产" / "知识入库" / "orphan.md"
+    orphan.write_text(
+        "---\nid: orphan-001\nstatus: active\n---\n# Orphan\n",
+        encoding="utf-8",
+    )
+    index = vault / "index.md"
+    index.write_text(
+        index.read_text(encoding="utf-8")
+        + "- [[missing-asset|断链]] — 不应计数\n",
+        encoding="utf-8",
+    )
+    _update_index(
+        vault,
+        md_path,
+        "A Douyin Test Video",
+        "展示 Agent 入库流程。",
+        tags=("ai-agent", "knowledge-asset", "video-analysis", "douyin"),
+    )
+
+    index_text = index.read_text(encoding="utf-8")
+    assert "资产总数：1" in index_text
+    assert orphan.stem not in index_text
+    assert "missing-asset" in index_text
 
 
 def test_derive_strategy_ignores_candidates_json_outside_derived_section(tmp: Path) -> None:
@@ -893,18 +1160,17 @@ def test_vault_write_includes_derived_tasks_and_record(tmp: Path) -> None:
     )
 
     text = md_path.read_text(encoding="utf-8")
-    assert "derived_candidate_record:" in text
-    assert 'derived_candidate_ids: ["dt-test"]' in text
+    assert "derived_candidate_record:" not in text
+    assert "derived_candidate_ids:" not in text
     assert "target_type:" not in text.split("---", 2)[1]
-    assert "## 派生任务候选" in text
+    assert "### 派生状态（系统）" in text
     assert "[LangGraph](https://github.com/langchain-ai/langgraph)" in text
-    assert "## 九、派生决策 JSON" not in text
+    assert "当前没有待执行或已完成的派生" not in text
+    assert "派生决策 JSON" not in text
     assert "候选名称" not in text
 
-    records = list((vault / "系统记录" / "派生任务候选").glob("*.json"))
-    assert len(records) == 1
-    record = json.loads(records[0].read_text(encoding="utf-8"))
-    item = record["items"][0]
+    assert not (vault / "系统记录").exists()
+    item = derived_decision["items"][0]
     assert item["parent_task_id"] == "task-derived"
     assert item["parent_asset_id"]
     assert item["parent_asset_path"] == str(md_path.relative_to(vault))
@@ -1093,7 +1359,13 @@ def test_image_post_vault_write_schema(tmp: Path) -> None:
     assert "asset_family: knowledge_asset" in text
     assert "source_media: douyin_image_post" in text
     assert "ingest_intent: knowledge_ingest" in text
-    assert "tags: [douyin, knowledge-asset, case-study, image-analysis]" in text
+    assert "tags: [knowledge-asset, image-analysis, douyin]" in text
+    assert 'source_id: "1234567890123456789"' in text
+    assert "## 简洁概括" in text
+    assert "## 完整内容整理" in text
+    assert "## AI 分析" in text
+    assert "model:" not in text
+    assert "total_tokens:" not in text
     assert "![[raw/images/" in text
     assert (vault / "raw" / "images").exists()
     index_text = (vault / "index.md").read_text(encoding="utf-8")
@@ -1102,7 +1374,7 @@ def test_image_post_vault_write_schema(tmp: Path) -> None:
     assert "`#image-analysis`" in index_text
     assert "第二行不应该进入标题" not in index_text
     assert all(line.count("[[") == line.count("]]") for line in index_text.splitlines())
-    assert git_status in {"committed", "no changes to commit"}
+    assert git_status == "not_managed"
 
 
 def test_vault_slug_preserves_chinese_title() -> None:
@@ -3975,7 +4247,12 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
         'title: "父视频：Agent Harness"\n'
         "related: []\n"
         "---\n"
-        "# 父视频：Agent Harness\n\n正文\n",
+        "# 父视频：Agent Harness\n\n正文\n\n"
+        "## AI 分析\n\n> 以下内容由 AI 生成。\n\n"
+        "### 派生状态（系统）\n\n"
+        "| 决策 | 类型 | 名称 | 分数 | 状态 | 原因 |\n"
+        "|---|---|---|---:|---|---|\n"
+        "| candidate | github_project | LangGraph | 95 | auto_ready | 父视频主要介绍 LangGraph。 |\n",
         encoding="utf-8",
     )
     cfg = Config(
@@ -4062,17 +4339,14 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
 
     original_resolve = derive_executor.resolve_target
     original_model = derive_executor._call_lite_model
-    original_git = derive_executor._git_commit
     try:
         derive_executor.resolve_target = fake_resolve
         derive_executor._call_lite_model = fake_model
-        derive_executor._git_commit = lambda vault_path, title, touched, asset_type: "committed"
         sw = FakeStatusWriter()
         summary = derive_executor.execute_derived_task(task, cfg, sw)
     finally:
         derive_executor.resolve_target = original_resolve
         derive_executor._call_lite_model = original_model
-        derive_executor._git_commit = original_git
 
     child = Path(summary["vault_path"])
     assert child.exists()
@@ -4091,8 +4365,16 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
     assert '"repo"' not in child_text
     assert '"readme"' not in child_text
     assert "derived_from:" in child_text
-    assert "parent_candidate_id: \"dt-e2e\"" in child_text
+    assert "parent_candidate_id:" not in child_text
+    assert "parent_task_id:" not in child_text
+    assert "model:" not in child_text
+    assert "input_tokens:" not in child_text
+    assert "total_tokens:" not in child_text
     assert "## 相关资产" in parent_text
+    assert "completed" in parent_text
+    table_child_link = child_link.replace("|", "\\|")
+    assert f"| completed | github_project | {table_child_link} | 95 | completed |" in parent_text
+    assert not (vault / "系统记录").exists()
     assert (vault / "index.md").exists()
     assert summary["audit_artifacts"]["dir"] == "run-artifacts/child-task"
     artifact_files = summary["audit_artifacts"]["files"]
@@ -4120,9 +4402,10 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
     for text in (parent_text, child_text):
         for match in re.findall(r"!?\[\[([^|\]#]+)", text):
             target_stem = match.split("|", 1)[0].split("#", 1)[0]
+            target_stem = target_stem.rstrip("\\")
             assert target_stem in all_stems, target_stem
     assert any(update.get("stage") == "resolving_target" for update in sw.updates)
-    assert summary["git_status"] == "committed"
+    assert summary["git_status"] == "not_managed"
 
 
 def test_derive_executor_main_preserves_derived_ingest_status(tmp: Path) -> None:
@@ -4237,13 +4520,17 @@ def main() -> int:
         test_douyin_share_text_url_extraction()
         test_download_video_resumes_partial_file(tmp)
         test_ingest_url_preserves_share_text_argument()
-        test_derive_strategy_scores_limits_dedupes_and_redacts(tmp)
+        test_derive_strategy_keeps_all_primary_candidates_dedupes_and_redacts(tmp)
         test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp)
         test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp)
         test_knowledge_prompts_do_not_force_github_manual_confirmation()
+        test_derive_strategy_keeps_four_primary_projects_and_suppresses_incidental(tmp)
+        test_derive_executor_github_search_failure_and_ambiguity_are_mocked(tmp)
         test_derive_strategy_ignores_candidates_json_outside_derived_section(tmp)
         test_normalize_ingest_intent_rejects_removed_viral_intent()
         test_vault_write_schema(tmp)
+        test_duplicate_source_ingest_is_idempotent_and_preserves_existing_git(tmp)
+        test_index_count_only_includes_valid_indexed_assets(tmp)
         test_vault_write_includes_derived_tasks_and_record(tmp)
         test_image_post_metadata_detection_from_image_infos()
         test_image_post_without_image_urls_fails_clearly()

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -405,12 +406,20 @@ class DouyinImagePostStaticTests(unittest.TestCase):
             self.assertIn("asset_family: knowledge_asset", text)
             self.assertIn("source_media: douyin_image_post", text)
             self.assertIn("ingest_intent: knowledge_ingest", text)
-            self.assertIn("tags: [douyin, knowledge-asset, case-study, image-analysis]", text)
+            self.assertIn("tags: [knowledge-asset, image-analysis, douyin]", text)
+            self.assertIn('source_id: "7390000000000000000"', text)
             self.assertIn("image_count: 2", text)
             self.assertNotIn("video_path:", text)
             self.assertNotIn("fps_used:", text)
-            self.assertIn("derived_candidate_record:", text)
-            self.assertIn('derived_candidate_ids: ["dt-image-write"]', text)
+            self.assertNotIn("model:", text)
+            self.assertNotIn("total_tokens:", text)
+            self.assertIn("## 简洁概括", text)
+            self.assertIn("## 完整内容整理", text)
+            self.assertIn("## AI 分析", text)
+            self.assertIn("### 派生状态（系统）", text)
+            self.assertEqual(re.findall(r"^##\s+", text, re.MULTILINE), ["## ", "## ", "## "])
+            self.assertNotIn("derived_candidate_record:", text)
+            self.assertNotIn("derived_candidate_ids:", text)
             self.assertNotIn("target_type:", text.split("---", 2)[1])
             self.assertIn("[Image Write API](https://example.com/docs/image-write-api)", text)
 
@@ -420,11 +429,10 @@ class DouyinImagePostStaticTests(unittest.TestCase):
             self.assertIn("`#knowledge-asset`", index_text)
             self.assertIn("`#image-analysis`", index_text)
             self.assertNotIn("`#video-analysis`", index_text)
-            self.assertIn(git_status, {"committed", "no changes to commit"})
-            records = list((cfg.vault_path / "系统记录" / "派生任务候选").glob("*.json"))
-            self.assertEqual(len(records), 1)
-            record = json.loads(records[0].read_text(encoding="utf-8"))
-            item = record["items"][0]
+            self.assertEqual(git_status, "not_managed")
+            self.assertFalse((cfg.vault_path / ".git").exists())
+            self.assertFalse((cfg.vault_path / "系统记录").exists())
+            item = derived_decision["items"][0]
             self.assertEqual(item["parent_task_id"], "image-parent")
             self.assertEqual(item["parent_asset_path"], str(md_path.relative_to(cfg.vault_path)))
             self.assertEqual(item["parent_source_url"], self._image_meta().source_url)

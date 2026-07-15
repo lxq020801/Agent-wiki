@@ -1,10 +1,9 @@
 """
-derive_strategy.py — turn model-discovered follow-up leads into bounded candidates.
+derive_strategy.py — turn model-discovered primary subjects into candidates.
 
-The derivation layer is intentionally conservative: it scores and records
-candidates, and only high-confidence, low-risk, resolvable candidates are
-eligible for automatic child tasks. That keeps one video from exploding into a
-noisy task tree while still making obvious follow-ups automatic.
+The derivation layer is intentionally selective by subject role rather than by
+count: all genuinely primary objects may survive, while incidental mentions
+stay in the source note or audit trail.
 """
 from __future__ import annotations
 
@@ -21,10 +20,6 @@ from typing import Any
 
 _AUDIT_ROOT_NAME = "run-artifacts"
 ALLOWED_TARGET_TYPES = {"github_project", "official_doc", "web_research"}
-MAX_RAW_CANDIDATES = 12
-MAX_RETAINED_CANDIDATES = 3
-MAX_AUTO_CANDIDATES = 3
-MAX_AUTO_PER_TYPE = 2
 CANDIDATE_THRESHOLD = 72
 VISIBLE_SCORE_THRESHOLD = 85
 VISIBLE_CONFIDENCE_THRESHOLD = 0.8
@@ -346,7 +341,7 @@ def _extract_json_objects(text: str) -> list[dict[str, Any]]:
 
 
 def _derived_json_section(text: str) -> str:
-    match = re.search(r"(?:^|\n)##\s*[九9][、.．]\s*派生决策 JSON\b", text, re.I)
+    match = re.search(r"(?:^|\n)##\s*(?:[九9][、.．]\s*)?派生决策 JSON\b", text, re.I)
     if not match:
         return ""
     start = match.end()
@@ -414,6 +409,7 @@ def _candidates_from_markdown(text: str) -> list[dict[str, Any]]:
             "confidence": _heuristic_confidence(name, target_type, action, item_type, context),
             "requires_confirmation": True,
             "source_action": action,
+            "subject_role": "primary",
         })
 
     recommended = _section_text(text, r"\n##\s+七[、.．]\s*可沉淀资产建议")
@@ -434,6 +430,7 @@ def _candidates_from_markdown(text: str) -> list[dict[str, Any]]:
             "confidence": 0.45,
             "requires_confirmation": True,
             "source_action": "推荐派生任务",
+            "subject_role": "primary",
         })
     return candidates
 
@@ -580,73 +577,31 @@ def _decision_from_score(
     return "candidate", reject_reasons
 
 
-def _candidate_context_text(item: dict[str, Any]) -> str:
-    parts: list[str] = []
-    for key in (
-        "name",
-        "target_type",
-        "derived_kind",
-        "task_kind",
-        "target_url",
-        "search_query",
-        "reason",
-        "parent_context",
-        "relation_type",
-    ):
-        parts.append(str(item.get(key) or ""))
-    for key in ("evidence", "acceptance_criteria"):
-        value = item.get(key)
-        if isinstance(value, list):
-            parts.extend(str(part or "") for part in value)
-        else:
-            parts.append(str(value or ""))
-    return " ".join(parts).lower()
+def _subject_role(raw: dict[str, Any], scores: dict[str, int], context: str) -> str:
+    role = str(raw.get("subject_role") or raw.get("object_role") or "").strip().lower()
+    if role in {"primary", "main", "主要", "主要对象", "主要介绍对象"}:
+        return "primary"
+    if role in {"mentioned", "incidental", "background", "顺带提及", "背景"}:
+        return "mentioned"
+    if raw.get("is_primary_subject") is True:
+        return "primary"
+    if raw.get("is_primary_subject") is False:
+        return "mentioned"
+    if re.search(r"顺带提及|仅提及|一笔带过|作为背景|对比时提到|并非重点|incidental|background mention", context, re.I):
+        return "mentioned"
+    if re.search(r"主要介绍对象|核心介绍对象|主要项目|主项目|重点介绍|重点演示|围绕.{0,30}(介绍|演示|讲解)|primary subject", context, re.I):
+        return "primary"
+    return "unspecified"
 
 
-def _has_operational_dependency_signal(item: dict[str, Any]) -> bool:
-    text = _candidate_context_text(item)
-    target_type = str(item.get("target_type") or "")
-    target_url = str(item.get("target_url") or "")
-
-    if target_type == "github_project":
-        if "github.com/" in target_url:
-            return True
-        return bool(
-            re.search(r"github|仓库|repo|repository|开源|readme", text, re.I)
-            or re.search(r"安装|配置|运行|调用|接入|实操|教程|代码|实现|部署|命令|cli|sdk", text, re.I)
-            or re.search(r"(用于|用它|依赖|构建|实现).{0,40}(状态图|工作流|编排|agent|插件|框架|库|组件|流程)", text, re.I)
-        )
-
-    if target_type == "official_doc":
-        return bool(
-            target_url
-            and re.search(r"api|接口|参数|官方文档|docs|documentation|接入|调用|限制|版本|配置|endpoint", text, re.I)
-        )
-
-    if target_type == "web_research":
-        return bool(
-            target_url
-            and re.search(r"官方报告|白皮书|标准|规范|论文|数据源|原始来源|primary source", text, re.I)
-            and re.search(r"父资产|父笔记|核心结论|必须核验|不可缺少|成立", text, re.I)
-        )
-
-    return False
+def _is_primary_subject(item: dict[str, Any]) -> bool:
+    return str(item.get("subject_role") or "") == "primary"
 
 
 def _derivation_noise_reasons(item: dict[str, Any]) -> list[str]:
-    text = _candidate_context_text(item)
     reasons: list[str] = []
-    if not _has_operational_dependency_signal(item):
-        reasons.append("missing_operational_dependency")
-    if re.search(
-        r"产品调研|融资|估值|争议|趋势|报告核验|行业调研|资金分布|发展历程|监管|商业化数据|"
-        r"背景|案例|收购|壁垒|切换成本|公司|市场|赛道|多源核验|checklist",
-        text,
-        re.I,
-    ):
-        reasons.append("background_research_noise")
-    if str(item.get("target_type") or "") == "web_research":
-        reasons.append("web_research_suppressed_by_default")
+    if not _is_primary_subject(item):
+        reasons.append("object_not_primary_subject")
     return sorted(set(reasons))
 
 
@@ -719,8 +674,7 @@ def _visible_block_reasons(item: dict[str, Any]) -> list[str]:
     github_resolution_allowed = (
         target_type == "github_project"
         and bool(item.get("name"))
-        and _has_operational_dependency_signal(item)
-        and "background_research_noise" not in reasons
+        and _is_primary_subject(item)
         and int(scores.get("evidence_strength") or 0) >= 4
         and int(scores.get("parent_dependency") or 0) >= 4
         and int(scores.get("ambiguity_inverse") or 0) >= 3
@@ -795,7 +749,13 @@ def _normalize_candidate(
     if "api" in subtype.lower() or "api" in str(raw.get("suggested_action") or "").lower():
         target_type = "official_doc"
         subtype = "api_doc"
-    parent_context = _redact_text(raw.get("mentioned_context") or raw.get("context") or raw.get("reason"))[:500]
+    parent_context = _redact_text(
+        raw.get("parent_context")
+        or raw.get("parentContext")
+        or raw.get("mentioned_context")
+        or raw.get("context")
+        or raw.get("reason")
+    )[:500]
     fallback_scores = _heuristic_scores(
         name,
         target_type,
@@ -804,6 +764,11 @@ def _normalize_candidate(
         parent_context,
     )
     scores = _normalize_scores(raw.get("scores"), fallback_scores)
+    subject_role = _subject_role(raw, scores, " ".join([
+        parent_context,
+        _redact_text(raw.get("reason")),
+        " ".join(_string_list(raw.get("evidence"), limit=6)),
+    ]))
     score = _normalized_score(scores)
     canonical_target = _canonical_target(target_type, name, target_url)
     dedupe_key = _dedupe_key(target_type, canonical_target)
@@ -863,6 +828,7 @@ def _normalize_candidate(
         "scores": scores,
         "reason": _redact_text(raw.get("reason") or parent_context or raw.get("suggested_action"))[:500],
         "parent_context": parent_context,
+        "subject_role": subject_role,
         "evidence": _string_list(raw.get("evidence") or raw.get("source_evidence"), limit=6),
         "acceptance_criteria": acceptance_criteria,
         "relation_type": _relation_type(target_type, subtype),
@@ -938,21 +904,12 @@ def _auto_block_reasons(item: dict[str, Any]) -> list[str]:
 
 
 def _mark_auto_eligible(items: list[dict[str, Any]]) -> None:
-    auto_count = 0
-    per_type: dict[str, int] = {}
     for item in sorted(items, key=lambda x: int(x.get("score") or 0), reverse=True):
         reasons = _auto_block_reasons(item)
-        target_type = str(item.get("target_type") or "")
-        if auto_count >= MAX_AUTO_CANDIDATES:
-            reasons.append("auto_total_limit_reached")
-        if per_type.get(target_type, 0) >= MAX_AUTO_PER_TYPE:
-            reasons.append("auto_type_limit_reached")
         reasons = sorted(set(reasons))
         item["auto_block_reasons"] = reasons
         item["auto_eligible"] = not reasons
         if item["auto_eligible"]:
-            auto_count += 1
-            per_type[target_type] = per_type.get(target_type, 0) + 1
             if item.get("execution_status") == "candidate":
                 item["execution_status"] = "auto_ready"
             item["next_action"] = "auto_enqueue"
@@ -968,7 +925,7 @@ def derive_tasks_from_analysis(
     vault_path: Path,
     task_id: str = "",
 ) -> dict[str, Any]:
-    """Return bounded derivation decisions from an analysis Markdown body."""
+    """Return derivation decisions for every qualifying primary subject."""
     if ingest_intent != "knowledge_ingest":
         return {
             "enabled": False,
@@ -1004,7 +961,6 @@ def derive_tasks_from_analysis(
     if not raw_candidates:
         raw_candidates = raw_markdown_candidates
         source = "markdown_fallback"
-    raw_candidates = raw_candidates[:MAX_RAW_CANDIDATES]
 
     by_key: dict[str, dict[str, Any]] = {}
     duplicate_count = 0
@@ -1045,19 +1001,6 @@ def derive_tasks_from_analysis(
                 "task_id": task_id,
                 "source_id": source_id,
                 "reason": "visible_gate",
-                "candidate": item,
-            })
-            continue
-        if len(retained) >= MAX_RETAINED_CANDIDATES:
-            suppressed_count += 1
-            item["execution_status"] = "suppressed"
-            item["reject_reasons"] = sorted(set(item.get("reject_reasons", []) + ["retained_limit_exceeded"]))
-            item["visible_block_reasons"] = ["retained_limit_exceeded"]
-            suppressed_items.append(item)
-            _write_derive_log("derive_candidate_suppressed", {
-                "task_id": task_id,
-                "source_id": source_id,
-                "reason": "retained_limit_exceeded",
                 "candidate": item,
             })
             continue
@@ -1117,10 +1060,7 @@ def derive_tasks_from_analysis(
     decision = {
         "enabled": True,
         "source": source,
-        "limits": {
-            "raw": MAX_RAW_CANDIDATES,
-            "retained": MAX_RETAINED_CANDIDATES,
-        },
+        "limits": {"candidates": None},
         "counts": counts,
         "items": retained,
         "audit_artifacts": {

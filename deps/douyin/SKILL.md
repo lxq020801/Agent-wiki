@@ -9,19 +9,19 @@ python3 scripts/ingest_url.py "<douyin-url>"
 
 The Chrome extension may submit a Douyin ingest task as an auxiliary entry.
 It must not run the ingest itself; the Agent/local execution layer owns
-download, analysis, vault writes, status, and git commits.
+download, analysis, vault writes, index updates, and status.
 
 ## Modules
 
 | Module | Responsibility |
 |---|---|
-| `scripts/ingest.py` | Orchestrate download, analysis, vault write, index update, git commit |
+| `scripts/ingest.py` | Orchestrate download, analysis, source-note/raw-media write, and index update |
 | `scripts/downloader.py` | Resolve Douyin URL, inject Cookie in memory, download mp4 |
 | `scripts/analyzer.py` | Choose Ark video input path, call Responses API, return analysis text |
 | `scripts/config_loader.py` | Load `~/.agent-wiki/config.toml` |
 | `scripts/status_writer.py` | Write diagnostic status JSON for Agent/debugging |
 | `scripts/cost_estimator.py` | Estimate RMB cost from model usage |
-| `scripts/derive_strategy.py` | Score, dedupe, and record bounded derivation candidates |
+| `scripts/derive_strategy.py` | Score, dedupe, and record all qualifying primary-subject candidates |
 | `scripts/derive_executor.py` | Resolve approved derived targets, generate child assets, and link parent/child notes |
 | `vendor/` | Embedded Douyin crawler code; treat as read-only |
 
@@ -49,12 +49,11 @@ The WebSocket control server writes:
 5. `ingest.py` chooses the media-specific knowledge prompt and writes one
    SCHEMA-compliant source note to `知识资产/知识入库/` with
    `asset_family: knowledge_asset` and `ingest_intent: knowledge_ingest`. It then
-   updates `index.md` and commits only the files touched by this ingest.
-6. For `knowledge_ingest`, `derive_strategy.py` turns model-discovered follow-up
-   leads into bounded candidates. It writes full candidate records under
-   `系统记录/派生任务候选/`; the parent Markdown only stores
-   `derived_candidate_record` and `derived_candidate_ids` plus a readable
-   summary table. High-confidence, low-risk, resolvable candidates may be queued
+   updates `index.md` without initializing, staging, or committing Git.
+6. For `knowledge_ingest`, `derive_strategy.py` turns model-discovered primary
+   introduced objects into candidates without a fixed count limit. Full records
+   stay in runtime `run-artifacts/`; the parent Markdown only stores a readable
+   status table. High-confidence, low-risk, resolvable candidates may be queued
    as `derived_ingest` tasks by the WebSocket service after the parent asset is
    written. Ambiguous or missing-target candidates remain pending for extension
    confirmation. Debuggable process nodes live under
@@ -123,42 +122,39 @@ asset_family: knowledge_asset
 source_media: douyin_video
 ingest_intent: knowledge_ingest
 source_url: "https://v.douyin.com/..."
-tags: [douyin, knowledge-asset, case-study, video-analysis]
+tags: [ai-agent, knowledge-asset, video-analysis, douyin]
 confidence: medium
 status: active
 ```
 
-The note body should include source metadata, one-sentence summary, model output,
-and analysis metadata. API keys and Cookies must never be written to Markdown,
-logs, or final Agent replies.
+The note body uses `简洁概括`, `完整内容整理`, and clearly marked `AI 分析`.
+Model names, token counts, costs, and analysis parameters stay in status/audit
+records. API keys and Cookies must never be written to Markdown, logs, or final
+Agent replies.
 
 Derivation candidate contract:
 
 - Only `knowledge_ingest` generates derivation candidates.
 - Allowed target types: `github_project`, `official_doc`, `web_research`.
 - Full candidate fields, scores, evidence, dedupe status, parent lineage, and
-  acceptance criteria live in `系统记录/派生任务候选/*.json`.
+  acceptance criteria live in runtime `run-artifacts/`.
 - Raw candidate extraction, normalization, target resolution, source material,
   prompt/output, write result, and linkback records live in runtime
   `run-artifacts/`.
 - Candidate-stage Markdown must not contain future `[[wikilink]]` targets. The
   derived executor writes child assets first, then updates parent/child links.
+- Candidate count has no fixed maximum. A candidate survives when the object is
+  a primary introduced subject with sufficient evidence and a real asset use;
+  incidental mentions stay in the source note or audit trail.
 - GitHub candidates may omit URL when the project name and context are strong;
   `derive_executor.py` resolves them through GitHub API search plus README
   comparison before writing the child asset.
-- Only high-confidence GitHub candidates are eligible for automatic enqueue in
+- All qualifying high-confidence GitHub candidates are eligible for automatic enqueue in
   the current runtime. `official_doc` and `web_research` remain candidates that
   require manual confirmation or a supplied URL until official-domain and
   multi-source verification are implemented.
-- Frontmatter only stores lightweight references:
-
-```yaml
-derived_candidate_record: "系统记录/派生任务候选/20260705-example.json"
-derived_candidate_ids: ["dt-..."]
-```
-
-- Do not write full candidate objects, `scores`, `evidence`, `dedupe`, or
-  execution status objects into asset frontmatter.
+- Do not write candidate references, full candidate objects, `scores`,
+  `evidence`, `dedupe`, or execution status objects into asset frontmatter.
 
 ## Verification
 
