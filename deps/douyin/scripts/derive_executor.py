@@ -40,10 +40,20 @@ from ingest import (
 from status_writer import StatusWriter, write_terminal
 
 try:
+    from server.github_asset_pipeline import (
+        GitHubAssetPipelineError,
+        clean_readme,
+        validate_source_sections,
+    )
     from server.github_service import register_derived_repository
     from server.vault_writer import VAULT_GIT_STATUS, vault_write_transaction
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from server.github_asset_pipeline import (
+        GitHubAssetPipelineError,
+        clean_readme,
+        validate_source_sections,
+    )
     from server.github_service import register_derived_repository
     from server.vault_writer import VAULT_GIT_STATUS, vault_write_transaction
 
@@ -519,10 +529,12 @@ def _target_audit_summary(target: ResolvedTarget) -> dict[str, Any]:
     if target.kind == "github_project":
         repo = target.raw.get("repo") if isinstance(target.raw, dict) else {}
         readme = str(target.raw.get("readme") or "") if isinstance(target.raw, dict) else ""
+        cleaned_readme = clean_readme(readme)
         raw_summary = {
             "repo": _repo_audit_summary(repo) if isinstance(repo, dict) else {},
-            "readme": readme[:120_000],
+            "readme": cleaned_readme,
             "readme_chars": len(readme),
+            "cleaned_readme_chars": len(cleaned_readme),
         }
     else:
         text = str(target.raw.get("text") or "") if isinstance(target.raw, dict) else ""
@@ -1151,6 +1163,7 @@ def _build_prompt(task: dict[str, Any], candidate: dict[str, Any], target: Resol
     raw = target.raw
     if target_type == "github_project":
         repo = raw.get("repo", {})
+        cleaned_readme = clean_readme(raw.get("readme", ""))
         source_block = json.dumps({
             "repo": {
                 "full_name": repo.get("full_name"),
@@ -1163,9 +1176,13 @@ def _build_prompt(task: dict[str, Any], candidate: dict[str, Any], target: Resol
                 "pushed_at": repo.get("pushed_at"),
                 "html_url": repo.get("html_url"),
             },
-            "readme": raw.get("readme", "")[:50000],
+            "readme": cleaned_readme,
         }, ensure_ascii=False)
-        required = "项目结论、能解决什么问题、最小可运行路径、核心 API/架构、与父视频说法关系、采用判断、风险、可复用片段"
+        required = (
+            "正文必须依次且仅使用三个二级章节：## 简洁概括、## 完整内容整理、## AI 分析。"
+            "简洁概括说明项目是什么；完整内容整理覆盖来源实际表达的问题、最小可运行路径、核心 API/架构、"
+            "限制与状态；AI 分析使用限定语说明与父来源的关系、采用判断、风险和可复用价值。"
+        )
     else:
         source_block = json.dumps({
             "url": target.url,
@@ -1228,6 +1245,7 @@ source_url: "{_yaml_escape(target.url)}"
 repo: "{_yaml_escape(target.url)}"
 repository_id: {int(repo.get("id") or 0)}
 repository_full_name: "{_yaml_escape(repo.get("full_name") or "")}"
+github_managed: true
 language: "{_yaml_escape(repo.get("language") or "")}"
 stars: {int(repo.get("stargazers_count") or 0)}
 forks: {int(repo.get("forks_count") or 0)}
@@ -1624,6 +1642,22 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
     ))
     try:
         body = _sanitize_generated_body(body_raw)
+        if target.kind == "github_project":
+            body = validate_source_sections(body)
+    except GitHubAssetPipelineError as exc:
+        error = DeriveError(exc.code, exc.message, recoverable=True)
+        _add_artifact(audit_files, "derive_executor_error", _write_audit_json(
+            audit_root,
+            "99-error.json",
+            {
+                "stage": "validate_source_sections",
+                "error_kind": error.kind,
+                "error": str(error),
+                "recoverable": error.recoverable,
+            },
+        ))
+        sw.update(audit_artifacts=_artifact_index(audit_root, audit_files))
+        raise error from exc
     except DeriveError as exc:
         _add_artifact(audit_files, "derive_executor_error", _write_audit_json(
             audit_root,

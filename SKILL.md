@@ -194,7 +194,9 @@ python3.11 tests/test_p0_static.py
 GitHub 联动的 mock 测试使用：
 
 ```bash
+python3.11 tests/test_github_backend.py
 python3.11 tests/test_github_service.py
 python3.11 tests/test_github_protocol.py
+python3.11 tests/test_no_vault_git.py
 node tests/test_github_extension_contract.js
 ```

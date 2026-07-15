@@ -4,12 +4,14 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import json
 import os
 import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -266,16 +268,26 @@ class _GitHubAPIDouble:
 
 
 def _github_service(root: Path, vault: Path, api: _GitHubAPIDouble):
+    from server.github_asset_pipeline import GitHubAssetPipeline
     from server.github_service import GitHubService
 
     config = root / "github-config.toml"
     config.write_text(f'[vault]\npath = "{vault}"\n', encoding="utf-8")
+    pipeline = GitHubAssetPipeline(
+        config_path=config,
+        analyzer=lambda material, cleaned_readme, _intent: (
+            f"## 简洁概括\n{material['public']['fullName']} 是一个合成测试仓库。\n\n"
+            f"## 完整内容整理\n{cleaned_readme or '仓库没有 README。'}\n\n"
+            "## AI 分析\n> 以下内容由 AI 生成。\n该内容仅用于本地写入回归测试。"
+        ),
+    )
     return GitHubService(
         runtime_root=root / "github-runtime",
         config_path=config,
         client_id="mock-client-id",
         token_store=_MemoryTokenStore(),
         api=api,
+        asset_pipeline=pipeline,
     )
 
 
@@ -366,7 +378,9 @@ class VaultGitRegressionTests(unittest.TestCase):
                     derive_executor,
                     "_call_lite_model",
                     return_value=(
-                        "## Project conclusion\nSynthetic model output from a test double.",
+                        "## 简洁概括\nSynthetic model output from a test double.\n\n"
+                        "## 完整内容整理\nSynthetic README and repository metadata only.\n\n"
+                        "## AI 分析\n> 以下内容由 AI 生成。\nNo real model was called.",
                         {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                     ),
                 ),
@@ -430,7 +444,7 @@ class VaultGitRegressionTests(unittest.TestCase):
             )
             with _reject_git_processes():
                 asyncio.run(server._run_github_import(batch["id"]))
-            stored = service.import_batches[batch["id"]]
+            stored = service.import_batch(batch["id"])
             self.assertEqual(stored["state"], "completed")
             self.assertEqual(stored["succeeded"], 1)
             self.assertEqual(stored["failed"], 1)
@@ -451,7 +465,7 @@ class VaultGitRegressionTests(unittest.TestCase):
                 refresh = service.check_refresh({"id": 101, "fullName": "example/mock-one"})
                 with (
                     mock.patch.object(
-                        service, "_update_index", side_effect=OSError("mock refresh index failure")
+                        service.asset_pipeline, "write", side_effect=OSError("mock refresh index failure")
                     ),
                     self.assertRaisesRegex(OSError, "mock refresh index failure"),
                 ):
@@ -474,12 +488,10 @@ class VaultGitRegressionTests(unittest.TestCase):
                     ingest_intent="derived_ingest",
                 )
             self.assertTrue(result["ok"])
-            self.assertEqual(result["autoStar"], {
-                "attempted": True,
-                "ok": False,
-                "code": "github_api_error",
-                "message": "synthetic star failure",
-            })
+            self.assertTrue(result["autoStar"]["attempted"])
+            self.assertFalse(result["autoStar"]["ok"])
+            self.assertEqual(result["autoStar"]["code"], "github_api_error")
+            self.assertEqual(result["autoStar"]["message"], "synthetic star failure")
             self.assertEqual(_git_snapshot(vault), before)
 
     def test_first_initialization_never_creates_or_changes_git(self) -> None:
@@ -491,6 +503,17 @@ class VaultGitRegressionTests(unittest.TestCase):
                 runtime = root / "bootstrap-runtime"
                 vault = root / "bootstrap-vault"
                 vault.mkdir()
+                if existing_git:
+                    (vault / "raw").mkdir()
+                    (vault / "知识资产" / "知识入库").mkdir(parents=True)
+                    (vault / "index.md").write_text("# Existing managed vault\n", encoding="utf-8")
+                    (vault / ".agent-wiki-vault.json").write_text(json.dumps({
+                        "schemaVersion": 1,
+                        "product": "agent-wiki",
+                        "vaultId": str(uuid.uuid4()),
+                        "userName": "bootstrap-vault",
+                        "createdAt": "2026-07-15T00:00:00",
+                    }), encoding="utf-8")
                 before = _seed_existing_git(vault) if existing_git else {}
                 config = runtime / "config.toml"
                 config.parent.mkdir(parents=True)

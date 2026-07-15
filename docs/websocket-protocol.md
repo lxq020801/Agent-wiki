@@ -497,7 +497,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 
 ### 登录与设置
 
-- `github_status_request` -> `github_status`：校验 Keychain token 并返回配置状态、登录账号摘要、`autoStar` 和非敏感的 `activeAuthorization`。弹窗重新打开时用它恢复验证码、授权地址和过期时间；响应永远不包含 device code 或 token。
+- `github_status_request` -> `github_status`：校验 Keychain token 并返回配置状态、登录账号摘要、`autoStar`、非敏感的 `activeAuthorization`，以及持久化的 `activeImport`、`recentImports[]` 和 `recentTasks[]`。弹窗重新打开时用它恢复授权状态、活动批次、最近批次和资产创建/自动 Star 事件；响应永远不包含 device code 或 token。
 - `github_auth_start` -> `github_auth_state`：返回 `flowId`、`userCode`、GitHub 官方 `verificationUri`、轮询间隔和过期时间。
 - 本地服务收到 `github_auth_start` 后独立进行 token 轮询，不依赖扩展弹窗持续打开；授权完成后把 token 写入 Keychain，并向仍在线的扩展广播 `github_auth_state`。
 - `github_auth_poll`：传 `flowId`；返回等待、成功、拒绝或超时状态。token 由服务端直接写入 macOS Keychain。
@@ -534,7 +534,9 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 }
 ```
 
-服务端重新向 GitHub API 按 ID 读取每个仓库，不信任扩展提交的元数据。`github_import_accepted` 返回批次 ID；后续 `github_import_progress` 包含 `total`、`completed`、`succeeded`、`failed` 和逐项结果。`github_import_cancel` 只取消尚未开始的项，不回滚已经成功写入的资产。
+服务端重新向 GitHub API 按 ID 读取每个仓库，不信任扩展提交的元数据。`github_import_accepted` 返回持久批次；后续 `github_import_progress` 包含 `total`、`completed`、`succeeded`、`existing`、`failed`、`cancelled`、`items[]` 和兼容用的终态 `results[]`。`items[]` 始终保留每个子任务的 `taskId`、`state`、仓库身份和非敏感结果，因此弹窗关闭后仍能恢复 queued/running/terminal 明细。
+
+`github_import_status` 接受 `batchId` 并返回同形的 `github_import_progress`。本地服务重启时会把中断的 running 父任务和子任务恢复为 queued，并继续未完成项；UI 在 `github_status.activeImport` 出现后会主动读取一次批次状态。`github_import_cancel` 只取消尚未开始的项，不回滚已经成功写入的资产。
 
 ### 手动刷新
 
@@ -544,7 +546,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 
 ### 去重与自动 Star
 
-所有入口共享 repository ID 优先、规范化 `owner/repo` 兜底的登记表。正式 GitHub 派生在资产与索引成功写入后调用同一登记钩子。自动 Star 只发生在正式派生成功之后；Stars 导入不重复 Star，GitHub Star API 失败也不改变知识入库成功状态。GitHub 首次写入、Stars 导入和确认刷新都不会执行自动 Git 操作。
+所有入口共享 repository ID 优先、规范化 `owner/repo` 兜底的登记表。正式 GitHub 派生复用统一适配器的 README 清理和三段正文校验，并在资产与索引成功写入后调用同一登记/事件钩子。自动 Star 只发生在正式派生成功之后；Stars 导入不重复 Star，GitHub Star API 失败也不改变知识入库成功状态。GitHub 首次写入、Stars 导入和确认刷新都不会执行自动 Git 操作。
 
 ## 边界
 

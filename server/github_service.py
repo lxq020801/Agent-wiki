@@ -25,6 +25,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from server.github_asset_pipeline import GitHubAssetPipeline, GitHubAssetPipelineError
+from server.github_tasks import GitHubTaskStore
 from server.vault_writer import vault_write_transaction
 
 
@@ -360,6 +362,8 @@ class GitHubService:
         client_id: str | None = None,
         token_store: Any | None = None,
         api: GitHubAPI | None = None,
+        asset_pipeline: Any | None = None,
+        task_store: GitHubTaskStore | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.runtime_root = Path(runtime_root or os.environ.get("AGENT_WIKI_HOME") or Path.home() / ".agent-wiki").expanduser()
@@ -372,9 +376,12 @@ class GitHubService:
         self.settings_path = self.github_root / "settings.json"
         self.registry_path = self.github_root / "repositories.json"
         self.authorization_path = self.github_root / "authorization.json"
+        self.asset_pipeline = asset_pipeline or GitHubAssetPipeline(config_path=self.config_path)
+        self.task_store = task_store or GitHubTaskStore(self.github_root / "tasks")
         self.pending_flows: dict[str, dict[str, Any]] = {}
         self.pending_refreshes: dict[str, dict[str, Any]] = {}
-        self.import_batches: dict[str, dict[str, Any]] = {}
+        # Compatibility for existing protocol callers; mutations go through task_store.
+        self.import_batches = self.task_store.batches
         self._account_cache: dict[str, Any] = {}
         self._verified_token_hash = ""
         self._auth_generation = 0
@@ -586,6 +593,13 @@ class GitHubService:
                 "authenticated": False,
                 "account": None,
                 "settings": self.settings(),
+                "activeImport": next((
+                    batch
+                    for batch in self.task_store.recent_batches(limit=10)
+                    if batch.get("state") in {"queued", "running"}
+                ), None),
+                "recentImports": self.task_store.recent_batches(limit=10),
+                "recentTasks": self.task_store.recent_events(limit=20),
                 "activeAuthorization": self.active_authorization(),
                 "authorizationState": authorization["state"],
                 "lastAuthorizationError": authorization.get("lastAuthorizationError"),
@@ -643,11 +657,11 @@ class GitHubService:
                 )
             )
         )
-        active_import = None
-        for batch in reversed(list(self.import_batches.values())):
-            if batch.get("state") in {"queued", "running"}:
-                active_import = self.public_batch(batch)
-                break
+        recent_imports = self.task_store.recent_batches(limit=10)
+        active_import = next(
+            (batch for batch in recent_imports if batch.get("state") in {"queued", "running"}),
+            None,
+        )
         return {
             "ok": bool(configured["configured"] and authenticated),
             "state": state,
@@ -656,6 +670,8 @@ class GitHubService:
             "account": account,
             "settings": self.settings(),
             "activeImport": active_import,
+            "recentImports": recent_imports,
+            "recentTasks": self.task_store.recent_events(limit=20),
             "activeAuthorization": None if authenticated else self.active_authorization(),
             "authorizationState": "ready" if authenticated else authorization["state"],
             "lastAuthorizationError": None if authenticated else authorization.get("lastAuthorizationError"),
@@ -929,6 +945,36 @@ class GitHubService:
         data = _read_json(self.registry_path, {"version": 1, "repositories": []})
         if not isinstance(data.get("repositories"), list):
             data["repositories"] = []
+        normalized: list[dict[str, Any]] = []
+        for raw in data["repositories"]:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            repository_id = _safe_int(item.get("repositoryId"))
+            canonical = normalize_owner_repo(item.get("fullName") or item.get("canonicalName"))
+            match = next((
+                record
+                for record in normalized
+                if repository_id and _safe_int(record.get("repositoryId")) == repository_id
+            ), None)
+            if match is None and canonical:
+                match = next((
+                    record
+                    for record in normalized
+                    if normalize_owner_repo(record.get("fullName") or record.get("canonicalName")) == canonical
+                    and (
+                        not repository_id
+                        or not _safe_int(record.get("repositoryId"))
+                        or _safe_int(record.get("repositoryId")) == repository_id
+                    )
+                ), None)
+            if match is None:
+                normalized.append(item)
+                continue
+            for key, value in item.items():
+                if value is not None and value != "" and value != [] and value != {}:
+                    match[key] = value
+        data["repositories"] = normalized
         return data
 
     def _registry_match(self, repository_id: Any, full_name: Any) -> dict[str, Any] | None:
@@ -940,16 +986,18 @@ class GitHubService:
                 continue
             if wanted_id and _safe_int(item.get("repositoryId")) == wanted_id:
                 return item
-            if wanted_name and normalize_owner_repo(item.get("fullName")) == wanted_name:
+            item_id = _safe_int(item.get("repositoryId"))
+            if (
+                wanted_name
+                and normalize_owner_repo(item.get("fullName")) == wanted_name
+                and (not wanted_id or not item_id or item_id == wanted_id)
+            ):
                 fallback = item
         return fallback
 
     def _annotate_duplicates(self, repositories: list[dict[str, Any]]) -> None:
-        records = [item for item in self._registry()["repositories"] if isinstance(item, dict)]
-        by_id = {_safe_int(item.get("repositoryId")): item for item in records if _safe_int(item.get("repositoryId"))}
-        by_name = {normalize_owner_repo(item.get("fullName")): item for item in records if normalize_owner_repo(item.get("fullName"))}
         for repo in repositories:
-            match = by_id.get(_safe_int(repo.get("id"))) or by_name.get(normalize_owner_repo(repo.get("fullName")))
+            match = self._registry_match(repo.get("id"), repo.get("fullName"))
             repo["ingested"] = bool(match)
             repo["assetPath"] = str(match.get("assetPath") or "") if match else ""
 
@@ -969,15 +1017,24 @@ class GitHubService:
     def _fetch_repository(self, identity: Any) -> dict[str, Any]:
         repository_id = 0
         full_name = ""
+        search_name = ""
         if isinstance(identity, dict):
             repository_id = _safe_int(identity.get("id") or identity.get("repositoryId"))
             full_name = normalize_owner_repo(identity.get("fullName") or identity.get("full_name") or identity.get("url"))
+            search_name = re.sub(
+                r"\s+",
+                " ",
+                str(identity.get("name") or identity.get("searchQuery") or identity.get("search_query") or "").strip(),
+            )[:256]
         else:
             full_name = normalize_owner_repo(identity)
+            search_name = re.sub(r"\s+", " ", str(identity or "").strip())[:256] if not full_name else ""
         if repository_id:
             repo, _ = self._authenticated_request("GET", f"/repositories/{repository_id}")
         elif full_name:
             repo, _ = self._authenticated_request("GET", f"/repos/{full_name}")
+        elif len(search_name) >= 2:
+            repo = self._resolve_repository_name(search_name)
         else:
             raise GitHubServiceError("repository_invalid", "GitHub 仓库标识无效。")
         if not isinstance(repo, dict):
@@ -987,6 +1044,40 @@ class GitHubService:
         if repository_id and _safe_int(repo.get("id")) != repository_id:
             raise GitHubServiceError("repository_mismatch", "GitHub 仓库 ID 校验失败。")
         return repo
+
+    def _resolve_repository_name(self, name: str) -> dict[str, Any]:
+        """Resolve an explicit name through GitHub's API without a browsing path."""
+        clean = re.sub(r"\s+", " ", str(name or "").strip())[:256]
+        data, _ = self._authenticated_request(
+            "GET",
+            "/search/repositories",
+            query={"q": f"{clean} in:name,description,readme", "sort": "stars", "order": "desc", "per_page": 10},
+        )
+        items = [
+            item
+            for item in (data.get("items") if isinstance(data, dict) and isinstance(data.get("items"), list) else [])
+            if isinstance(item, dict) and not item.get("private")
+        ]
+        if not items:
+            raise GitHubServiceError("not_found", f"GitHub API 未找到项目：{clean}")
+        wanted = re.sub(r"[^a-z0-9]", "", clean.casefold())
+        exact = [
+            item
+            for item in items
+            if re.sub(r"[^a-z0-9]", "", str(item.get("name") or "").casefold()) == wanted
+        ]
+        if len(exact) == 1:
+            return exact[0]
+        candidates = [public_repository(item) for item in (exact or items[:5])]
+        raise GitHubServiceError(
+            "repository_ambiguous",
+            f"GitHub 项目无法唯一匹配：{clean}",
+            details={
+                "state": "confirmation_required",
+                "confirmationRequired": True,
+                "candidates": candidates,
+            },
+        )
 
     def _repository_material(self, identity: Any) -> dict[str, Any]:
         repo = self._fetch_repository(identity)
@@ -1078,7 +1169,7 @@ class GitHubService:
                 normalize_owner_repo(self._frontmatter_value(text, key))
                 for key in ("repository_full_name", "repo", "source_url")
             }
-            if canonical and canonical in identities:
+            if canonical and canonical in identities and (not repository_id or not stored_id or stored_id == repository_id):
                 name_match = path
         return name_match
 
@@ -1103,78 +1194,6 @@ class GitHubService:
         if existing and existing.get("assetId"):
             return str(existing["assetId"])
         return f"{datetime.now().strftime('%Y%m%d')}-github-{repository_id}"
-
-    def _render_asset(
-        self,
-        material: dict[str, Any],
-        *,
-        asset_id: str,
-        ingest_intent: str,
-        ingested_date: str,
-        derived_from: list[str] | None = None,
-    ) -> str:
-        repo = material["public"]
-        today = datetime.now().strftime("%Y-%m-%d")
-        summary = re.sub(r"\s+", " ", repo["description"]).strip()[:80] or f"{repo['fullName']} GitHub 项目"
-        status = "archived" if repo["archived"] else "active"
-        weight = 0 if repo["archived"] else 100
-        derived = [str(item) for item in (derived_from or []) if str(item).strip()]
-        yaml_derived = json.dumps(derived, ensure_ascii=False)
-        escaped = lambda value: str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
-        readme = material["readme"].strip() or "_仓库未提供 README。_"
-        return f'''---
-id: "{escaped(asset_id)}"
-type: github_project
-asset_family: github_project
-source_media: github
-ingest_intent: {ingest_intent}
-title: "{escaped(repo['fullName'])}"
-source_url: "{escaped(repo['url'])}"
-repo: "{escaped(repo['url'])}"
-repository_id: {repo['id']}
-repository_full_name: "{escaped(repo['fullName'])}"
-github_managed: true
-default_branch: "{escaped(repo['defaultBranch'])}"
-latest_version: "{escaped(material['version'])}"
-pushed_at: "{escaped(repo['pushedAt'])}"
-language: "{escaped(repo['language'])}"
-stars: {repo['stars']}
-forks: {repo['forks']}
-open_issues: {repo['openIssues']}
-license: "{escaped(repo['license'])}"
-description: "{escaped(repo['description'])}"
-ingested: {ingested_date}
-updated: {today}
-tags: [github, project, unverified]
-summary: "{escaped(summary)}"
-confidence: medium
-weight: {weight}
-status: {status}
-derived_from: {yaml_derived}
-related: []
----
-
-# {repo['fullName']}
-
-## 基本信息
-
-- 仓库地址：[{repo['url']}]({repo['url']})
-- 主要语言：{repo['language'] or '未标注'}
-- Star / Fork / Issue：{repo['stars']} / {repo['forks']} / {repo['openIssues']}
-- 许可证：{repo['license'] or '未标注'}
-- 最新版本：{material['version'] or '未发布 Release'}
-- 默认分支：{repo['defaultBranch'] or '未标注'}
-- 归档状态：{'已归档' if repo['archived'] else '活跃'}
-- 最近推送：{repo['pushedAt'] or '未知'}
-
-## 项目概述
-
-{repo['description'] or 'GitHub 仓库未提供 description。'}
-
-## README 原文
-
-{readme}
-'''
 
     def _update_index(self, vault_path: Path, asset_path: Path, material: dict[str, Any]) -> Path:
         index = vault_path / "index.md"
@@ -1266,7 +1285,11 @@ related: []
             if _safe_int(item.get("repositoryId")) == repo["id"]:
                 existing = item
                 break
-            if normalize_owner_repo(item.get("fullName")) == normalize_owner_repo(repo["fullName"]):
+            item_id = _safe_int(item.get("repositoryId"))
+            if (
+                normalize_owner_repo(item.get("fullName")) == normalize_owner_repo(repo["fullName"])
+                and (not item_id or item_id == repo["id"])
+            ):
                 fallback = item
         existing = existing or fallback
         record = existing if existing is not None else {}
@@ -1356,30 +1379,24 @@ related: []
                 "refreshAvailable": existing.get("snapshot") != material["snapshot"],
                 "autoStar": {"attempted": False, "ok": True},
             }
-        ingested_date = datetime.now().strftime("%Y-%m-%d")
-        if asset_path.exists():
-            match = re.search(r"(?m)^ingested:\s*([^\s]+)", asset_path.read_text(encoding="utf-8", errors="ignore"))
-            if match:
-                ingested_date = match.group(1)
-        asset_path.parent.mkdir(parents=True, exist_ok=True)
-        content = self._render_asset(
-            material,
-            asset_id=asset_id,
-            ingest_intent=ingest_intent,
-            ingested_date=ingested_date,
-            derived_from=derived_from,
-        )
-        previous = asset_path.read_text(encoding="utf-8") if asset_path.exists() else ""
-        changed = previous != content
-        if changed:
-            tmp = asset_path.with_suffix(asset_path.suffix + ".tmp")
-            tmp.write_text(content, encoding="utf-8")
-            tmp.replace(asset_path)
-            self._update_index(vault_path, asset_path, material)
+        try:
+            write_result = self.asset_pipeline.write(
+                material,
+                vault_path=vault_path,
+                ingest_intent=ingest_intent,
+                derived_from=derived_from,
+            )
+        except GitHubAssetPipelineError as exc:
+            raise GitHubServiceError(exc.code, exc.message) from exc
+        asset_path = write_result.asset_path
+        asset_id = write_result.asset_id
+        changed = bool(write_result.changed)
         record = self._save_registry(material, asset_path, vault_path, asset_id, ingest_intent=ingest_intent)
-        star_result = {"attempted": False, "ok": True}
-        if changed and ingest_intent == "derived_ingest" and self.settings()["autoStar"]:
-            star_result = self._star_after_success(repo["fullName"])
+        star_result = self._record_asset_created(
+            repo,
+            record["assetPath"],
+            source=ingest_intent,
+        )
         return {
             "ok": True,
             "state": "created",
@@ -1396,6 +1413,60 @@ related: []
             return {"attempted": True, "ok": True}
         except GitHubServiceError as exc:
             return {"attempted": True, "ok": False, "code": exc.code, "message": exc.message}
+        except Exception as exc:
+            return {
+                "attempted": True,
+                "ok": False,
+                "code": "github_star_failed",
+                "message": f"GitHub Star 失败：{type(exc).__name__}",
+            }
+
+    def _record_asset_created(
+        self,
+        repository: dict[str, Any],
+        asset_path: str,
+        *,
+        source: str,
+    ) -> dict[str, Any]:
+        enabled = self.settings()["autoStar"]
+        event, created = self.task_store.ensure_asset_event(
+            repository,
+            asset_path,
+            source=source,
+            auto_star_enabled=enabled,
+        )
+        stored = event.get("autoStar") if isinstance(event.get("autoStar"), dict) else {}
+        if not created:
+            return {
+                "attempted": False,
+                "ok": bool(stored.get("ok", True)),
+                "state": str(stored.get("state") or "existing_event"),
+                "taskId": str(event.get("id") or ""),
+                "idempotent": True,
+            }
+        if not enabled:
+            return {
+                "attempted": False,
+                "ok": True,
+                "state": "disabled",
+                "taskId": str(event.get("id") or ""),
+            }
+        result = self._star_after_success(str(repository.get("fullName") or ""))
+        finished = self.task_store.finish_asset_event_star(str(event.get("id") or ""), result) or event
+        public_star = dict(finished.get("autoStar") or result)
+        public_star["taskId"] = str(event.get("id") or "")
+        return public_star
+
+    def resume_pending_asset_events(self) -> list[dict[str, Any]]:
+        """Finish post-create Star work that was interrupted by a service stop."""
+        completed: list[dict[str, Any]] = []
+        for event in self.task_store.pending_star_events():
+            repository = event.get("repository") if isinstance(event.get("repository"), dict) else {}
+            result = self._star_after_success(str(repository.get("fullName") or ""))
+            finished = self.task_store.finish_asset_event_star(str(event.get("id") or ""), result)
+            if finished:
+                completed.append(finished)
+        return completed
 
     def check_refresh(self, identity: Any) -> dict[str, Any]:
         material = self._repository_material(identity)
@@ -1461,24 +1532,28 @@ related: []
         if not asset_path.exists():
             raise GitHubServiceError("asset_missing", "已登记的 GitHub 项目文件不存在。")
         old_text = asset_path.read_text(encoding="utf-8", errors="ignore")
-        ingested_date = self._frontmatter_value(old_text, "ingested") or datetime.now().strftime("%Y-%m-%d")
         ingest_intent = self._frontmatter_value(old_text, "ingest_intent") or "manual"
         if self._frontmatter_value(old_text, "github_managed").lower() == "true":
-            content = self._render_asset(
-                material,
-                asset_id=self._asset_id(repo["id"], existing),
-                ingest_intent=ingest_intent if ingest_intent in {"manual", "derived_ingest"} else "manual",
-                ingested_date=ingested_date,
-                derived_from=self._frontmatter_list(old_text, "derived_from"),
-            )
+            try:
+                write_result = self.asset_pipeline.write(
+                    material,
+                    vault_path=vault_path,
+                    ingest_intent=ingest_intent if ingest_intent in {"manual", "derived_ingest"} else "manual",
+                    derived_from=self._frontmatter_list(old_text, "derived_from"),
+                    asset_path=asset_path,
+                    existing_text=old_text,
+                )
+            except GitHubAssetPipelineError as exc:
+                raise GitHubServiceError(exc.code, exc.message) from exc
+            changed = bool(write_result.changed)
         else:
             content = self._refresh_unmanaged_asset(old_text, material)
-        changed = content != old_text
-        if changed:
-            tmp = asset_path.with_suffix(asset_path.suffix + ".tmp")
-            tmp.write_text(content, encoding="utf-8")
-            tmp.replace(asset_path)
-            self._update_index(vault_path, asset_path, material)
+            changed = content != old_text
+            if changed:
+                tmp = asset_path.with_suffix(asset_path.suffix + ".tmp")
+                tmp.write_text(content, encoding="utf-8")
+                tmp.replace(asset_path)
+                self._update_index(vault_path, asset_path, material)
         record = self._save_registry(
             material,
             asset_path,
@@ -1498,12 +1573,12 @@ related: []
         self.pending_refreshes.pop(str(refresh_id or ""), None)
         return {"ok": True, "state": "cancelled"}
 
-    def create_import_batch(self, repositories: Any) -> dict[str, Any]:
+    def create_import_batch(self, repositories: Any, *, request_key: str = "") -> dict[str, Any]:
         if not isinstance(repositories, list) or not repositories:
             raise GitHubServiceError("selection_empty", "请至少选择一个 GitHub Star。")
         clean: list[dict[str, Any]] = []
         seen_ids: set[int] = set()
-        seen_names: set[str] = set()
+        seen_names: dict[str, int] = {}
         for item in repositories:
             if not isinstance(item, dict):
                 continue
@@ -1511,43 +1586,93 @@ related: []
             full_name = normalize_owner_repo(item.get("fullName") or item.get("full_name") or item.get("url"))
             if repository_id and repository_id in seen_ids:
                 continue
-            if full_name and full_name in seen_names:
-                continue
             if not repository_id and not full_name:
                 continue
+            if full_name and full_name in seen_names:
+                previous_index = seen_names[full_name]
+                previous_id = _safe_int(clean[previous_index].get("id"))
+                if previous_id and repository_id and previous_id != repository_id:
+                    pass
+                elif repository_id and not previous_id:
+                    clean[previous_index] = {"id": repository_id, "fullName": full_name}
+                    seen_ids.add(repository_id)
+                    continue
+                else:
+                    continue
             clean.append({"id": repository_id, "fullName": full_name})
             if repository_id:
                 seen_ids.add(repository_id)
             if full_name:
-                seen_names.add(full_name)
+                seen_names.setdefault(full_name, len(clean) - 1)
         if not clean:
             raise GitHubServiceError("selection_invalid", "选择的 GitHub 仓库无效。")
-        batch_id = uuid.uuid4().hex
-        batch = {
-            "id": batch_id,
-            "state": "queued",
-            "total": len(clean),
-            "completed": 0,
-            "succeeded": 0,
-            "failed": 0,
-            "cancelled": False,
-            "items": clean,
-            "results": [],
-        }
-        self.import_batches[batch_id] = batch
-        return self.public_batch(batch)
+        batch, created = self.task_store.create_batch(clean, request_key=request_key)
+        batch["idempotent"] = not created
+        return batch
 
     def public_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
-        return {key: value for key, value in batch.items() if key not in {"items", "cancelled"}}
+        return self.task_store.public_batch(batch)
 
-    def cancel_import_batch(self, batch_id: str) -> dict[str, Any]:
-        batch = self.import_batches.get(str(batch_id or ""))
+    def import_batch(self, batch_id: str) -> dict[str, Any]:
+        batch = self.task_store.get_batch(batch_id)
         if not batch:
             raise GitHubServiceError("batch_missing", "导入任务不存在。")
-        batch["cancelled"] = True
-        if batch["state"] == "queued":
-            batch["state"] = "cancelled"
-        return self.public_batch(batch)
+        return batch
+
+    def pending_import_batch_ids(self) -> list[str]:
+        return self.task_store.pending_batch_ids()
+
+    def begin_import_batch(self, batch_id: str) -> dict[str, Any]:
+        batch = self.task_store.begin_batch(batch_id)
+        if not batch:
+            raise GitHubServiceError("batch_missing", "导入任务不存在。")
+        return batch
+
+    def queued_import_items(self, batch_id: str) -> list[dict[str, Any]]:
+        if not self.task_store.get_batch(batch_id):
+            raise GitHubServiceError("batch_missing", "导入任务不存在。")
+        return self.task_store.queued_items(batch_id)
+
+    def begin_import_item(self, batch_id: str, task_id: str) -> dict[str, Any] | None:
+        return self.task_store.begin_item(batch_id, task_id)
+
+    def complete_import_item(self, batch_id: str, task_id: str, result: dict[str, Any]) -> dict[str, Any]:
+        batch = self.task_store.complete_item(batch_id, task_id, result)
+        if not batch:
+            raise GitHubServiceError("batch_missing", "导入任务不存在。")
+        return batch
+
+    def fail_import_item(
+        self,
+        batch_id: str,
+        task_id: str,
+        *,
+        code: str,
+        message: str,
+        repository: dict[str, Any],
+    ) -> dict[str, Any]:
+        batch = self.task_store.fail_item(
+            batch_id,
+            task_id,
+            code=code,
+            message=message,
+            repository=repository,
+        )
+        if not batch:
+            raise GitHubServiceError("batch_missing", "导入任务不存在。")
+        return batch
+
+    def finish_import_batch(self, batch_id: str) -> dict[str, Any]:
+        batch = self.task_store.finalize_batch(batch_id)
+        if not batch:
+            raise GitHubServiceError("batch_missing", "导入任务不存在。")
+        return batch
+
+    def cancel_import_batch(self, batch_id: str) -> dict[str, Any]:
+        batch = self.task_store.cancel_batch(str(batch_id or ""))
+        if not batch:
+            raise GitHubServiceError("batch_missing", "导入任务不存在。")
+        return batch
 
 
 def register_derived_repository(
@@ -1568,8 +1693,10 @@ def register_derived_repository(
         raise GitHubServiceError("repository_invalid", "派生结果缺少 GitHub repository ID 或 owner/repo。")
     vault = Path(vault_path).resolve()
     asset = Path(asset_path).resolve()
-    if vault not in asset.parents or ".obsidian" in asset.parts:
+    if vault not in asset.parents or any(part.casefold() == ".obsidian" for part in asset.parts):
         raise GitHubServiceError("asset_path_invalid", "派生资产路径无效。")
+    if not asset.exists() or not asset.is_file():
+        raise GitHubServiceError("asset_missing", "派生资产尚未成功写入。")
     match = service._registry_match(public["id"], public["fullName"])
     snapshot = match.get("snapshot") if isinstance(match, dict) and isinstance(match.get("snapshot"), dict) else None
     material = {"public": public, "snapshot": snapshot or {
@@ -1596,7 +1723,11 @@ def register_derived_repository(
             asset_id or service._asset_id(public["id"], match),
             ingest_intent="derived_ingest",
         )
-    star_result = {"attempted": False, "ok": True}
-    if service.settings()["autoStar"]:
-        star_result = service._star_after_success(public["fullName"])
+    star_result = {"attempted": False, "ok": True, "state": "existing"}
+    if match is None:
+        star_result = service._record_asset_created(
+            public,
+            str(asset.relative_to(vault)),
+            source="derived_ingest",
+        )
     return {"ok": True, "record": record, "autoStar": star_result}

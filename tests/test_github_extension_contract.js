@@ -52,6 +52,7 @@ for (const type of [
   'github_logout',
   'github_stars_request',
   'github_import_stars',
+  'github_import_status',
   'github_import_cancel',
   'github_refresh_check',
   'github_refresh_confirm',
@@ -79,6 +80,10 @@ assert.match(js, /case 'handshake_ack':[\s\S]*?requestStatus\(\);[\s\S]*?request
 assert.match(js, /ws\.onopen = \(\) => \{[\s\S]*?githubValidationRequestedForConnection = false/);
 assert.match(js, /function applyGithubStatus[\s\S]*status\.state === 'unchecked'/);
 assert.match(js, /status\.activeAuthorization/);
+assert.match(js, /status\.activeImport/);
+assert.match(js, /status\.recentImports/);
+assert.match(js, /status\.recentTasks/);
+assert.match(js, /Array\.isArray\(batch\?\.items\)/);
 assert.match(js, /navigator\.clipboard\?\.writeText/);
 assert.match(js, /document\.execCommand\('copy'\)/);
 assert.doesNotMatch(js, /type: 'github_auth_poll'/);
@@ -122,6 +127,20 @@ vm.runInContext(`
 assert.equal(sentMessages.length, 1, 'handshake must trigger at most one GitHub validation per connection');
 assert.equal(sentMessages[0].type, 'github_status_request');
 assert.equal(sentMessages[0].validate, true);
+
+sentMessages.length = 0;
+vm.runInContext(`requestGithubImportStatus('batch-restore')`, behaviorContext);
+assert.equal(sentMessages[0].type, 'github_import_status');
+assert.equal(sentMessages[0].batchId, 'batch-restore');
+
+const recoveredViews = JSON.parse(vm.runInContext(`JSON.stringify(githubBatchItems({
+  items: [
+    { state: 'running', repository: { fullName: 'openai/running' } },
+    { state: 'failed', repository: { fullName: 'openai/failed' }, error: { message: 'mock failure' } }
+  ]
+}).map(githubImportItemView))`, behaviorContext));
+assert.equal(recoveredViews[0].text, 'openai/running：正在入库');
+assert.equal(recoveredViews[1].text, 'openai/failed：mock failure');
 
 sentMessages.length = 0;
 behaviorContext.document.body.dataset.view = 'home-view';

@@ -59,9 +59,14 @@ for (const [name, type] of Object.entries({
 }
 assert.match(js, /case 'vault_lifecycle_status':/);
 assert.doesNotMatch(js, /knowledge_base_(?:scan|create|switch|migrate)|case 'vault_status':/);
-assert.match(js, /function buildVaultCreatePayload[\s\S]*?rootCandidateId[\s\S]*?rootPath[\s\S]*?name/);
+assert.match(js, /function requestVaultLifecycle[\s\S]*?data:\s*payload/);
+assert.match(js, /function buildVaultCreatePayload[\s\S]*?userName:\s*name[\s\S]*?obsidianRoot/);
 assert.match(js, /function confirmVaultWorkflow[\s\S]*?CANDIDATE_CONFIRM[\s\S]*?MIGRATION_EXECUTE[\s\S]*?MIGRATION_PREVIEW/);
 assert.match(js, /function rollbackVaultMigration[\s\S]*?MIGRATION_ROLLBACK/);
+assert.match(js, /status\.migration\?\.migrationId/);
+assert.match(js, /status\.activeVault\?\.vaultPath/);
+assert.match(js, /state === 'ready' && action !== 'scan'/);
+assert.match(js, /status\.ok === false \|\| \['failed', 'error', 'rejected'\]/);
 
 async function main() {
   const stored = {};
@@ -117,24 +122,43 @@ async function main() {
   });
   assert.deepEqual(route(`sanitizePopupRoute('github')`), { view: 'github-view' });
 
-  assert.deepEqual(route(`buildVaultCreatePayload({ id: 'root-1', path: '/tmp/root' }, 'Demo')`), {
-    rootCandidateId: 'root-1',
-    rootPath: '/tmp/root',
-    name: 'Demo'
+  assert.deepEqual(route(`buildVaultCreatePayload({ id: 'root-1', obsidianRoot: '/tmp/root' }, 'Demo')`), {
+    userName: 'Demo',
+    obsidianRoot: '/tmp/root'
   });
-  assert.deepEqual(route(`buildVaultMigrationPreviewPayload({ id: 'root-2', path: '/tmp/target' }, 'Moved', '/tmp/source')`), {
+  assert.deepEqual(route(`buildVaultMigrationPreviewPayload({ id: 'root-2', obsidianRoot: '/tmp/target' }, 'Moved', '/tmp/source')`), {
     sourcePath: '/tmp/source',
-    targetRootCandidateId: 'root-2',
-    targetRootPath: '/tmp/target',
-    name: 'Moved'
+    userName: 'Moved',
+    obsidianRoot: '/tmp/target'
   });
+  assert.deepEqual(route(`(() => {
+    vaultWorkflow.mode = 'switch';
+    return normalizeVaultCandidates({
+      obsidianRoots: [{ candidateId: 'root-1', kind: 'obsidian_root', obsidianRoot: '/tmp/root' }],
+      vaultCandidates: [{
+        candidateId: 'vault-1', kind: 'agent_wiki_vault', vaultPath: '/tmp/vault',
+        vaultId: 'identity-1', userName: 'Demo', supportedActions: ['switch']
+      }]
+    });
+  })()`), [{
+    id: 'vault-1',
+    path: '/tmp/vault',
+    label: 'Demo',
+    kind: 'agent_wiki_vault',
+    obsidianRoot: '',
+    parentDirectory: '',
+    vaultPath: '/tmp/vault',
+    vaultId: 'identity-1',
+    key: 'vault-1',
+    requiresConfirmation: false
+  }]);
 
   await vm.runInContext(`persistPopupRoute({
     view: 'settings-detail-view',
     detailId: 'api-settings',
-    apiKey: 'must-not-persist',
-    verificationCode: 'must-not-persist',
-    fields: { endpoint: 'must-not-persist' }
+    apiKey: 'placeholder_for_route_test',
+    verificationCode: 'placeholder_for_route_test',
+    fields: { endpoint: 'placeholder_for_route_test' }
   })`, context);
   assert.deepEqual(stored.popupRoute, {
     view: 'settings-detail-view',

@@ -4719,7 +4719,12 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
                 "pushed_at": "2026-07-01T00:00:00Z",
                 "html_url": "https://github.com/langchain-ai/langgraph",
             },
-            "readme": "LangGraph builds stateful multi-actor agents as graphs.",
+            "readme": (
+                "![build](https://img.shields.io/badge/build-passing-green)\n\n"
+                "LangGraph builds stateful multi-actor agents as graphs.\n\n"
+                "## Sponsors\n\nSponsor-only noise.\n\n"
+                "## API\n\nUse the graph API to define state transitions."
+            ),
         },
     )
     task = {
@@ -4750,6 +4755,9 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
 
     def fake_model(config, prompt):
         assert "父资产与派生上下文" in prompt
+        assert "img.shields.io" not in prompt
+        assert "Sponsor-only noise" not in prompt
+        assert "Use the graph API" in prompt
         return (
             "父资产与派生上下文：\n"
             '{"candidate_name":"LangGraph","parent_source_url":"https://v.douyin.com/parent/"}\n\n'
@@ -4758,8 +4766,10 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
             "```json\n"
             '{"repo":{"full_name":"langchain-ai/langgraph"},"readme":"internal-fenced"}\n'
             "```\n\n"
-            "## 项目结论\nLangGraph 适合沉淀为 Agent Harness 状态图工具。\n\n"
-            "## 最小可运行路径\n安装依赖后从官方示例开始验证。"
+            "## 简洁概括\nLangGraph 是用于构建状态图式 Agent 工作流的项目。\n\n"
+            "## 完整内容整理\nREADME 说明可从官方示例开始验证状态图工作流。\n\n"
+            "## AI 分析\n> 以下内容由 AI 生成。\n"
+            "从当前来源看，它可能适合作为 Agent Harness 的状态编排组件。"
         ), {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}
 
     original_resolve = derive_executor.resolve_target
@@ -4806,6 +4816,10 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
     assert "internal-fenced" not in child_text
     assert '"repo"' not in child_text
     assert '"readme"' not in child_text
+    assert "github_managed: true" in child_text
+    assert child_text.count("## 简洁概括") == 1
+    assert child_text.count("## 完整内容整理") == 1
+    assert child_text.count("## AI 分析") == 1
     assert "derived_from:" in child_text
     assert "parent_candidate_id:" not in child_text
     assert "parent_task_id:" not in child_text

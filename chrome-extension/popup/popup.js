@@ -38,6 +38,7 @@ const GITHUB_MESSAGE_TYPES = Object.freeze({
   SETTINGS_UPDATE: 'github_settings_update',
   STARS_REQUEST: 'github_stars_request',
   IMPORT_STARS: 'github_import_stars',
+  IMPORT_STATUS: 'github_import_status',
   IMPORT_CANCEL: 'github_import_cancel',
   REFRESH_CHECK: 'github_refresh_check',
   REFRESH_CONFIRM: 'github_refresh_confirm',
@@ -97,6 +98,9 @@ let githubStarsPage = 0;
 let githubStarsHasNext = false;
 let githubSelected = new Set();
 let githubImportBatch = null;
+let githubRecentImports = [];
+let githubRecentTasks = [];
+let githubImportStatusRequestedFor = '';
 let githubRefresh = null;
 let githubIsConfigured = false;
 let githubIsAuthenticated = false;
@@ -107,7 +111,7 @@ let vaultWorkflow = {
   candidates: [],
   pendingConfirmation: false,
   migrationId: '',
-  rollbackToken: '',
+  rollbackAvailable: false,
   pendingType: ''
 };
 
@@ -326,6 +330,7 @@ function connectWebSocket() {
       runtimeCompatibility = null;
       runtimeSyncStarted = false;
       githubValidationRequestedForConnection = false;
+      githubImportStatusRequestedFor = '';
       updateConnectionStatus(true);
       ws.send(JSON.stringify(RuntimeVersion.buildHandshake('agent-wiki-extension')));
       requestStatus();
@@ -392,6 +397,18 @@ function requestGithubStatus({ validate = false } = {}) {
     requestId: `github-status-${Date.now()}`,
     ...(validate ? { validate: true } : {})
   });
+}
+
+function requestGithubImportStatus(batchId) {
+  const id = String(batchId || '');
+  if (!id) return false;
+  const sent = sendToAgent({
+    type: GITHUB_MESSAGE_TYPES.IMPORT_STATUS,
+    requestId: `github-import-status-${Date.now()}`,
+    batchId: id
+  });
+  if (sent) githubImportStatusRequestedFor = id;
+  return sent;
 }
 
 function requestGithubValidationAfterHandshake(compatibility) {
@@ -660,8 +677,9 @@ function applyStatusSnapshot(status) {
 
 function applyVaultStatus(status) {
   const currentPath = document.getElementById('vault-current-path');
-  if (status.ok || status.state === 'ready') {
-    const path = status.path || '';
+  const activeVault = status.activeVault || {};
+  if (status.ok || status.state === 'ready' || activeVault.vaultPath) {
+    const path = activeVault.vaultPath || status.path || status.vaultPath || '';
     if (currentPath) {
       currentPath.textContent = path || '已连接';
       currentPath.title = path;
@@ -671,7 +689,10 @@ function applyVaultStatus(status) {
     showHint('vault-hint', `来源：${status.source || 'Agent 自动识别'}`, 'success', { persist: true });
     return;
   }
-  if (currentPath && !currentPath.textContent.trim()) currentPath.textContent = '尚未连接';
+  if (currentPath) {
+    currentPath.textContent = '尚未连接';
+    currentPath.title = '';
+  }
   setStatus('vault', '待识别', 'warning');
   if (status.message) showHint('vault-hint', status.message, 'warning', { persist: true });
 }
@@ -783,8 +804,19 @@ function applyGithubStatus(status) {
   document.getElementById('github-load-stars').disabled = !authenticated;
   document.getElementById('github-select-all').disabled = !authenticated || !githubStars.length;
   updateGithubSelection();
-  if (status.activeImport && status.activeImport.id !== githubImportBatch?.id) {
-    applyGithubImportProgress(status.activeImport);
+  githubRecentImports = Array.isArray(status.recentImports) ? status.recentImports : [];
+  githubRecentTasks = Array.isArray(status.recentTasks) ? status.recentTasks : [];
+  const importSnapshot = status.activeImport || githubRecentImports[0] || null;
+  if (importSnapshot) {
+    applyGithubImportProgress(importSnapshot, { notify: false, refreshStars: false });
+  } else {
+    renderGithubPersistentHistory(null);
+  }
+  if (
+    status.activeImport?.id &&
+    status.activeImport.id !== githubImportStatusRequestedFor
+  ) {
+    requestGithubImportStatus(status.activeImport.id);
   }
   if (authenticated) {
     clearGithubAuthFlow();
@@ -1032,7 +1064,81 @@ function importSelectedGithubStars() {
   }
 }
 
-function applyGithubImportProgress(result) {
+function githubBatchItems(batch) {
+  if (Array.isArray(batch?.items)) return batch.items;
+  return Array.isArray(batch?.results)
+    ? batch.results.map((result, index) => ({
+        taskId: `legacy-${index}`,
+        state: result.state || (result.ok ? 'succeeded' : 'failed'),
+        repository: result.repository || {},
+        result
+      }))
+    : [];
+}
+
+function githubImportItemView(item) {
+  const result = item?.result || {};
+  const error = item?.error || {};
+  const repository = item?.repository || result.repository || {};
+  const name = repository.fullName || repository.id || '仓库';
+  const state = item?.state || result.state || 'queued';
+  if (state === 'succeeded') return { text: `${name}：已入库`, tone: '' };
+  if (state === 'existing') return { text: `${name}：已存在`, tone: '' };
+  if (state === 'running') return { text: `${name}：正在入库`, tone: 'warning' };
+  if (state === 'queued') return { text: `${name}：等待入库`, tone: 'warning' };
+  if (state === 'cancelled') return { text: `${name}：已取消`, tone: 'warning' };
+  return { text: `${name}：${error.message || result.message || '导入失败'}`, tone: 'failed' };
+}
+
+function appendGithubHistoryLine(container, text, tone = '') {
+  const line = document.createElement('div');
+  line.className = `github-import-result${tone ? ` ${tone}` : ''}`;
+  line.textContent = text;
+  container.appendChild(line);
+}
+
+function renderGithubPersistentHistory(activeBatch) {
+  const panel = document.getElementById('github-import-progress');
+  const results = document.getElementById('github-import-results');
+  if (!activeBatch) {
+    document.getElementById('github-progress-copy').textContent = '最近 GitHub 任务';
+    document.getElementById('github-progress-count').textContent = `${githubRecentTasks.length} 条`;
+    const bar = document.getElementById('github-progress-bar');
+    bar.max = 1;
+    bar.value = githubRecentTasks.length ? 1 : 0;
+    document.getElementById('github-cancel-import').hidden = true;
+  }
+  results.replaceChildren();
+  const items = githubBatchItems(activeBatch);
+  for (const item of items) {
+    const view = githubImportItemView(item);
+    appendGithubHistoryLine(results, view.text, view.tone);
+  }
+  for (const batch of githubRecentImports.slice(0, 3)) {
+    if (!batch?.id || batch.id === activeBatch?.id) continue;
+    const state = batch.state === 'cancelled' ? '已取消' : batch.state === 'completed' ? '已完成' : '进行中';
+    appendGithubHistoryLine(
+      results,
+      `历史批次：${state} · ${batch.completed || 0} / ${batch.total || 0}`,
+      batch.failed ? 'warning' : ''
+    );
+  }
+  for (const task of githubRecentTasks.slice(0, 5)) {
+    const repository = task?.repository || {};
+    const autoStar = task?.autoStar || {};
+    const starCopy = autoStar.state === 'failed'
+      ? `自动 Star 失败：${autoStar.message || '请检查权限'}`
+      : autoStar.state === 'succeeded' ? '已自动 Star' : '资产已登记';
+    appendGithubHistoryLine(
+      results,
+      `${repository.fullName || 'GitHub 资产'}：${starCopy}`,
+      autoStar.state === 'failed' ? 'warning' : ''
+    );
+  }
+  panel.hidden = !activeBatch && !githubRecentImports.length && !githubRecentTasks.length;
+}
+
+function applyGithubImportProgress(result, { notify = true, refreshStars = true } = {}) {
   githubImportBatch = result;
   const running = ['queued', 'running'].includes(result.state);
   document.getElementById('github-import-progress').hidden = false;
@@ -1044,19 +1150,9 @@ function applyGithubImportProgress(result) {
   bar.max = Math.max(1, Number(result.total || 0));
   bar.value = Number(result.completed || 0);
   document.getElementById('github-cancel-import').hidden = !running;
-  const results = document.getElementById('github-import-results');
-  results.replaceChildren();
-  for (const item of result.results || []) {
-    const line = document.createElement('div');
-    line.className = `github-import-result${item.ok ? '' : ' failed'}`;
-    const repo = item.repository || {};
-    line.textContent = item.ok
-      ? `${repo.fullName || '仓库'}：${item.state === 'existing' ? '已存在' : '已入库'}`
-      : `${repo.fullName || repo.id || '仓库'}：${item.message || '导入失败'}`;
-    results.appendChild(line);
-  }
+  renderGithubPersistentHistory(result);
   updateGithubSelection();
-  if (!running) {
+  if (!running && notify) {
     const failed = Number(result.failed || 0);
     showHint(
       'github-hint',
@@ -1066,7 +1162,7 @@ function applyGithubImportProgress(result) {
       failed ? 'warning' : 'success',
       { persist: true }
     );
-    loadGithubStars();
+    if (refreshStars) loadGithubStars();
   }
 }
 
@@ -1754,17 +1850,26 @@ async function submitDouyinIngestFromPopup() {
 }
 
 function normalizeVaultCandidates(status) {
-  const source = status.candidates || status.roots || status.matches || status.scan?.candidates || [];
+  const roots = Array.isArray(status.obsidianRoots) ? status.obsidianRoots : [];
+  const vaults = Array.isArray(status.vaultCandidates) ? status.vaultCandidates : [];
+  const source = vaultWorkflow.mode === 'switch'
+    ? vaults.filter(item => !Array.isArray(item?.supportedActions) || item.supportedActions.includes('switch'))
+    : roots.length ? roots : (status.candidates || status.roots || status.matches || status.scan?.candidates || []);
   if (!Array.isArray(source)) return [];
   return source.map((candidate, index) => {
     const item = typeof candidate === 'string' ? { path: candidate } : (candidate || {});
     const id = String(item.id || item.candidateId || item.key || '');
-    const path = String(item.path || item.rootPath || item.vaultPath || '');
-    const label = String(item.label || item.name || path || `候选 ${index + 1}`);
+    const path = String(item.obsidianRoot || item.parentDirectory || item.path || item.rootPath || item.vaultPath || '');
+    const label = String(item.label || item.userName || item.name || path || `候选 ${index + 1}`);
     return {
       id,
       path,
       label,
+      kind: String(item.kind || ''),
+      obsidianRoot: String(item.obsidianRoot || ''),
+      parentDirectory: String(item.parentDirectory || ''),
+      vaultPath: String(item.vaultPath || ''),
+      vaultId: String(item.vaultId || ''),
       key: id || path || `candidate-${index}`,
       requiresConfirmation: Boolean(item.ambiguous || item.requiresConfirmation || item.confirmationRequired)
     };
@@ -1774,13 +1879,6 @@ function normalizeVaultCandidates(status) {
 function selectedVaultCandidate() {
   const key = document.getElementById('vault-candidate-select').value;
   return vaultWorkflow.candidates.find(candidate => candidate.key === key) || null;
-}
-
-function vaultCandidatePayload(candidate) {
-  return {
-    candidateId: candidate?.id || '',
-    path: candidate?.path || ''
-  };
 }
 
 function setVaultWorkflowCandidates(candidates) {
@@ -1814,7 +1912,7 @@ function resetVaultWorkflow(mode) {
     candidates: [],
     pendingConfirmation: false,
     migrationId: '',
-    rollbackToken: '',
+    rollbackAvailable: false,
     pendingType: ''
   };
 }
@@ -1858,7 +1956,7 @@ function requestVaultLifecycle(type, payload, pendingCopy) {
     type,
     requestId: `vault-${type}-${Date.now()}`,
     source: 'extension_popup',
-    ...payload
+    data: payload
   });
   if (!sent) {
     setStatus('vault', runtimeCompatibility ? '版本未通过' : 'Agent 未连接', 'offline');
@@ -1895,19 +1993,23 @@ function updateVaultWorkflowPrimary() {
 }
 
 function buildVaultCreatePayload(candidate, name) {
+  const parent = candidate?.obsidianRoot
+    ? { obsidianRoot: candidate.obsidianRoot }
+    : { parentDirectory: candidate?.parentDirectory || candidate?.path || '' };
   return {
-    rootCandidateId: candidate?.id || '',
-    rootPath: candidate?.path || '',
-    name
+    userName: name,
+    ...parent
   };
 }
 
 function buildVaultMigrationPreviewPayload(candidate, name, sourcePath) {
+  const parent = candidate?.obsidianRoot
+    ? { obsidianRoot: candidate.obsidianRoot }
+    : { parentDirectory: candidate?.parentDirectory || candidate?.path || '' };
   return {
     sourcePath,
-    targetRootCandidateId: candidate?.id || '',
-    targetRootPath: candidate?.path || '',
-    name
+    userName: name,
+    ...parent
   };
 }
 
@@ -1934,10 +2036,9 @@ function confirmVaultWorkflow() {
     const confirmCandidate = vaultWorkflow.pendingConfirmation || candidate.requiresConfirmation;
     requestVaultLifecycle(
       confirmCandidate ? VAULT_MESSAGE_TYPES.CANDIDATE_CONFIRM : VAULT_MESSAGE_TYPES.SWITCH,
-      {
-        ...vaultCandidatePayload(candidate),
-        operation: 'switch'
-      },
+      confirmCandidate
+        ? { candidateId: candidate.id, action: 'switch' }
+        : { vaultPath: candidate.vaultPath || candidate.path, expectedVaultId: candidate.vaultId || '' },
       confirmCandidate ? '正在确认并切换知识库' : '正在切换知识库'
     );
     return;
@@ -1968,24 +2069,21 @@ function confirmVaultWorkflow() {
 }
 
 function rollbackVaultMigration() {
-  if (!vaultWorkflow.migrationId || !vaultWorkflow.rollbackToken) return;
+  if (!vaultWorkflow.migrationId || !vaultWorkflow.rollbackAvailable) return;
   requestVaultLifecycle(
     VAULT_MESSAGE_TYPES.MIGRATION_ROLLBACK,
-    {
-      migrationId: vaultWorkflow.migrationId,
-      rollbackToken: vaultWorkflow.rollbackToken
-    },
+    { migrationId: vaultWorkflow.migrationId },
     '正在回退迁移'
   );
 }
 
 function renderVaultMigrationPreview(status) {
-  const preview = status.preview || status;
+  const preview = status.migration || status.preview || status;
   const files = Number(preview.fileCount ?? preview.files?.length ?? 0);
   const conflicts = Number(preview.conflictCount ?? preview.conflicts?.length ?? 0);
   document.getElementById('vault-migration-files').textContent = `${files} 个`;
   document.getElementById('vault-migration-conflicts').textContent = `${conflicts} 个`;
-  document.getElementById('vault-migration-target').textContent = preview.targetPath || preview.destinationPath || '已选择目标';
+  document.getElementById('vault-migration-target').textContent = preview.targetVault?.vaultPath || preview.targetPath || preview.destinationPath || '已选择目标';
   const notes = document.getElementById('vault-migration-notes');
   notes.replaceChildren();
   for (const note of preview.notes || preview.warnings || []) {
@@ -2000,12 +2098,17 @@ function renderVaultMigrationPreview(status) {
   vaultWorkflow.migrationId = String(status.migrationId || preview.migrationId || '');
   const button = document.getElementById('confirm-vault-workflow');
   button.textContent = '执行迁移';
-  button.disabled = !vaultWorkflow.migrationId;
-  showHint('vault-workflow-hint', status.message || '迁移预览已生成，请确认后执行', conflicts ? 'warning' : 'success', { persist: true });
+  button.disabled = !vaultWorkflow.migrationId || preview.canExecute === false;
+  showHint(
+    'vault-workflow-hint',
+    status.message || '迁移预览已生成，请确认后执行',
+    conflicts || preview.canExecute === false ? 'warning' : 'success',
+    { persist: true }
+  );
 }
 
 function finishVaultWorkflow(status, copy) {
-  const path = status.path || status.vaultPath || status.targetPath || '';
+  const path = status.activeVault?.vaultPath || status.path || status.vaultPath || status.targetPath || '';
   if (path) applyVaultStatus({ ok: true, state: 'ready', path, source: status.source || '知识库管理' });
   else setStatus('vault', copy, 'online');
   vaultWorkflow.stage = 'completed';
@@ -2020,6 +2123,17 @@ function applyVaultLifecycleStatus(status) {
   const pendingType = vaultWorkflow.pendingType;
   const candidates = normalizeVaultCandidates(status);
   if (candidates.length) setVaultWorkflowCandidates(candidates);
+
+  if (
+    status.ok &&
+    status.activeVault?.vaultPath &&
+    !status.requiresUserAction &&
+    (state === 'reconnected' || (state === 'ready' && action !== 'scan'))
+  ) {
+    vaultWorkflow.pendingType = '';
+    finishVaultWorkflow(status, state === 'reconnected' ? '知识库已重新连接' : '知识库已连接');
+    return;
+  }
 
   if (
     action === 'scan' ||
@@ -2058,25 +2172,31 @@ function applyVaultLifecycleStatus(status) {
     return;
   }
 
-  if (status.preview || ['migration_preview', 'migration_preview_ready', 'preview_ready'].includes(state)) {
+  if (
+    status.migration &&
+    ['migration_ready', 'migration_conflict', 'migration_stale'].includes(state)
+  ) {
     vaultWorkflow.pendingType = '';
     renderVaultMigrationPreview(status);
     return;
   }
 
   if (['migration_completed', 'migration_executed', 'migrated'].includes(state)) {
-    vaultWorkflow.migrationId = String(status.migrationId || vaultWorkflow.migrationId || '');
-    vaultWorkflow.rollbackToken = String(status.rollbackToken || status.rollbackId || '');
+    vaultWorkflow.migrationId = String(status.migration?.migrationId || status.migrationId || vaultWorkflow.migrationId || '');
+    vaultWorkflow.rollbackAvailable = Boolean(status.migration?.rollbackAvailable);
     vaultWorkflow.pendingType = '';
     finishVaultWorkflow(status, '知识库迁移已完成');
-    document.getElementById('rollback-vault-migration').hidden = !vaultWorkflow.rollbackToken;
-    document.getElementById('rollback-vault-migration').disabled = !vaultWorkflow.rollbackToken;
+    document.getElementById('rollback-vault-migration').hidden = !vaultWorkflow.rollbackAvailable;
+    document.getElementById('rollback-vault-migration').disabled = !vaultWorkflow.rollbackAvailable;
     return;
   }
 
   if (['migration_rolled_back', 'rolled_back'].includes(state)) {
     vaultWorkflow.pendingType = '';
     finishVaultWorkflow(status, '迁移已回退');
+    if (!status.activeVault?.vaultPath) {
+      applyVaultStatus({ state: 'first_use', message: status.message || '迁移已回退，请重新选择知识库。' });
+    }
     document.getElementById('rollback-vault-migration').hidden = true;
     return;
   }
@@ -2087,7 +2207,7 @@ function applyVaultLifecycleStatus(status) {
     return;
   }
 
-  if (['failed', 'error', 'rejected'].includes(state)) {
+  if (status.ok === false || ['failed', 'error', 'rejected'].includes(state)) {
     vaultWorkflow.pendingType = '';
     if (pendingType === VAULT_MESSAGE_TYPES.MIGRATION_EXECUTE) {
       vaultWorkflow.stage = 'preview';
