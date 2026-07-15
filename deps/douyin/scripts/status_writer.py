@@ -59,7 +59,7 @@ def _redact_status_text(text: str) -> str:
             "sensitive=[REDACTED]",
         ),
         (r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@", r"\1[REDACTED]@"),
-        (r"\bresp-[A-Za-z0-9._-]+\b", "resp-[REDACTED]"),
+        (r"\bresp[-_][A-Za-z0-9._-]+\b", "resp_[REDACTED]"),
         (r"\bghp_[A-Za-z0-9_]{20,}\b", "ghp_[REDACTED]"),
         (r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", "github_pat_[REDACTED]"),
         (r"(?i)(access_token|private_token|github_token)=([^&\s]+)", r"\1=[REDACTED]"),

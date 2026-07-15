@@ -263,6 +263,20 @@ class WebSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
         message = await asyncio.wait_for(self.websocket.recv(), timeout=2)
         return json.loads(message)
 
+    async def test_live_server_rejects_ordinary_web_origin(self) -> None:
+        uri = f"ws://127.0.0.1:{self.port}"
+        hostile = await self.websockets.connect(
+            uri,
+            origin="https://untrusted.example",
+            open_timeout=1,
+        )
+        try:
+            with self.assertRaises(self.websockets.exceptions.ConnectionClosed):
+                await asyncio.wait_for(hostile.recv(), timeout=1)
+            self.assertEqual(hostile.close_code, 1008)
+        finally:
+            await hostile.close()
+
     async def test_live_status_and_removed_viral_request_contract(self) -> None:
         ready = await self.receive_json()
         initial_status = await self.receive_json()

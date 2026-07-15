@@ -550,6 +550,9 @@ class GitHubProtocolTests(unittest.TestCase):
         self.assertEqual(batch["failed"], 1)
         self.assertEqual(batch["results"][1]["code"], "not_found")
         self.assertEqual(socket.messages[-1]["result"]["state"], "completed")
+        self.assertEqual(socket.messages[-1]["operationId"], "github-import-batch-1")
+        self.assertEqual(socket.messages[-1]["taskId"], "batch-1")
+        self.assertEqual(socket.messages[-1]["parentId"], "")
 
     def test_import_runner_cancels_only_unstarted_items(self) -> None:
         service = BatchGitHubService(cancel_after_first=True)

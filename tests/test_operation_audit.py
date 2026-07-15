@@ -115,6 +115,41 @@ class OperationAuditStoreTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["state"], "succeeded")
             self.assertEqual(payload["summary"]["error"], {})
 
+    def test_corrupt_summary_and_timeline_tail_rebuild_from_valid_events(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            store = OperationAuditStore(raw)
+            store.ensure_operation(
+                "op-corrupt-summary",
+                operation_type="test.recovery",
+                task_id="task-recovery",
+            )
+            store.record_event(
+                "op-corrupt-summary",
+                stage="work_started",
+                result={"step": 1},
+            )
+            op_dir = store.operation_dir("op-corrupt-summary")
+            (op_dir / "summary.json").write_text("{broken", encoding="utf-8")
+            with (op_dir / "timeline.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write('{"partial":')
+
+            restored = OperationAuditStore(raw).get("op-corrupt-summary")
+            assert restored is not None
+            self.assertEqual(restored["summary"]["lastSequence"], 2)
+            self.assertEqual(restored["summary"]["eventCount"], 2)
+            self.assertEqual(restored["summary"]["taskId"], "task-recovery")
+            self.assertEqual([event["sequence"] for event in restored["events"]], [1, 2])
+
+            recovered = OperationAuditStore(raw).recover_incomplete(reason="qa_restart")
+            self.assertEqual(recovered, ["op-corrupt-summary"])
+            after_restart = OperationAuditStore(raw).get("op-corrupt-summary")
+            assert after_restart is not None
+            self.assertEqual(
+                [event["sequence"] for event in after_restart["events"]],
+                [1, 2, 3],
+            )
+            self.assertEqual(after_restart["events"][-1]["stage"], "service_restart_recovery")
+
     def test_concurrent_operations_are_isolated(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             store = OperationAuditStore(raw)
@@ -175,7 +210,7 @@ class OperationAuditStoreTests(unittest.TestCase):
                 state="failed",
                 error={
                     "code": "auth_failed",
-                    "message": "Authorization: Bearer error-secret",
+                    "message": "Authorization: Bearer error-secret response=resp_raw-model-response-id",
                     "retryable": False,
                 },
                 result=secrets,
@@ -196,6 +231,7 @@ class OperationAuditStoreTests(unittest.TestCase):
                 "raw-model-id",
                 "query-secret",
                 "error-secret",
+                "raw-model-response-id",
             ):
                 self.assertNotIn(secret, persisted)
             self.assertIn("[REDACTED]", persisted)
@@ -271,6 +307,105 @@ class OperationAuditStoreTests(unittest.TestCase):
 
 
 class ControlPlaneAuditTests(unittest.TestCase):
+    def test_task_runner_spawn_failure_becomes_retryable_terminal_state(self) -> None:
+        async def scenario(runtime: Path) -> tuple[dict, dict]:
+            with mock.patch.dict(os.environ, {"AGENT_WIKI_HOME": str(runtime)}):
+                server = LibrarianServer(enable_task_runner=False)
+                task_id = "task-spawn-failure"
+                operation_id = "op-spawn-failure"
+                task_file = runtime / "inbox" / f"{task_id}.json"
+                task_file.parent.mkdir(parents=True)
+                task_file.write_text(json.dumps({
+                    "id": task_id,
+                    "operation_id": operation_id,
+                    "parent_id": "",
+                    "type": "douyin_ingest",
+                    "url": "https://www.douyin.com/video/123456789",
+                }), encoding="utf-8")
+                server._write_task_status(task_id, {
+                    "id": task_id,
+                    "operation_id": operation_id,
+                    "ok": None,
+                    "stage": "queued",
+                    "started_at": 1.0,
+                    "updated_at": 1.0,
+                })
+                server.audit_store.ensure_operation(
+                    operation_id,
+                    operation_type="task.ingest",
+                    task_id=task_id,
+                )
+                with mock.patch(
+                    "server.websocket_server.asyncio.create_subprocess_exec",
+                    new=mock.AsyncMock(side_effect=OSError("mock spawn failure")),
+                ):
+                    await server.run_task_file(task_file)
+                status = json.loads(
+                    (runtime / "status" / f"{task_id}.json").read_text(encoding="utf-8")
+                )
+                audit = server.audit_store.get(operation_id)
+                assert audit is not None
+                return status, audit
+
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw)
+            status, audit = asyncio.run(scenario(runtime))
+            self.assertFalse(status["ok"])
+            self.assertEqual(status["stage"], "failed")
+            self.assertTrue(status["recoverable"])
+            self.assertFalse((runtime / "inbox" / "task-spawn-failure.json").exists())
+            self.assertTrue((runtime / "failed" / "task-spawn-failure.json").exists())
+            self.assertEqual(audit["summary"]["state"], "failed")
+            self.assertEqual(audit["summary"]["error"]["code"], "task_runner_error")
+            self.assertTrue(audit["summary"]["error"]["retryable"])
+
+    def test_task_control_normalizes_identifier_before_runtime_path_use(self) -> None:
+        async def scenario(runtime: Path) -> dict[str, object]:
+            with mock.patch.dict(os.environ, {"AGENT_WIKI_HOME": str(runtime)}):
+                server = LibrarianServer(enable_task_runner=False)
+                socket = FakeWebSocket()
+                await server.handle_message(socket, {
+                    "type": "task_cancel",
+                    "operationId": "op-path-safety",
+                    "taskId": "../../victim",
+                })
+                return json.loads(socket.messages[-1])
+
+        with tempfile.TemporaryDirectory() as raw:
+            sandbox = Path(raw)
+            runtime = sandbox / "runtime"
+            (runtime / "status").mkdir(parents=True)
+            (runtime / "inbox").mkdir()
+            victim = sandbox / "victim.json"
+            original = {"id": "victim", "ok": None, "stage": "queued"}
+            victim.write_text(json.dumps(original), encoding="utf-8")
+
+            reply = asyncio.run(scenario(runtime))
+
+            self.assertEqual(json.loads(victim.read_text(encoding="utf-8")), original)
+            self.assertEqual(reply["type"], "task_control_rejected")
+            self.assertEqual(reply["taskId"], "victim")
+
+    def test_failed_vault_result_is_failed_in_operation_diagnostics(self) -> None:
+        async def scenario(runtime: Path) -> dict[str, object]:
+            with mock.patch.dict(os.environ, {"AGENT_WIKI_HOME": str(runtime)}):
+                server = LibrarianServer(enable_task_runner=False)
+                await server.handle_message(FakeWebSocket(), {
+                    "type": "vault_switch",
+                    "operationId": "op-vault-invalid",
+                    "data": {},
+                })
+                payload = server.audit_store.get("op-vault-invalid")
+                assert payload is not None
+                return payload
+
+        with tempfile.TemporaryDirectory() as raw:
+            payload = asyncio.run(scenario(Path(raw)))
+            summary = payload["summary"]
+            self.assertEqual(summary["state"], "failed")
+            self.assertEqual(summary["error"]["code"], "vault_path_required")
+            self.assertTrue(summary["error"]["retryable"])
+
     def test_github_batch_and_failed_child_keep_operation_relationship_after_restart(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / "github" / "tasks"

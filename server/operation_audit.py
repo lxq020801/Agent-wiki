@@ -66,7 +66,7 @@ _SECRET_PATTERNS = (
     (re.compile(r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer [REDACTED]"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{12,}\b"), "github_[REDACTED]"),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{12,}\b"), "github_pat_[REDACTED]"),
-    (re.compile(r"\bresp-[A-Za-z0-9._-]+\b"), "resp-[REDACTED]"),
+    (re.compile(r"\bresp[-_][A-Za-z0-9._-]+\b"), "resp_[REDACTED]"),
     (
         re.compile(
             r"(?i)(authorization|cookie|set-cookie|api[_-]?key|access[_-]?token|"
@@ -328,6 +328,51 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _ensure_jsonl_boundary(path: Path) -> None:
+    try:
+        with path.open("rb+") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                return
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) == b"\n":
+                return
+            handle.seek(0, os.SEEK_END)
+            handle.write(b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileNotFoundError:
+        return
+
+
+def _read_timeline(path: Path, operation_id: str = "") -> list[dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    events: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+            sequence = int(event.get("sequence") or 0) if isinstance(event, dict) else 0
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(event, dict) or sequence <= 0:
+            continue
+        if operation_id and normalize_identifier(event.get("operationId")) != operation_id:
+            continue
+        events.append(event)
+    events.sort(key=lambda event: (int(event.get("sequence") or 0), str(event.get("timestamp") or "")))
+    return events
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 class OperationAuditStore:
     """Append-only per-operation timelines with a rebuildable public index."""
 
@@ -368,6 +413,86 @@ class OperationAuditStore:
             "summary": str(self.runtime_root / relative / "summary.json") if clean else "",
         }
 
+    def _summary_from_events(self, operation_id: str, events: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not events:
+            return None
+        first = events[0]
+        last = events[-1]
+        state = "started"
+        result: dict[str, Any] = {}
+        error: dict[str, Any] = {}
+        related: dict[str, list[Any]] = {"tasks": [], "assets": [], "batches": []}
+        artifacts: list[dict[str, Any]] = []
+        params: dict[str, Any] = {}
+        for event in events:
+            event_state = str(event.get("state") or "started")
+            if not (state in TERMINAL_STATES and event_state == "started"):
+                state = event_state if event_state in EVENT_STATES else "started"
+            if not params and isinstance(event.get("params"), dict) and event["params"]:
+                params = dict(event["params"])
+            if isinstance(event.get("result"), dict) and event["result"]:
+                result = dict(event["result"])
+            if isinstance(event.get("error"), dict) and event["error"]:
+                error = dict(event["error"])
+            elif event_state in {"succeeded", "cancelled"}:
+                error = {}
+            event_related = event.get("related") if isinstance(event.get("related"), dict) else {}
+            for key in related:
+                values = event_related.get(key)
+                for value in values if isinstance(values, list) else ([values] if values else []):
+                    if value not in related[key]:
+                        related[key].append(value)
+            event_artifacts = event.get("artifacts") if isinstance(event.get("artifacts"), list) else []
+            for ref in event_artifacts:
+                if isinstance(ref, dict) and ref not in artifacts:
+                    artifacts.append(ref)
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "operationId": operation_id,
+            "operationType": first.get("operationType") or DEFAULT_OPERATION_TYPE,
+            "taskId": normalize_identifier(first.get("taskId")),
+            "parentId": normalize_identifier(first.get("parentId")),
+            "state": state,
+            "stage": redact_text(last.get("stage"), limit=160),
+            "startedAt": str(first.get("timestamp") or _now_iso()),
+            "updatedAt": str(last.get("timestamp") or _now_iso()),
+            "durationMs": _nonnegative_int(last.get("durationMs")),
+            "eventCount": len(events),
+            "lastSequence": max(int(event.get("sequence") or 0) for event in events),
+            "params": params,
+            "result": result,
+            "error": error,
+            "related": {key: values[:MAX_COLLECTION_ITEMS] for key, values in related.items()},
+            "artifacts": artifacts[:MAX_COLLECTION_ITEMS],
+            "diagnostics": self.diagnostics_ref(operation_id),
+        }
+
+    @staticmethod
+    def _summary_matches_events(summary: Mapping[str, Any], events: list[dict[str, Any]]) -> bool:
+        try:
+            if not events:
+                return int(summary.get("eventCount") or 0) == 0
+            return (
+                int(summary.get("eventCount") or 0) == len(events)
+                and int(summary.get("lastSequence") or 0) == int(events[-1].get("sequence") or 0)
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def _load_or_repair_summary_locked(
+        self,
+        operation_id: str,
+        op_dir: Path,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        events = _read_timeline(op_dir / "timeline.jsonl", operation_id)
+        summary_path = op_dir / "summary.json"
+        summary = _read_json(summary_path)
+        if events and (not summary or not self._summary_matches_events(summary, events)):
+            summary = self._summary_from_events(operation_id, events)
+            if summary:
+                _atomic_json(summary_path, summary)
+        return summary, events
+
     def ensure_operation(
         self,
         operation_id: str | None = None,
@@ -382,7 +507,7 @@ class OperationAuditStore:
         op_dir = self.operation_dir(operation_id)
         summary_path = op_dir / "summary.json"
         with self._transaction():
-            existing = _read_json(summary_path)
+            existing, _events = self._load_or_repair_summary_locked(operation_id, op_dir)
             if existing:
                 changed = False
                 if task_id and not existing.get("taskId"):
@@ -453,6 +578,8 @@ class OperationAuditStore:
         with self._transaction():
             summary = _read_json(summary_path)
             if not summary:
+                summary, _events = self._load_or_repair_summary_locked(operation_id, op_dir)
+            if not summary:
                 raise KeyError(f"unknown operation: {operation_id}")
             sequence = int(summary.get("lastSequence") or 0) + 1
             now = timestamp or _now_iso()
@@ -491,6 +618,7 @@ class OperationAuditStore:
                 "artifacts": refs,
             }
             _ensure_private_dir(op_dir)
+            _ensure_jsonl_boundary(timeline_path)
             with timeline_path.open("a", encoding="utf-8") as handle:
                 os.chmod(timeline_path, 0o600)
                 handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -541,6 +669,7 @@ class OperationAuditStore:
                 "sequence": sequence,
                 "summary": str(summary_path),
             }
+            _ensure_jsonl_boundary(self.index_path)
             with self.index_path.open("a", encoding="utf-8") as handle:
                 os.chmod(self.index_path, 0o600)
                 handle.write(json.dumps(index_entry, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -580,34 +709,27 @@ class OperationAuditStore:
             op_dir = self.operation_dir(operation_id)
         except ValueError:
             return None
-        summary = _read_json(op_dir / "summary.json")
+        with self._transaction():
+            summary, events = self._load_or_repair_summary_locked(
+                normalize_identifier(operation_id),
+                op_dir,
+            )
         if not summary:
             return None
         payload = {"summary": summary, "diagnostics": self.diagnostics_ref(operation_id)}
         if include_events:
-            events: list[dict[str, Any]] = []
-            try:
-                lines = (op_dir / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
-            except OSError:
-                lines = []
-            for line in lines:
-                try:
-                    event = json.loads(line)
-                except (ValueError, TypeError):
-                    continue
-                if isinstance(event, dict):
-                    events.append(event)
             payload["events"] = events
         return payload
 
     def recover_incomplete(self, *, reason: str = "service_restart") -> list[str]:
         """Persist a recovery node for started operations without ending them."""
         recovered: list[str] = []
-        for summary_path in sorted(self.operations_root.glob("*/summary.json")):
-            summary = _read_json(summary_path)
+        for op_dir in sorted(path for path in self.operations_root.glob("*") if path.is_dir()):
+            operation_id = normalize_identifier(op_dir.name)
+            payload = self.get(operation_id, include_events=True)
+            summary = payload.get("summary") if payload else None
             if not summary or summary.get("state") != "started":
                 continue
-            operation_id = str(summary.get("operationId") or "")
             last_stage = str(summary.get("stage") or "")
             if last_stage == "service_restart_recovery":
                 continue

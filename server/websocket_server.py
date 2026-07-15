@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -287,7 +288,7 @@ def _redact_runtime_text(value):
     patterns = [
         (r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]"),
         (r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@", r"\1[REDACTED]@"),
-        (r"\bresp-[A-Za-z0-9._-]+\b", "resp-[REDACTED]"),
+        (r"\bresp[-_][A-Za-z0-9._-]+\b", "resp_[REDACTED]"),
         (r"\bghp_[A-Za-z0-9_]{20,}\b", "ghp_[REDACTED]"),
         (r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", "github_pat_[REDACTED]"),
         (r"(?i)(access_token|private_token|github_token)=([^&\s]+)", r"\1=[REDACTED]"),
@@ -503,11 +504,32 @@ def _json_file(path):
 
 
 def _write_json_atomic(path, payload):
+    _write_private_text_atomic(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+    )
+
+
+def _write_private_text_atomic(path, text):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    if path.is_symlink():
+        raise OSError(f"refusing to replace symlinked runtime file: {path}")
+    fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    tmp = Path(raw_tmp)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(str(text))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _normalize_provider(value):
@@ -651,6 +673,9 @@ def _is_agent_plan_endpoint_text(endpoint):
 def _origin_allowed(websocket):
     headers = getattr(websocket, "request_headers", None)
     if not headers:
+        request = getattr(websocket, "request", None)
+        headers = getattr(request, "headers", None)
+    if not headers:
         return True
     origin = headers.get("Origin")
     if not origin:
@@ -701,6 +726,7 @@ class LibrarianServer:
         self.running_task_ids = set()
         self.current_task_id = None
         self.task_processes = {}
+        self.control_write_lock = asyncio.Lock()
         self.audit_store = OperationAuditStore(self.runtime_root)
         self.github_service = github_service or GitHubService(
             runtime_root=self.runtime_root,
@@ -821,18 +847,31 @@ class LibrarianServer:
             prefix=msg_type,
             generate=True,
         )
+        parent_task_id = normalize_identifier(msg.get('parentTaskId'))
+        batch_id = normalize_identifier(msg.get('batchId'))
+        flow_id = normalize_identifier(msg.get('flowId'))
         task_id = normalize_identifier(
-            msg.get('taskId') or msg.get('task_id') or msg.get('batchId') or msg.get('flowId')
+            msg.get('taskId')
+            or msg.get('task_id')
+            or batch_id
+            or flow_id
+            or (parent_task_id if msg_type == 'derived_task_action' else '')
         )
         parent_id = normalize_identifier(
-            msg.get('parentId') or msg.get('parent_id') or msg.get('parentTaskId')
+            msg.get('parentId') or msg.get('parent_id')
         )
         if not parent_id and msg_type in {'task_retry', 'derived_task_action'} and task_id:
             parent_status = _json_file(self._task_dirs()['status'] / f'{task_id}.json') or {}
             parent_id = normalize_identifier(parent_status.get('operation_id') or parent_status.get('operationId'))
         msg['operationId'] = operation_id
-        msg.setdefault('taskId', task_id)
-        msg.setdefault('parentId', parent_id)
+        msg['taskId'] = task_id
+        msg['parentId'] = parent_id
+        if 'parentTaskId' in msg:
+            msg['parentTaskId'] = parent_task_id
+        if 'batchId' in msg:
+            msg['batchId'] = batch_id
+        if 'flowId' in msg:
+            msg['flowId'] = flow_id
         operation_type = OPERATION_TYPE_BY_MESSAGE.get(
             msg_type,
             f"github.{msg_type.removeprefix('github_')}" if msg_type.startswith('github_') else f"control.{msg_type}",
@@ -865,9 +904,16 @@ class LibrarianServer:
             raise
         last_reply = audited_websocket.sent_payloads[-1] if audited_websocket.sent_payloads else {}
         reply_type = str(last_reply.get('type') or '')
-        failed = reply_type.endswith(('_error', '_rejected')) or reply_type in {'error', 'protocol_rejected'}
-        cancelled = msg_type.endswith('_cancel') and not failed
         reply_result = last_reply.get('result') if isinstance(last_reply.get('result'), dict) else {}
+        reply_status = last_reply.get('status') if isinstance(last_reply.get('status'), dict) else {}
+        business_result = reply_result or reply_status
+        failed = (
+            reply_type.endswith(('_error', '_rejected'))
+            or reply_type in {'error', 'protocol_rejected'}
+            or business_result.get('ok') is False
+            or business_result.get('state') in {'error', 'failed'}
+        )
+        cancelled = msg_type.endswith('_cancel') and not failed
         continues = (
             msg_type in {'task_request', 'task_retry'}
             or (
@@ -902,8 +948,17 @@ class LibrarianServer:
         }
         if failed:
             event_kwargs.update({
-                'error': last_reply.get('result') or last_reply,
-                'error_code': str(last_reply.get('reason') or (last_reply.get('result') or {}).get('code') or 'request_rejected'),
+                'error': business_result or last_reply,
+                'error_code': str(
+                    last_reply.get('reason')
+                    or business_result.get('code')
+                    or business_result.get('errorCode')
+                    or 'request_rejected'
+                ),
+                'retryable': bool(
+                    business_result.get('retryable')
+                    or business_result.get('requiresUserAction')
+                ),
             })
         self.audit_store.record_event(operation_id, **event_kwargs)
 
@@ -960,7 +1015,8 @@ class LibrarianServer:
             
         elif msg_type == 'config_update':
             try:
-                await self.handle_config_update(msg.get('data', {}))
+                async with self.control_write_lock:
+                    await self.handle_config_update(msg.get('data', {}))
             except ValueError as exc:
                 await websocket.send(json.dumps({
                     'type': 'config_rejected',
@@ -982,7 +1038,8 @@ class LibrarianServer:
                 }))
             
         elif msg_type == 'cookie_update':
-            status = await self.handle_cookie_update(msg.get('platform'), msg.get('data'))
+            async with self.control_write_lock:
+                status = await self.handle_cookie_update(msg.get('platform'), msg.get('data'))
             self.audit_store.record_event(
                 str(msg.get('operationId') or ''),
                 stage='cookie_file_written',
@@ -1015,29 +1072,42 @@ class LibrarianServer:
             }, ensure_ascii=False))
 
         elif msg_type in VAULT_LIFECYCLE_REQUEST_TYPES:
-            result = await asyncio.to_thread(
-                dispatch_vault_lifecycle,
-                self.vault_lifecycle_manager(),
-                msg_type,
-                msg.get('data') or {},
-            )
+            async with self.control_write_lock:
+                result = await asyncio.to_thread(
+                    dispatch_vault_lifecycle,
+                    self.vault_lifecycle_manager(),
+                    msg_type,
+                    msg.get('data') or {},
+                )
             result['operationId'] = str(msg.get('operationId') or '')
             result['parentId'] = str(msg.get('parentId') or '')
             result['diagnostics'] = self.audit_store.diagnostics_ref(msg.get('operationId'))
             self.audit_store.record_event(
                 str(msg.get('operationId') or ''),
                 stage=VAULT_COMPLETION_STAGES.get(msg_type, 'vault_lifecycle_completed'),
-                state='started',
+                state='succeeded' if result.get('ok') is True else 'failed',
                 result={
                     'operation': result.get('operation'),
                     'state': result.get('state'),
                     'ok': result.get('ok'),
                     'requiresUserAction': result.get('requiresUserAction'),
+                    'errorCode': result.get('errorCode'),
                     'migrationId': (
                         (result.get('migration') or {}).get('migrationId')
                         if isinstance(result.get('migration'), dict) else ''
                     ),
                 },
+                error=(
+                    {
+                        'code': result.get('errorCode') or 'vault_lifecycle_failed',
+                        'stage': result.get('state') or msg_type,
+                        'message': result.get('message') or '知识库操作失败。',
+                        'retryable': bool(result.get('requiresUserAction')),
+                    }
+                    if result.get('ok') is not True else None
+                ),
+                error_code=str(result.get('errorCode') or 'vault_lifecycle_failed'),
+                retryable=bool(result.get('requiresUserAction')),
                 related={
                     'assets': [
                         (result.get('activeVault') or {}).get('vaultPath')
@@ -1080,13 +1150,24 @@ class LibrarianServer:
             self.audit_store.record_event(
                 str(msg.get('operationId') or ''),
                 stage='model_health_checked',
-                state='started',
+                state='succeeded' if status.get('ok') is True else 'failed',
                 result={
                     'ok': status.get('ok'),
                     'state': status.get('state'),
                     'provider': status.get('provider'),
                     'model': status.get('model'),
                 },
+                error=(
+                    {
+                        'code': 'model_health_failed',
+                        'stage': 'model_health_checked',
+                        'message': status.get('message') or '模型检查失败。',
+                        'retryable': True,
+                    }
+                    if status.get('ok') is not True else None
+                ),
+                error_code='model_health_failed',
+                retryable=True,
             )
             await websocket.send(json.dumps({
                 'type': 'model_status',
@@ -1467,6 +1548,9 @@ class LibrarianServer:
         await self.broadcast({
             'type': 'github_import_progress',
             'result': batch,
+            'operationId': batch_operation_id,
+            'taskId': batch_id,
+            'parentId': str(batch.get('parentId') or ''),
             'timestamp': datetime.now().isoformat(),
         })
         queued = await asyncio.to_thread(self.github_service.queued_import_items, batch_id)
@@ -1590,6 +1674,9 @@ class LibrarianServer:
             await self.broadcast({
                 'type': 'github_import_progress',
                 'result': batch,
+                'operationId': batch_operation_id,
+                'taskId': batch_id,
+                'parentId': str(batch.get('parentId') or ''),
                 'timestamp': datetime.now().isoformat(),
             })
         batch = await asyncio.to_thread(self.github_service.finish_import_batch, batch_id)
@@ -1619,6 +1706,9 @@ class LibrarianServer:
         await self.broadcast({
             'type': 'github_import_progress',
             'result': batch,
+            'operationId': batch_operation_id,
+            'taskId': batch_id,
+            'parentId': str(batch.get('parentId') or ''),
             'timestamp': datetime.now().isoformat(),
         })
 
@@ -2454,6 +2544,17 @@ class LibrarianServer:
                 })
                 asyncio.get_running_loop().call_soon(self.ensure_task_worker)
 
+    async def _terminate_task_process(self, task_id):
+        proc = self.task_processes.get(task_id)
+        if proc is None or proc.returncode is not None:
+            return
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+
     async def run_task_file(self, task_file):
         task_file = Path(task_file)
         task = self._read_task_file(task_file)
@@ -2565,6 +2666,54 @@ class LibrarianServer:
                     artifacts=[{'kind': 'task_log', 'ref': str(log_path)}],
                 )
             log(f"[Server] 任务结束: {task_id} exit={code}")
+        except asyncio.CancelledError:
+            await self._terminate_task_process(task_id)
+            raise
+        except Exception as exc:
+            await self._terminate_task_process(task_id)
+            status_path = self._task_dirs()['status'] / f'{task_id}.json'
+            status = _json_file(status_path) or {}
+            if status.get('ok') is not True and status.get('stage') != 'cancelled':
+                if status.get('ok') is not False:
+                    status.update({
+                        'id': task_id,
+                        'operation_id': operation_id,
+                        'parent_id': parent_id,
+                        'ok': False,
+                        'stage': 'failed',
+                        'error': f'任务执行器异常: {type(exc).__name__}',
+                        'error_kind': 'task_runner_error',
+                        'recoverable': True,
+                        'log_path': str(log_path),
+                    })
+                    self._write_task_status(task_id, self._finish_status_fields(status))
+                if task_file.exists():
+                    failed_dir = self._task_dirs()['failed']
+                    failed_dir.mkdir(parents=True, exist_ok=True)
+                    destination = failed_dir / task_file.name
+                    if destination.exists():
+                        destination = failed_dir / f'{task_file.stem}.runner-{int(time.time())}{task_file.suffix}'
+                    task_file.replace(destination)
+                try:
+                    self.audit_store.finish(
+                        operation_id,
+                        stage='task_runner_failed',
+                        state='failed',
+                        error={
+                            'code': 'task_runner_error',
+                            'type': type(exc).__name__,
+                            'stage': 'subprocess_start',
+                            'message': '任务执行器无法启动子进程。',
+                            'retryable': True,
+                        },
+                        error_code='task_runner_error',
+                        retryable=True,
+                        related={'tasks': [task_id]},
+                        artifacts=[{'kind': 'task_log', 'ref': str(log_path)}],
+                    )
+                except Exception:
+                    pass
+            log(f"[Server] 任务执行失败: {task_id} {type(exc).__name__}")
         finally:
             self.task_processes.pop(task_id, None)
             self.running_task_ids.discard(task_id)
@@ -3022,9 +3171,7 @@ port = {int(self.port)}
 task_concurrency = {int(task_concurrency)}
 """
 
-        with open(config_path, 'w') as f:
-            f.write(config_text)
-        os.chmod(config_path, 0o600)
+        _write_private_text_atomic(config_path, config_text)
         if active_key_changed:
             try:
                 self.status_path('model_health.json').unlink()
@@ -3441,9 +3588,7 @@ task_concurrency = {int(task_concurrency)}
         cookie_dir.mkdir(parents=True, exist_ok=True)
 
         cookie_path = cookie_dir / f'{platform}.txt'
-        with open(cookie_path, 'w') as f:
-            f.write(cookie_data)
-        os.chmod(cookie_path, 0o600)
+        _write_private_text_atomic(cookie_path, cookie_data)
         log(f"[Server] Cookie 已保存到 {cookie_path}")
         return self._douyin_cookie_health(cookie_path)
         
