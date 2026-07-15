@@ -257,6 +257,11 @@ def _obsidian_registry_candidates() -> list[Path]:
     return paths
 
 
+def obsidian_registry_vault_paths() -> list[Path]:
+    """Return vault paths registered by Obsidian without reading any vault config."""
+    return _obsidian_registry_candidates()
+
+
 def _obsidian_cli_candidates(timeout_sec: float = 1.5) -> list[Path]:
     exe = shutil_which("obsidian")
     if not exe:

@@ -18,9 +18,19 @@ from pathlib import Path
 from typing import Any, Optional
 
 try:
-    from install.vault_discovery import discover_vault, score_vault, write_vault_path_to_config
+    from install.vault_discovery import discover_vault
+    from install.vault_lifecycle import (
+        VaultLifecycleError,
+        VaultLifecycleManager,
+        inspect_vault_identity,
+    )
 except ImportError:
-    from vault_discovery import discover_vault, score_vault, write_vault_path_to_config
+    from vault_discovery import discover_vault
+    from vault_lifecycle import (
+        VaultLifecycleError,
+        VaultLifecycleManager,
+        inspect_vault_identity,
+    )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -198,7 +208,7 @@ def ensure_config_template(result: CheckResult) -> None:
     os.chmod(CONFIG_PATH, 0o600)
     result.actions.append(f"config template created: {CONFIG_PATH}")
     result.missing_user_actions.append(
-        "Open the extension and fill the selected provider API Key plus Obsidian vault path."
+        "Open the extension, enter a user name, and create a new Agent-wiki vault."
     )
     result.missing_user_actions.append(
         "Configure AGENT_WIKI_GITHUB_CLIENT_ID before using GitHub Device Flow."
@@ -446,76 +456,41 @@ def check_vault(result: CheckResult) -> None:
 
     api_key = _active_api_key()
     vault_raw = _simple_config_value("vault", "path")
-    explicit_vault = bool(vault_raw)
     if not vault_raw:
-        discovery = discover_vault(
-            config_path=CONFIG_PATH,
-            cwd=Path.cwd(),
-            runtime_root=RUNTIME_ROOT,
+        result.missing_user_actions.append(
+            "Create a new Agent-wiki vault in the extension; existing Obsidian vaults are never adopted automatically."
         )
-        if discovery.selected:
-            write_vault_path_to_config(CONFIG_PATH, discovery.selected.path_obj)
-            vault_raw = discovery.selected.path
-            result.actions.append(
-                f"vault auto-discovered: {vault_raw} ({discovery.selected.source})"
-            )
-        else:
+        if not api_key:
             result.missing_user_actions.append(
-                "Select Obsidian vault in the extension, or open Agent from a known vault folder."
+                f"Complete extension model config: {_active_key_label()}."
             )
-            if not api_key:
-                result.missing_user_actions.append(
-                    f"Complete extension model config: {_active_key_label()}."
-                )
-            return
+        return
 
     if not api_key:
         result.missing_user_actions.append(
             f"Complete extension model config: {_active_key_label()}."
         )
 
-    vault = Path(vault_raw).expanduser()
-    if explicit_vault:
-        selected = _safe_explicit_vault(vault_raw)
-        if selected is None:
-            result.missing_user_actions.append(
-                "The configured vault path is missing, not a directory, or points inside .obsidian. "
-                "Fix [vault].path; automatic discovery was not used."
-            )
-            return
-        vault = selected
-        candidate = score_vault(vault, source="config.toml")
-        if not candidate:
-            candidate = True
-            result.actions.append(f"vault selected by explicit config: {vault}")
-    else:
-        candidate = score_vault(vault, source="config.toml") if vault.exists() and vault.is_dir() else None
-    if not candidate:
-        discovery = discover_vault(
-            config_path=CONFIG_PATH,
-            user_hint=vault_raw,
-            cwd=Path.cwd(),
-            runtime_root=RUNTIME_ROOT,
+    vault = _safe_explicit_vault(vault_raw)
+    if vault is None:
+        result.missing_user_actions.append(
+            "The configured vault path is missing, not a directory, or points inside .obsidian. "
+            "Fix [vault].path; automatic discovery was not used."
         )
-        if discovery.selected:
-            write_vault_path_to_config(CONFIG_PATH, discovery.selected.path_obj)
-            vault = discovery.selected.path_obj
-            result.actions.append(
-                f"vault path repaired: {vault} ({discovery.selected.source})"
-            )
-        else:
-            result.missing_user_actions.append("Select or initialize an Agent-wiki vault in the extension.")
-            return
-    vault = vault.resolve()
-    for rel in [
-        "templates",
-        "raw/videos",
-        "知识资产/知识入库",
-        "系统记录/维护报告",
-    ]:
-        (vault / rel).mkdir(parents=True, exist_ok=True)
-    if not (vault / "index.md").exists():
-        (vault / "index.md").write_text("# 知识库索引\n> 最后更新：未开始 | 资产总数：0\n\n## 知识入库\n", encoding="utf-8")
+        return
+    identity_state, _identity = inspect_vault_identity(vault)
+    if identity_state != "valid":
+        result.missing_user_actions.append(
+            "The configured directory has no valid Agent-wiki identity marker. "
+            "Use migration preview for an existing knowledge vault."
+        )
+        return
+    lifecycle = VaultLifecycleManager(runtime_root=RUNTIME_ROOT, config_path=CONFIG_PATH)
+    switched = lifecycle.switch(vault_path=vault)
+    if not switched.get("ok"):
+        result.missing_user_actions.append(switched.get("message") or "Select an Agent-wiki vault in the extension.")
+        return
+    result.actions.append(f"vault selected by explicit config: {vault}")
     result.actions.append(f"vault structure ready: {vault}")
 
 
@@ -538,8 +513,19 @@ def bootstrap(
                 fatal=True,
             )
         else:
-            write_vault_path_to_config(CONFIG_PATH, selected)
-            result.actions.append(f"explicit vault configured: {selected}")
+            lifecycle = VaultLifecycleManager(runtime_root=RUNTIME_ROOT, config_path=CONFIG_PATH)
+            try:
+                initialized = lifecycle.initialize_explicit_empty_vault(selected)
+            except VaultLifecycleError as exc:
+                result.add_warning(str(exc), fatal=True)
+            else:
+                if initialized.get("ok"):
+                    result.actions.append(f"explicit vault configured: {selected}")
+                else:
+                    result.add_warning(
+                        initialized.get("message") or "explicit vault initialization failed",
+                        fatal=True,
+                    )
     ensure_extension_copy(result)
     if verify_websocket:
         check_websocket(result)
