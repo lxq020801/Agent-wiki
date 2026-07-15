@@ -2462,7 +2462,16 @@ function updateSystemSummary() {
   }
 }
 
+function releaseFocusBeforeViewChange(viewId) {
+  const activeElement = document.activeElement;
+  const activeView = activeElement?.closest?.('.view');
+  if (activeView && activeView.id !== viewId && typeof activeElement.blur === 'function') {
+    activeElement.blur();
+  }
+}
+
 function setView(viewId) {
+  releaseFocusBeforeViewChange(viewId);
   document.body.dataset.view = viewId;
   Object.values(POPUP_VIEWS).forEach(id => {
     const view = document.getElementById(id);

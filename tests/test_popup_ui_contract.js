@@ -67,6 +67,7 @@ assert.match(js, /status\.migration\?\.migrationId/);
 assert.match(js, /status\.activeVault\?\.vaultPath/);
 assert.match(js, /state === 'ready' && action !== 'scan'/);
 assert.match(js, /status\.ok === false \|\| \['failed', 'error', 'rejected'\]/);
+assert.match(js, /function setView\(viewId\) \{\s*releaseFocusBeforeViewChange\(viewId\);/);
 
 async function main() {
   const stored = {};
@@ -121,6 +122,54 @@ async function main() {
     view: 'home-view'
   });
   assert.deepEqual(route(`sanitizePopupRoute('github')`), { view: 'github-view' });
+
+  const focusTransition = route(`(() => {
+    const operations = [];
+    const views = Object.fromEntries([
+      'home-view', 'settings-index-view', 'settings-detail-view', 'github-view'
+    ].map(id => [id, {
+      id,
+      inert: false,
+      classList: { toggle() {} },
+      setAttribute(name, value) {
+        if (id === 'settings-detail-view' && name === 'aria-hidden' && value === 'true') {
+          operations.push('hide-detail');
+        }
+      }
+    }]));
+    const focusedBackButton = {
+      closest(selector) {
+        return selector === '.view' ? views['settings-detail-view'] : null;
+      },
+      blur() {
+        operations.push('blur');
+      }
+    };
+    document.activeElement = focusedBackButton;
+    document.getElementById = id => views[id];
+    document.body.scrollTop = 42;
+    setView('home-view');
+    return { operations, scrollTop: document.body.scrollTop };
+  })()`);
+  assert.deepEqual(focusTransition, {
+    operations: ['blur', 'hide-detail'],
+    scrollTop: 0
+  });
+
+  const sameViewFocus = route(`(() => {
+    let blurCount = 0;
+    document.activeElement = {
+      closest(selector) {
+        return selector === '.view' ? { id: 'home-view' } : null;
+      },
+      blur() {
+        blurCount += 1;
+      }
+    };
+    releaseFocusBeforeViewChange('home-view');
+    return { blurCount };
+  })()`);
+  assert.deepEqual(sameViewFocus, { blurCount: 0 });
 
   assert.deepEqual(route(`buildVaultCreatePayload({ id: 'root-1', obsidianRoot: '/tmp/root' }, 'Demo')`), {
     userName: 'Demo',
