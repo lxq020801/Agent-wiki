@@ -4,26 +4,31 @@ GitHub 联动运行在现有本地控制服务中。Chrome 扩展只展示授权
 
 ## 开源部署配置
 
-每个部署者需要创建自己的 GitHub App：
+Agent-wiki 内置官方 GitHub App 的公开 client ID。普通用户安装后直接登录即可，不需要创建 GitHub App，也不需要配置 token、client secret 或私钥。client ID 只是公开的应用标识，不是登录凭证。
 
-1. 在 GitHub Developer settings 中创建 GitHub App。
-2. 开启 Device Flow。
-3. Account permissions 只授予 `Starring: Read and write`。
-4. Repository permissions 只保留 `Metadata: Read-only`，不申请 Contents 或私有仓库权限。
-   公开仓库 README 与 Release 通过匿名 GitHub 官方 API 读取，因此不扩大 App 的 Contents 权限。
-5. 取得 GitHub App client ID。Device Flow 的设备码申请和 token 轮询只发送 client ID，不需要 client secret；本项目不读取、保存或配置 client secret。
-6. 启动本地服务前设置环境变量：
+官方 App 当前配置为：
+
+- Device Flow：开启。
+- Account permissions：`Starring: Read and write`。
+- Repository permissions：只保留 `Metadata: Read-only`，不申请 Contents 或私有仓库权限。
+- 公开仓库 README 与 Release 通过匿名 GitHub 官方 API 读取，因此不扩大 App 的 Contents 权限。
+
+自行维护的分支如需改用自己的 GitHub App，可以：
+
+1. 创建启用 Device Flow 的 GitHub App，并采用同样的最小权限。
+2. 取得 GitHub App client ID。Device Flow 的设备码申请和 token 轮询只发送 client ID，不需要 client secret；本项目不读取、保存或配置 client secret。
+3. 启动本地服务前设置环境变量：
 
 ```bash
 export AGENT_WIKI_GITHUB_CLIENT_ID="<your-github-app-client-id>"
 python3.11 server/launcher.py restart
 ```
 
-也可以在 `~/.agent-wiki/config.toml` 的 `[github].client_id` 写入同一个非敏感 client ID。环境变量优先。未配置时，扩展 GitHub 页面会明确显示缺少 client ID，登录按钮不会发起无效请求。
+也可以在 `~/.agent-wiki/config.toml` 的 `[github].client_id` 写入同一个非敏感 client ID。优先级依次为显式构造参数、环境变量、本地配置和官方默认值。
 
 ## 登录与凭证
 
-扩展点击“登录 GitHub”后，本地服务向 GitHub Device Flow 申请一次性用户代码。用户在 GitHub 官方页面完成授权；扩展轮询本地服务获取等待、成功、拒绝、超时或错误状态。
+扩展点击“登录 GitHub”后，本地服务向 GitHub Device Flow 申请一次性用户代码。扩展提供复制按钮并打开 GitHub 官方授权页；本地服务在后台持续轮询 GitHub，因此关闭扩展弹窗不会中断登录。再次打开扩展时，会从本地服务恢复同一验证码、有效期或已登录状态。短暂网络错误会退避重试；验证码过期或本地服务重启后需要重新生成。点击取消会终止对应流程，即使换取 token 的网络请求已经发出也不会保留该流程取得的凭证。
 
 授权成功后，token 只保存到 macOS Keychain：
 

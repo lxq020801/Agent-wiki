@@ -33,7 +33,8 @@ GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
 KEYCHAIN_SERVICE = "com.agent-wiki.github"
 KEYCHAIN_ACCOUNT = "github-oauth-token"
 CLIENT_ID_ENV = "AGENT_WIKI_GITHUB_CLIENT_ID"
-USER_AGENT = "Agent-wiki/0.2.0"
+DEFAULT_CLIENT_ID = "Iv23liSzzn6LYCGleEQA"
+USER_AGENT = "Agent-wiki/0.2.1"
 MAX_README_CHARS = 500_000
 CLIENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 OWNER_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -369,23 +370,52 @@ class GitHubService:
         self.pending_refreshes: dict[str, dict[str, Any]] = {}
         self.import_batches: dict[str, dict[str, Any]] = {}
         self._account_cache: dict[str, Any] = {}
+        self._authenticated_flow_id = ""
         self._token_presence_cache: dict[str, Any] = {"known": False, "present": False, "expiresAt": 0.0}
         self._write_lock = threading.RLock()
 
+    @staticmethod
+    def _public_authorization(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "state": "waiting_for_user",
+            "flowId": flow_id,
+            "userCode": str(flow.get("userCode") or ""),
+            "verificationUri": str(flow.get("verificationUri") or ""),
+            "expiresAt": float(flow.get("expiresAt") or 0),
+            "interval": int(flow.get("interval") or 5),
+        }
+
+    def active_authorization(self) -> dict[str, Any] | None:
+        now = self.clock()
+        with self._write_lock:
+            for flow_id, flow in reversed(list(self.pending_flows.items())):
+                if now < float(flow.get("expiresAt") or 0):
+                    return self._public_authorization(flow_id, flow)
+        return None
+
+    def _client_id_and_source(self) -> tuple[str, str]:
+        candidates = (
+            (self._explicit_client_id, "explicit"),
+            (os.environ.get(CLIENT_ID_ENV), "environment"),
+            (_read_simple_config(self.config_path, "github", "client_id"), "runtime_config"),
+            (DEFAULT_CLIENT_ID, "official_default"),
+        )
+        for raw_value, source in candidates:
+            value = str(raw_value or "").strip()
+            if value:
+                return (value if CLIENT_ID_PATTERN.fullmatch(value) else ""), source
+        return "", "missing"
+
     def client_id(self) -> str:
-        value = str(
-            self._explicit_client_id
-            or os.environ.get(CLIENT_ID_ENV)
-            or _read_simple_config(self.config_path, "github", "client_id")
-            or ""
-        ).strip()
-        return value if CLIENT_ID_PATTERN.fullmatch(value) else ""
+        return self._client_id_and_source()[0]
 
     def configuration_status(self) -> dict[str, Any]:
-        configured = bool(self.client_id())
+        client_id, source = self._client_id_and_source()
+        configured = bool(client_id)
         return {
             "configured": configured,
-            "source": "environment_or_runtime_config" if configured else "missing",
+            "source": source if configured else "missing",
             "message": "" if configured else f"缺少 GitHub App client ID。请设置 {CLIENT_ID_ENV} 后重启本地服务。",
         }
 
@@ -435,6 +465,7 @@ class GitHubService:
                 "authenticated": False,
                 "account": None,
                 "settings": self.settings(),
+                "activeAuthorization": self.active_authorization(),
                 "message": exc.message,
             }
         if token:
@@ -472,6 +503,7 @@ class GitHubService:
             "account": account,
             "settings": self.settings(),
             "activeImport": active_import,
+            "activeAuthorization": None if authenticated else self.active_authorization(),
             "message": configured.get("message") or (
                 "" if authenticated else ("打开 GitHub 设置后检查登录状态。" if state == "unchecked" else "尚未登录 GitHub。")
             ),
@@ -481,97 +513,144 @@ class GitHubService:
         client_id = self.client_id()
         if not client_id:
             raise GitHubServiceError("not_configured", self.configuration_status()["message"])
-        data = self.api.form_post(GITHUB_DEVICE_CODE_URL, {"client_id": client_id})
-        device_code = str(data.get("device_code") or "")
-        user_code = str(data.get("user_code") or "")
-        verification_uri = str(data.get("verification_uri") or data.get("verification_uri_complete") or "")
-        if not device_code or not user_code or not verification_uri:
-            raise GitHubServiceError("invalid_response", "GitHub Device Flow 响应不完整。")
-        flow_id = uuid.uuid4().hex
-        expires_in = max(1, _safe_int(data.get("expires_in")) or 900)
-        interval = max(5, _safe_int(data.get("interval")) or 5)
-        now = self.clock()
-        self.pending_flows[flow_id] = {
-            "deviceCode": device_code,
-            "expiresAt": now + expires_in,
-            "interval": interval,
-            "nextPollAt": now,
-        }
-        return {
-            "ok": True,
-            "state": "waiting_for_user",
-            "flowId": flow_id,
-            "userCode": user_code,
-            "verificationUri": verification_uri,
-            "expiresAt": now + expires_in,
-            "interval": interval,
-        }
+        with self._write_lock:
+            active = self.active_authorization()
+            if active:
+                return active
+            data = self.api.form_post(GITHUB_DEVICE_CODE_URL, {"client_id": client_id})
+            device_code = str(data.get("device_code") or "")
+            user_code = str(data.get("user_code") or "")
+            verification_uri = str(data.get("verification_uri_complete") or data.get("verification_uri") or "")
+            if not device_code or not user_code or not verification_uri:
+                raise GitHubServiceError("invalid_response", "GitHub Device Flow 响应不完整。")
+            flow_id = uuid.uuid4().hex
+            expires_in = max(1, _safe_int(data.get("expires_in")) or 900)
+            interval = max(5, _safe_int(data.get("interval")) or 5)
+            now = self.clock()
+            flow = {
+                "deviceCode": device_code,
+                "userCode": user_code,
+                "verificationUri": verification_uri,
+                "expiresAt": now + expires_in,
+                "interval": interval,
+                "nextPollAt": now,
+                "polling": False,
+            }
+            self.pending_flows = {
+                key: value
+                for key, value in self.pending_flows.items()
+                if now < float(value.get("expiresAt") or 0)
+            }
+            self.pending_flows[flow_id] = flow
+            return self._public_authorization(flow_id, flow)
 
     def poll_authorization(self, flow_id: str) -> dict[str, Any]:
-        flow = self.pending_flows.get(str(flow_id or ""))
-        if not flow:
-            raise GitHubServiceError("authorization_missing", "GitHub 授权已取消或不存在，请重新开始。")
-        now = self.clock()
-        if now >= float(flow["expiresAt"]):
-            self.pending_flows.pop(flow_id, None)
-            raise GitHubServiceError("authorization_expired", "GitHub 授权已超时，请重新开始。")
-        if now < float(flow.get("nextPollAt") or 0):
-            return {
-                "ok": True,
-                "state": "authorization_pending",
-                "flowId": flow_id,
-                "retryAfter": max(1, int(float(flow["nextPollAt"]) - now)),
-            }
-        data = self.api.form_post(
-            GITHUB_ACCESS_TOKEN_URL,
-            {
-                "client_id": self.client_id(),
-                "device_code": flow["deviceCode"],
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-            },
-        )
-        error = str(data.get("error") or "")
-        interval = int(flow["interval"])
-        if error == "authorization_pending":
-            flow["nextPollAt"] = now + interval
-            return {"ok": True, "state": error, "flowId": flow_id, "retryAfter": interval}
-        if error == "slow_down":
-            interval += max(5, _safe_int(data.get("interval")))
-            flow["interval"] = interval
-            flow["nextPollAt"] = now + interval
-            return {"ok": True, "state": "authorization_pending", "flowId": flow_id, "retryAfter": interval}
-        if error in {"access_denied", "expired_token", "incorrect_device_code"}:
-            self.pending_flows.pop(flow_id, None)
-            code = "authorization_denied" if error == "access_denied" else "authorization_expired"
-            message = "你已拒绝 GitHub 授权。" if error == "access_denied" else "GitHub 授权已超时，请重新开始。"
-            raise GitHubServiceError(code, message)
-        if error:
-            self.pending_flows.pop(flow_id, None)
-            raise GitHubServiceError("authorization_failed", str(data.get("error_description") or "GitHub 授权失败。"))
-        token = str(data.get("access_token") or "")
-        if not token:
-            raise GitHubServiceError("invalid_response", "GitHub 未返回有效登录凭证。")
-        self.token_store.set(token)
-        self._token_presence_cache = {"known": True, "present": True, "expiresAt": self.clock() + 30}
+        flow_id = str(flow_id or "")
+        with self._write_lock:
+            flow = self.pending_flows.get(flow_id)
+            if not flow:
+                raise GitHubServiceError("authorization_missing", "GitHub 授权已取消或不存在，请重新开始。")
+            now = self.clock()
+            if now >= float(flow["expiresAt"]):
+                self.pending_flows.pop(flow_id, None)
+                raise GitHubServiceError("authorization_expired", "GitHub 授权已超时，请重新开始。")
+            if now < float(flow.get("nextPollAt") or 0):
+                return {
+                    "ok": True,
+                    "state": "authorization_pending",
+                    "flowId": flow_id,
+                    "retryAfter": max(1, int(float(flow["nextPollAt"]) - now)),
+                }
+            if flow.get("polling"):
+                return {
+                    "ok": True,
+                    "state": "authorization_pending",
+                    "flowId": flow_id,
+                    "retryAfter": max(1, int(flow.get("interval") or 5)),
+                }
+            flow["polling"] = True
+            device_code = str(flow["deviceCode"])
+            interval = int(flow["interval"])
+
         try:
-            user, _ = self.api.request("GET", "/user", token=token)
-        except Exception:
-            self.token_store.delete()
-            self.pending_flows.pop(flow_id, None)
+            data = self.api.form_post(
+                GITHUB_ACCESS_TOKEN_URL,
+                {
+                    "client_id": self.client_id(),
+                    "device_code": device_code,
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                },
+            )
+        except Exception as exc:
+            with self._write_lock:
+                current = self.pending_flows.get(flow_id)
+                if current is flow:
+                    flow["polling"] = False
+                    flow["nextPollAt"] = self.clock() + interval
+                else:
+                    raise GitHubServiceError(
+                        "authorization_missing",
+                        "GitHub 授权已取消或不存在，请重新开始。",
+                    ) from exc
             raise
-        self.pending_flows.pop(flow_id, None)
-        self._account_cache = {"login": str(user.get("login") or ""), "name": str(user.get("name") or "")}
-        return {"ok": True, "state": "ready", "authenticated": True, "account": dict(self._account_cache)}
+
+        with self._write_lock:
+            if self.pending_flows.get(flow_id) is not flow:
+                raise GitHubServiceError("authorization_missing", "GitHub 授权已取消或不存在，请重新开始。")
+            flow["polling"] = False
+            now = self.clock()
+            error = str(data.get("error") or "")
+            if error == "authorization_pending":
+                flow["nextPollAt"] = now + interval
+                return {"ok": True, "state": error, "flowId": flow_id, "retryAfter": interval}
+            if error == "slow_down":
+                interval += max(5, _safe_int(data.get("interval")))
+                flow["interval"] = interval
+                flow["nextPollAt"] = now + interval
+                return {"ok": True, "state": "authorization_pending", "flowId": flow_id, "retryAfter": interval}
+            if error in {"access_denied", "expired_token", "incorrect_device_code"}:
+                self.pending_flows.pop(flow_id, None)
+                code = "authorization_denied" if error == "access_denied" else "authorization_expired"
+                message = "你已拒绝 GitHub 授权。" if error == "access_denied" else "GitHub 授权已超时，请重新开始。"
+                raise GitHubServiceError(code, message)
+            if error:
+                self.pending_flows.pop(flow_id, None)
+                raise GitHubServiceError("authorization_failed", str(data.get("error_description") or "GitHub 授权失败。"))
+            token = str(data.get("access_token") or "")
+            if not token:
+                flow["nextPollAt"] = now + interval
+                raise GitHubServiceError("invalid_response", "GitHub 未返回有效登录凭证。")
+            self.token_store.set(token)
+            self._token_presence_cache = {"known": True, "present": True, "expiresAt": self.clock() + 30}
+            try:
+                user, _ = self.api.request("GET", "/user", token=token)
+            except Exception:
+                self.token_store.delete()
+                self.pending_flows.pop(flow_id, None)
+                raise
+            self.pending_flows.pop(flow_id, None)
+            self._authenticated_flow_id = flow_id
+            self._account_cache = {"login": str(user.get("login") or ""), "name": str(user.get("name") or "")}
+            return {"ok": True, "state": "ready", "authenticated": True, "account": dict(self._account_cache)}
 
     def cancel_authorization(self, flow_id: str) -> dict[str, Any]:
-        self.pending_flows.pop(str(flow_id or ""), None)
+        flow_id = str(flow_id or "")
+        with self._write_lock:
+            self.pending_flows.pop(flow_id, None)
+            if self._authenticated_flow_id == flow_id:
+                self.token_store.delete()
+                self._authenticated_flow_id = ""
+                self._account_cache = {}
+                self._token_presence_cache = {"known": True, "present": False, "expiresAt": self.clock() + 30}
         return {"ok": True, "state": "cancelled"}
 
     def logout(self) -> dict[str, Any]:
-        self.token_store.delete()
-        self.pending_flows.clear()
-        self._account_cache = {}
-        self._token_presence_cache = {"known": True, "present": False, "expiresAt": self.clock() + 30}
+        with self._write_lock:
+            self.pending_flows.clear()
+            self.token_store.delete()
+            self._authenticated_flow_id = ""
+            self._account_cache = {}
+            self._token_presence_cache = {"known": True, "present": False, "expiresAt": self.clock() + 30}
         return self.status(validate=False)
 
     def search_repositories(self, query: Any, *, page: Any = 1, per_page: Any = 20) -> dict[str, Any]:

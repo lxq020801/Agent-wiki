@@ -112,14 +112,16 @@ python3.11 server/launcher.py cache clean --dry-run
 - 选择或识别 Obsidian vault
 - 在抖音页面提交“知识入库”任务
 
-GitHub 联动需要部署者先创建启用 Device Flow 的 GitHub App，并在启动服务前设置公开的 client ID：
+GitHub 联动默认使用 Agent-wiki 官方 GitHub App。用户直接在扩展里点击“登录 GitHub”即可，不需要自行创建 App、配置 token 或 client secret。
+
+自行部署的分支如需使用自己的 GitHub App，可以用环境变量覆盖公开的默认 client ID：
 
 ```bash
 export AGENT_WIKI_GITHUB_CLIENT_ID="<your-github-app-client-id>"
 python3.11 server/launcher.py restart
 ```
 
-GitHub App 只授予 `Starring: Read and write` 与 `Metadata: Read-only`，不需要 client secret。完整配置和安全边界见 [GitHub 联动](docs/github-integration.md)。
+官方 GitHub App 只授予 `Starring: Read and write` 与 `Metadata: Read-only`，不需要 client secret。完整配置和安全边界见 [GitHub 联动](docs/github-integration.md)。
 
 也可以用命令行提交链接：
 

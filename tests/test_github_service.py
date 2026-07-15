@@ -2,18 +2,22 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from server.github_service import (
+    DEFAULT_CLIENT_ID,
     GITHUB_ACCESS_TOKEN_URL,
     GITHUB_DEVICE_CODE_URL,
     GitHubAPI,
@@ -101,6 +105,116 @@ class FakeAPI:
         raise AssertionError(f"unexpected API request: {method} {path}")
 
 
+class BlockingAuthorizationAPI(FakeAPI):
+    def __init__(self) -> None:
+        super().__init__()
+        self.token_request_started = threading.Event()
+        self.release_token_response = threading.Event()
+
+    def form_post(self, url: str, values: dict) -> dict:
+        self.calls.append(("POST", url))
+        if url == GITHUB_DEVICE_CODE_URL:
+            return {
+                "device_code": "device-secret",
+                "user_code": "ABCD-EFGH",
+                "verification_uri": "https://github.com/login/device",
+                "expires_in": 900,
+                "interval": 5,
+            }
+        if url == GITHUB_ACCESS_TOKEN_URL:
+            self.token_request_started.set()
+            if not self.release_token_response.wait(timeout=2):
+                raise AssertionError("token response was not released")
+            return {"access_token": "oauth-secret-token", "token_type": "bearer"}
+        raise AssertionError(f"unexpected form request: {url}")
+
+
+class BlockingDeviceCodeAPI(FakeAPI):
+    def __init__(self) -> None:
+        super().__init__()
+        self.device_request_started = threading.Event()
+        self.second_device_request_started = threading.Event()
+        self.release_device_response = threading.Event()
+        self._device_request_count = 0
+        self._count_lock = threading.Lock()
+
+    def form_post(self, url: str, values: dict) -> dict:
+        if url != GITHUB_DEVICE_CODE_URL:
+            return super().form_post(url, values)
+        with self._count_lock:
+            self._device_request_count += 1
+            request_number = self._device_request_count
+        self.calls.append(("POST", url))
+        if request_number > 1:
+            self.second_device_request_started.set()
+            return {
+                "device_code": "second-device-secret",
+                "user_code": "IJKL-MNOP",
+                "verification_uri": "https://github.com/login/device",
+                "expires_in": 900,
+                "interval": 5,
+            }
+        self.device_request_started.set()
+        if not self.release_device_response.wait(timeout=2):
+            raise AssertionError("device-code response was not released")
+        return {
+            "device_code": "device-secret",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "https://github.com/login/device",
+            "expires_in": 900,
+            "interval": 5,
+        }
+
+
+class BlockingAccountVerificationAPI(FakeAPI):
+    def __init__(self) -> None:
+        super().__init__()
+        self.account_request_started = threading.Event()
+        self.release_account_response = threading.Event()
+        self.form_responses = [
+            {
+                "device_code": "device-secret",
+                "user_code": "ABCD-EFGH",
+                "verification_uri": "https://github.com/login/device",
+                "expires_in": 900,
+                "interval": 5,
+            },
+            {"access_token": "oauth-secret-token", "token_type": "bearer"},
+        ]
+
+    def request(self, method: str, path: str, *, token: str, **kwargs):
+        if path == "/user":
+            self.calls.append((method, path))
+            self.account_request_started.set()
+            if not self.release_account_response.wait(timeout=2):
+                raise AssertionError("account response was not released")
+            return {"login": "octocat", "name": "The Octocat"}, {}
+        return super().request(method, path, token=token, **kwargs)
+
+
+class TransientAuthorizationAPI(FakeAPI):
+    def __init__(self) -> None:
+        super().__init__()
+        self.token_attempts = 0
+
+    def form_post(self, url: str, values: dict) -> dict:
+        self.calls.append(("POST", url))
+        if url == GITHUB_DEVICE_CODE_URL:
+            return {
+                "device_code": "device-secret",
+                "user_code": "ABCD-EFGH",
+                "verification_uri": "https://github.com/login/device",
+                "expires_in": 900,
+                "interval": 5,
+            }
+        if url == GITHUB_ACCESS_TOKEN_URL:
+            self.token_attempts += 1
+            if self.token_attempts == 1:
+                raise GitHubServiceError("network_error", "temporary network error")
+            return {"access_token": "oauth-secret-token", "token_type": "bearer"}
+        raise AssertionError(f"unexpected form request: {url}")
+
+
 class QueueTransport:
     def __init__(self, responses: list[HTTPResponse]) -> None:
         self.responses = list(responses)
@@ -125,6 +239,22 @@ class GitHubServiceTests(unittest.TestCase):
         )
         return service, store, vault
 
+    def test_official_client_id_is_available_without_local_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ,
+            {"AGENT_WIKI_GITHUB_CLIENT_ID": ""},
+        ):
+            root = Path(tmp)
+            service = GitHubService(
+                runtime_root=root / "runtime",
+                config_path=root / "missing-config.toml",
+                token_store=MemoryTokenStore(),
+                api=FakeAPI(),
+            )
+
+            self.assertEqual(service.client_id(), DEFAULT_CLIENT_ID)
+            self.assertEqual(service.configuration_status()["source"], "official_default")
+
     def test_device_flow_keeps_token_out_of_responses_and_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -148,9 +278,131 @@ class GitHubServiceTests(unittest.TestCase):
             self.assertNotIn("access_token", completed)
             self.assertNotIn("oauth-secret-token", json.dumps(completed))
             self.assertEqual(store.token, "oauth-secret-token")
+            self.assertIsNone(service.active_authorization())
             for path in (root / "runtime").glob("**/*"):
                 if path.is_file():
                     self.assertNotIn("oauth-secret-token", path.read_text(encoding="utf-8", errors="ignore"))
+
+    def test_device_flow_is_restored_without_requesting_a_second_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            api = FakeAPI()
+            api.form_responses = [{
+                "device_code": "device-secret",
+                "user_code": "ABCD-EFGH",
+                "verification_uri": "https://github.com/login/device",
+                "expires_in": 900,
+                "interval": 5,
+            }]
+            service, _store, _vault = self.make_service(Path(tmp), api=api, token="")
+
+            started = service.start_authorization()
+            reopened = service.start_authorization()
+            status = service.status(validate=True)
+
+            self.assertEqual(reopened, started)
+            self.assertEqual(status["activeAuthorization"], started)
+            self.assertEqual(
+                api.calls.count(("POST", GITHUB_DEVICE_CODE_URL)),
+                1,
+            )
+            serialized = json.dumps(status)
+            self.assertNotIn("device-secret", serialized)
+            self.assertNotIn("deviceCode", serialized)
+
+    def test_concurrent_login_requests_reuse_one_device_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            api = BlockingDeviceCodeAPI()
+            service, _store, _vault = self.make_service(Path(tmp), api=api, token="")
+            second_call_started = threading.Event()
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(service.start_authorization)
+                self.assertTrue(api.device_request_started.wait(timeout=1))
+
+                def start_second_authorization():
+                    second_call_started.set()
+                    return service.start_authorization()
+
+                second = pool.submit(start_second_authorization)
+                self.assertTrue(second_call_started.wait(timeout=1))
+                self.assertFalse(api.second_device_request_started.wait(timeout=0.1))
+                api.release_device_response.set()
+                results = [first.result(timeout=2), second.result(timeout=2)]
+
+            self.assertEqual(results[0], results[1])
+            self.assertEqual(api.calls.count(("POST", GITHUB_DEVICE_CODE_URL)), 1)
+
+    def test_cancel_during_token_exchange_never_saves_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            api = BlockingAuthorizationAPI()
+            service, store, _vault = self.make_service(Path(tmp), api=api, token="")
+            started = service.start_authorization()
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                polling = pool.submit(service.poll_authorization, started["flowId"])
+                self.assertTrue(api.token_request_started.wait(timeout=1))
+                cancelled = service.cancel_authorization(started["flowId"])
+                api.release_token_response.set()
+                with self.assertRaises(GitHubServiceError) as caught:
+                    polling.result(timeout=2)
+
+            self.assertEqual(cancelled["state"], "cancelled")
+            self.assertEqual(caught.exception.code, "authorization_missing")
+            self.assertEqual(store.token, "")
+            self.assertFalse(service.status(validate=True)["authenticated"])
+
+    def test_cancel_while_account_verification_is_running_removes_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            api = BlockingAccountVerificationAPI()
+            service, store, _vault = self.make_service(Path(tmp), api=api, token="")
+            started = service.start_authorization()
+            cancel_started = threading.Event()
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                polling = pool.submit(service.poll_authorization, started["flowId"])
+                self.assertTrue(api.account_request_started.wait(timeout=1))
+                self.assertEqual(store.token, "oauth-secret-token")
+
+                def cancel_authorization():
+                    cancel_started.set()
+                    return service.cancel_authorization(started["flowId"])
+
+                cancelling = pool.submit(cancel_authorization)
+                self.assertTrue(cancel_started.wait(timeout=1))
+                api.release_account_response.set()
+                self.assertEqual(polling.result(timeout=2)["state"], "ready")
+                self.assertEqual(cancelling.result(timeout=2)["state"], "cancelled")
+
+            self.assertEqual(store.token, "")
+            self.assertFalse(service.status(validate=True)["authenticated"])
+
+    def test_transient_token_error_resets_polling_and_can_recover(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = [1000.0]
+            api = TransientAuthorizationAPI()
+            store = MemoryTokenStore()
+            service = GitHubService(
+                runtime_root=root / "runtime",
+                config_path=root / "missing-config.toml",
+                client_id="Iv1Example123",
+                token_store=store,
+                api=api,
+                clock=lambda: now[0],
+            )
+            started = service.start_authorization()
+
+            with self.assertRaises(GitHubServiceError) as caught:
+                service.poll_authorization(started["flowId"])
+            self.assertEqual(caught.exception.code, "network_error")
+            self.assertFalse(service.pending_flows[started["flowId"]]["polling"])
+
+            now[0] += 5
+            completed = service.poll_authorization(started["flowId"])
+
+            self.assertEqual(completed["state"], "ready")
+            self.assertEqual(api.token_attempts, 2)
+            self.assertEqual(store.token, "oauth-secret-token")
 
     def test_passive_status_does_not_access_keychain(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

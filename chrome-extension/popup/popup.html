@@ -246,7 +246,11 @@
 
       <div class="github-device-panel" id="github-device-panel" hidden>
         <p>在 GitHub 授权页输入此代码</p>
-        <code id="github-user-code"></code>
+        <div class="github-code-row">
+          <code id="github-user-code"></code>
+          <button class="secondary small" id="github-copy-code" type="button" title="复制验证码">复制</button>
+        </div>
+        <p class="github-device-expiry" id="github-device-expiry"></p>
         <div class="button-row">
           <button class="primary" id="github-open-authorization" type="button">打开 GitHub</button>
           <button class="secondary" id="github-cancel-authorization" type="button">取消</button>

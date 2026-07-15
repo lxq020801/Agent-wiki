@@ -102,7 +102,7 @@ class RuntimeVersionProtocolTests(unittest.TestCase):
             extension_dir = project_root / "chrome-extension"
             extension_dir.mkdir(parents=True)
             (extension_dir / "manifest.json").write_text(
-                json.dumps({"version": "0.2.0", "apiKey": "should-not-leak"}),
+                json.dumps({"version": "0.2.1", "apiKey": "should-not-leak"}),
                 encoding="utf-8",
             )
             source = project_root / "server.py"
@@ -151,7 +151,7 @@ class RuntimeVersionProtocolTests(unittest.TestCase):
                     identity = json.loads(result.stdout.strip().splitlines()[-1])
                     serialized = json.dumps(identity, ensure_ascii=False)
 
-                    self.assertEqual(identity["productVersion"], "0.2.0")
+                    self.assertEqual(identity["productVersion"], "0.2.1")
                     self.assertEqual(identity["deployment"], {
                         "state": "legacy_path",
                         "code": "legacy_source_path",
@@ -164,7 +164,7 @@ class RuntimeVersionProtocolTests(unittest.TestCase):
     def test_status_snapshot_exposes_same_runtime_identity(self) -> None:
         runtime = {
             "product": "agent-wiki",
-            "productVersion": "0.2.0",
+            "productVersion": "0.2.1",
             "protocolVersion": 1,
             "sourceRevision": "abcdef123456",
             "buildId": "src-1234567890abcdef",
@@ -188,7 +188,7 @@ class RuntimeVersionProtocolTests(unittest.TestCase):
     def test_agent_ready_and_status_use_the_same_runtime_identity(self) -> None:
         runtime = {
             "product": "agent-wiki",
-            "productVersion": "0.2.0",
+            "productVersion": "0.2.1",
             "protocolVersion": 1,
             "sourceRevision": "abcdef123456",
             "buildId": "src-1234567890abcdef",

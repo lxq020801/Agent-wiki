@@ -61,7 +61,6 @@ let runtimeCompatibility = null;
 let runtimeSyncStarted = false;
 const pendingDerivedActions = new Map();
 let githubAuthFlow = null;
-let githubAuthPollTimer = null;
 let githubStars = [];
 let githubStarsPage = 0;
 let githubStarsHasNext = false;
@@ -697,6 +696,13 @@ function applyGithubStatus(status) {
   if (status.activeImport && status.activeImport.id !== githubImportBatch?.id) {
     applyGithubImportProgress(status.activeImport);
   }
+  if (authenticated) {
+    clearGithubAuthFlow();
+  } else if (status.activeAuthorization?.flowId) {
+    showGithubAuthorization(status.activeAuthorization);
+  } else if (githubAuthFlow) {
+    clearGithubAuthFlow();
+  }
 
   if (status.message && !authenticated && !githubAuthFlow) {
     showHint('github-hint', status.message, configured ? 'warning' : 'error', { persist: true });
@@ -706,23 +712,32 @@ function applyGithubStatus(status) {
 }
 
 function clearGithubAuthFlow() {
-  clearTimeout(githubAuthPollTimer);
-  githubAuthPollTimer = null;
   githubAuthFlow = null;
   document.getElementById('github-device-panel').hidden = true;
+  document.getElementById('github-user-code').textContent = '';
+  document.getElementById('github-device-expiry').textContent = '';
   document.getElementById('github-login').disabled = !githubIsConfigured;
 }
 
-function scheduleGithubAuthPoll(seconds) {
-  clearTimeout(githubAuthPollTimer);
-  githubAuthPollTimer = setTimeout(() => {
-    if (!githubAuthFlow?.flowId) return;
-    sendToAgent({
-      type: 'github_auth_poll',
-      requestId: `github-auth-poll-${Date.now()}`,
-      flowId: githubAuthFlow.flowId
-    });
-  }, Math.max(1, Number(seconds) || 5) * 1000);
+function githubExpiryCopy(expiresAt) {
+  const raw = Number(expiresAt || 0);
+  const milliseconds = raw > 0 && raw < 1_000_000_000_000 ? raw * 1000 : raw;
+  const remaining = Math.ceil((milliseconds - Date.now()) / 60000);
+  if (!Number.isFinite(remaining) || remaining <= 0) return '验证码已过期，请重新生成';
+  return `约 ${remaining} 分钟内有效`;
+}
+
+function showGithubAuthorization(result) {
+  githubAuthFlow = {
+    flowId: result.flowId,
+    userCode: result.userCode || githubAuthFlow?.userCode || '',
+    verificationUri: result.verificationUri || githubAuthFlow?.verificationUri || '',
+    expiresAt: result.expiresAt || githubAuthFlow?.expiresAt || 0
+  };
+  document.getElementById('github-user-code').textContent = githubAuthFlow.userCode;
+  document.getElementById('github-device-expiry').textContent = githubExpiryCopy(githubAuthFlow.expiresAt);
+  document.getElementById('github-device-panel').hidden = false;
+  document.getElementById('github-login').disabled = true;
 }
 
 function startGithubAuthorization() {
@@ -737,20 +752,11 @@ function startGithubAuthorization() {
 
 function applyGithubAuthState(result) {
   if (result.state === 'waiting_for_user') {
-    githubAuthFlow = {
-      flowId: result.flowId,
-      verificationUri: result.verificationUri,
-      expiresAt: result.expiresAt
-    };
-    document.getElementById('github-user-code').textContent = result.userCode || '';
-    document.getElementById('github-device-panel').hidden = false;
-    document.getElementById('github-login').disabled = true;
+    showGithubAuthorization(result);
     showHint('github-hint', '等待你在 GitHub 完成授权', 'warning', { persist: true });
-    scheduleGithubAuthPoll(result.interval || 5);
     return;
   }
   if (result.state === 'authorization_pending') {
-    scheduleGithubAuthPoll(result.retryAfter || 5);
     return;
   }
   if (result.state === 'ready') {
@@ -775,6 +781,33 @@ function cancelGithubAuthorization() {
 function openGithubAuthorization() {
   const url = githubAuthFlow?.verificationUri;
   if (url) chrome.tabs.create({ url });
+}
+
+async function copyGithubAuthorizationCode() {
+  const code = String(githubAuthFlow?.userCode || document.getElementById('github-user-code').textContent || '').trim();
+  if (!code) {
+    showHint('github-hint', '当前没有可复制的验证码', 'warning');
+    return;
+  }
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(code);
+    } else {
+      const input = document.createElement('textarea');
+      input.value = code;
+      input.style.position = 'fixed';
+      input.style.opacity = '0';
+      document.body.appendChild(input);
+      input.select();
+      const copied = document.execCommand('copy');
+      input.remove();
+      if (!copied) throw new Error('clipboard unavailable');
+    }
+  } catch (_err) {
+    showHint('github-hint', '复制失败，请手动选择验证码', 'error');
+    return;
+  }
+  showHint('github-hint', '验证码已复制', 'success');
 }
 
 function logoutGithub() {
@@ -1059,9 +1092,19 @@ function applyGithubError(result) {
     button.disabled = false;
     button.textContent = '检查更新';
   });
-  if (String(result.requestType || '').startsWith('github_auth')) clearGithubAuthFlow();
+  const isAuthError = String(result.requestType || '').startsWith('github_auth');
+  if (
+    isAuthError &&
+    result.flowId &&
+    githubAuthFlow?.flowId &&
+    result.flowId !== githubAuthFlow.flowId
+  ) return;
+  if (isAuthError && !result.transient) clearGithubAuthFlow();
   const retry = result.retryAfter ? `（约 ${result.retryAfter} 秒后重试）` : '';
-  showHint('github-hint', `${result.message || 'GitHub 操作失败'}${retry}`, 'error', { persist: true });
+  const message = result.transient
+    ? `${result.message || 'GitHub 网络暂时不可用'}，后台会自动重试${retry}`
+    : `${result.message || 'GitHub 操作失败'}${retry}`;
+  showHint('github-hint', message, result.transient ? 'warning' : 'error', { persist: true });
   if (result.code === 'auth_expired') requestGithubStatus();
 }
 
@@ -1964,6 +2007,7 @@ function bindGithubControls() {
   bindClick('github-login', startGithubAuthorization);
   bindClick('github-logout', logoutGithub);
   bindClick('github-open-authorization', openGithubAuthorization);
+  bindClick('github-copy-code', copyGithubAuthorizationCode);
   bindClick('github-cancel-authorization', cancelGithubAuthorization);
   bindClick('github-search', searchGithubRepositories);
   bindClick('github-load-stars', () => loadGithubStars());

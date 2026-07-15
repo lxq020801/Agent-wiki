@@ -61,6 +61,12 @@ CONTROL_MUTATION_TYPES = {
     "github_refresh_confirm",
     "github_refresh_cancel",
 }
+GITHUB_AUTH_RETRYABLE_ERRORS = {
+    "network_error",
+    "rate_limited",
+    "github_api_error",
+    "invalid_response",
+}
 
 
 def _read_product_version(project_root=None):
@@ -622,6 +628,7 @@ class LibrarianServer:
             runtime_root=self.runtime_root,
             config_path=self.runtime_root / "config.toml",
         )
+        self.github_auth_tasks = {}
         self.github_import_tasks = set()
         
     async def handle_client(self, websocket):
@@ -664,7 +671,10 @@ class LibrarianServer:
             }))
             await websocket.send(json.dumps({
                 'type': 'status_snapshot',
-                'status': await asyncio.to_thread(self.status_snapshot),
+                'status': await asyncio.to_thread(
+                    self._status_snapshot_for_client,
+                    False,
+                ),
                 'timestamp': datetime.now().isoformat()
             }, ensure_ascii=False))
             
@@ -762,7 +772,12 @@ class LibrarianServer:
             }, ensure_ascii=False))
 
         elif msg_type == 'status_request':
-            status = await asyncio.to_thread(self.status_snapshot)
+            status = await asyncio.to_thread(
+                self._status_snapshot_for_client,
+                bool(
+                    self.client_compatibility.get(websocket, {}).get("canOperate")
+                ),
+            )
             await websocket.send(json.dumps({
                 'type': 'status_snapshot',
                 'status': status,
@@ -836,6 +851,10 @@ class LibrarianServer:
     async def handle_github_message(self, websocket, msg):
         """Handle GitHub control messages without exposing OAuth credentials."""
         msg_type = str(msg.get('type') or '')
+        if msg_type == 'github_auth_cancel':
+            self._cancel_github_auth_task(str(msg.get('flowId') or ''))
+        elif msg_type == 'github_logout':
+            self._cancel_all_github_auth_tasks()
         try:
             if msg_type == 'github_status_request':
                 result = await asyncio.to_thread(self.github_service.status, validate=True)
@@ -918,12 +937,83 @@ class LibrarianServer:
             result = exc.public_payload()
             reply_type = 'github_error'
             result['requestType'] = msg_type
+            if msg_type in {'github_auth_poll', 'github_auth_cancel', 'github_logout'}:
+                self._cancel_github_auth_task(str(msg.get('flowId') or ''))
+        if reply_type != 'github_error':
+            if msg_type == 'github_status_request':
+                self._ensure_github_auth_polling(result.get('activeAuthorization'))
+            elif msg_type in {'github_auth_start', 'github_auth_poll'}:
+                if result.get('state') in {'waiting_for_user', 'authorization_pending'}:
+                    self._ensure_github_auth_polling(result)
+                else:
+                    self._cancel_github_auth_task(str(result.get('flowId') or msg.get('flowId') or ''))
         await websocket.send(json.dumps({
             'type': reply_type,
             'result': result,
             'requestId': msg.get('requestId'),
             'timestamp': datetime.now().isoformat(),
         }, ensure_ascii=False))
+
+    def _ensure_github_auth_polling(self, authorization):
+        authorization = authorization or {}
+        flow_id = str(authorization.get('flowId') or '')
+        if not flow_id:
+            return
+        current = self.github_auth_tasks.get(flow_id)
+        if current and not current.done():
+            return
+        delay = max(1, int(authorization.get('retryAfter') or authorization.get('interval') or 5))
+        task = asyncio.create_task(self._run_github_authorization(flow_id, delay))
+        self.github_auth_tasks[flow_id] = task
+
+        def remove_finished(completed):
+            if self.github_auth_tasks.get(flow_id) is completed:
+                self.github_auth_tasks.pop(flow_id, None)
+
+        task.add_done_callback(remove_finished)
+
+    def _cancel_github_auth_task(self, flow_id):
+        task = self.github_auth_tasks.pop(str(flow_id or ''), None)
+        if task and not task.done():
+            task.cancel()
+
+    def _cancel_all_github_auth_tasks(self):
+        for flow_id in list(self.github_auth_tasks):
+            self._cancel_github_auth_task(flow_id)
+
+    async def _run_github_authorization(self, flow_id, delay):
+        while True:
+            await asyncio.sleep(max(1, int(delay or 5)))
+            try:
+                result = await asyncio.to_thread(self.github_service.poll_authorization, flow_id)
+            except GitHubServiceError as exc:
+                error = exc.public_payload()
+                error['requestType'] = 'github_auth_poll'
+                error['flowId'] = flow_id
+                if exc.code in GITHUB_AUTH_RETRYABLE_ERRORS:
+                    error['transient'] = True
+                    await self.broadcast({
+                        'type': 'github_error',
+                        'result': error,
+                        'timestamp': datetime.now().isoformat(),
+                    })
+                    delay = min(60, max(5, int(exc.retry_after or (delay * 2))))
+                    continue
+                await asyncio.to_thread(self.github_service.cancel_authorization, flow_id)
+                await self.broadcast({
+                    'type': 'github_error',
+                    'result': error,
+                    'timestamp': datetime.now().isoformat(),
+                })
+                return
+            await self.broadcast({
+                'type': 'github_auth_state',
+                'result': result,
+                'timestamp': datetime.now().isoformat(),
+            })
+            if result.get('state') == 'ready':
+                return
+            delay = result.get('retryAfter') or delay
 
     async def _run_github_import(self, batch_id):
         batch = self.github_service.import_batches.get(batch_id)
@@ -2275,6 +2365,19 @@ task_concurrency = {int(task_concurrency)}
             'tasks': self.task_status_snapshot(),
             'github': self.github_service.status(validate=False),
         }
+
+    def _status_snapshot_for_client(self, include_active_authorization):
+        snapshot = self.status_snapshot()
+        if include_active_authorization:
+            return snapshot
+        github = snapshot.get('github') or {}
+        if not github.get('activeAuthorization'):
+            return snapshot
+        public_snapshot = dict(snapshot)
+        public_github = dict(github)
+        public_github.pop('activeAuthorization', None)
+        public_snapshot['github'] = public_github
+        return public_snapshot
 
     def discover_and_persist_vault(self, hint=''):
         discovery = discover_vault(

@@ -13,6 +13,8 @@ for (const id of [
   'github-settings',
   'github-login',
   'github-device-panel',
+  'github-copy-code',
+  'github-device-expiry',
   'github-auto-star',
   'github-search-results',
   'github-stars-list',
@@ -28,7 +30,6 @@ for (const id of [
 
 for (const type of [
   'github_auth_start',
-  'github_auth_poll',
   'github_auth_cancel',
   'github_logout',
   'github_repository_search',
@@ -45,6 +46,12 @@ for (const type of [
 assert.doesNotMatch(js, /chrome\.storage\.(?:local|session)\.(?:set|get)\([^\n]*(?:githubToken|accessToken|deviceCode)/i);
 assert.doesNotMatch(html + js, /github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{20,}/);
 assert.match(js, /function applyGithubStatus[\s\S]*status\.state === 'unchecked'/);
+assert.match(js, /status\.activeAuthorization/);
+assert.match(js, /navigator\.clipboard\?\.writeText/);
+assert.match(js, /document\.execCommand\('copy'\)/);
+assert.doesNotMatch(js, /type: 'github_auth_poll'/);
+assert.match(js, /isAuthError && !result\.transient/);
+assert.match(js, /后台会自动重试/);
 assert.doesNotMatch(js, /function applyModelStatus[\s\S]*?status\.state === 'unchecked'[\s\S]*?function applyVideoStatus/);
 assert.match(js, /githubIntegration\?\.autoStar/);
 assert.match(js, /if \(page <= 1\) githubSelected\.clear\(\)/);

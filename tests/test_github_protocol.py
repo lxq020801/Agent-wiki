@@ -25,6 +25,23 @@ class FakeWebSocket:
         self.messages.append(json.loads(text))
 
 
+class ScriptedWebSocket(FakeWebSocket):
+    def __init__(self, incoming) -> None:
+        super().__init__()
+        self.incoming = iter(json.dumps(item) for item in incoming)
+        self.remote_address = ("127.0.0.1", 12345)
+        self.request_headers = {}
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self.incoming)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
+
+
 class FakeGitHubService:
     def __init__(self) -> None:
         self.import_batches = {}
@@ -50,6 +67,56 @@ class FakeGitHubService:
 
     def public_batch(self, batch):
         return {key: value for key, value in batch.items() if key not in {"items", "cancelled"}}
+
+
+class BackgroundAuthGitHubService(FakeGitHubService):
+    def __init__(self, *, transient_failure=False) -> None:
+        super().__init__()
+        self.poll_calls = 0
+        self.transient_failure = transient_failure
+
+    def start_authorization(self):
+        return {
+            "ok": True,
+            "state": "waiting_for_user",
+            "flowId": "flow-1",
+            "userCode": "ABCD-EFGH",
+            "verificationUri": "https://github.com/login/device",
+            "expiresAt": 9999999999,
+            "interval": 5,
+        }
+
+    def poll_authorization(self, flow_id):
+        self.poll_calls += 1
+        if self.transient_failure and self.poll_calls == 1:
+            raise GitHubServiceError("network_error", "temporary network error")
+        return {
+            "ok": True,
+            "state": "ready",
+            "flowId": flow_id,
+            "authenticated": True,
+            "account": {"login": "octocat"},
+        }
+
+
+class ActiveAuthorizationGitHubService(FakeGitHubService):
+    def status(self, *, validate=False):
+        return {
+            "ok": False,
+            "state": "logged_out",
+            "configured": {"configured": True},
+            "authenticated": False,
+            "account": None,
+            "settings": {"autoStar": False},
+            "activeAuthorization": {
+                "state": "waiting_for_user",
+                "flowId": "flow-secret",
+                "userCode": "ABCD-EFGH",
+                "verificationUri": "https://github.com/login/device",
+                "expiresAt": 9999999999,
+                "interval": 5,
+            },
+        }
 
 
 class BatchGitHubService(FakeGitHubService):
@@ -118,6 +185,83 @@ class GitHubProtocolTests(unittest.TestCase):
         self.assertNotIn("access_token", serialized)
         self.assertNotIn("authorization", serialized)
         self.assertEqual(payload["result"]["page"], 2)
+
+    def test_authorization_polling_continues_after_popup_disconnects(self) -> None:
+        async def scenario() -> None:
+            service = BackgroundAuthGitHubService()
+            server = LibrarianServer(enable_task_runner=False, github_service=service)
+            socket = FakeWebSocket()
+            server.clients.add(socket)
+            server.client_compatibility[socket] = {"state": "compatible", "canOperate": True}
+
+            with mock.patch(
+                "server.websocket_server.asyncio.sleep",
+                new=mock.AsyncMock(return_value=None),
+            ):
+                await server.handle_message(socket, {
+                    "type": "github_auth_start",
+                    "requestId": "auth-start",
+                })
+                task = server.github_auth_tasks["flow-1"]
+                server.clients.clear()
+                await task
+
+            self.assertEqual(service.poll_calls, 1)
+            self.assertTrue(task.done())
+            self.assertEqual(socket.messages[-1]["type"], "github_auth_state")
+            self.assertEqual(socket.messages[-1]["result"]["state"], "waiting_for_user")
+
+        asyncio.run(scenario())
+
+    def test_authorization_polling_retries_transient_network_errors(self) -> None:
+        async def scenario() -> None:
+            service = BackgroundAuthGitHubService(transient_failure=True)
+            server = LibrarianServer(enable_task_runner=False, github_service=service)
+            socket = FakeWebSocket()
+            server.clients.add(socket)
+            server.client_compatibility[socket] = {"state": "compatible", "canOperate": True}
+
+            with mock.patch(
+                "server.websocket_server.asyncio.sleep",
+                new=mock.AsyncMock(return_value=None),
+            ):
+                await server.handle_message(socket, {
+                    "type": "github_auth_start",
+                    "requestId": "auth-start",
+                })
+                task = server.github_auth_tasks["flow-1"]
+                server.clients.clear()
+                await task
+
+            self.assertEqual(service.poll_calls, 2)
+            self.assertTrue(task.done())
+
+        asyncio.run(scenario())
+
+    def test_initial_status_hides_active_authorization_until_handshake(self) -> None:
+        server = LibrarianServer(
+            enable_task_runner=False,
+            github_service=ActiveAuthorizationGitHubService(),
+        )
+        socket = ScriptedWebSocket([
+            {"type": "status_request"},
+            {
+                "type": "handshake",
+                "client": "agent-wiki-extension",
+                "product": "agent-wiki",
+                "version": "0.2.1",
+                "protocolVersion": 1,
+            },
+            {"type": "status_request"},
+        ])
+
+        asyncio.run(server.handle_client(socket))
+
+        statuses = [item["status"]["github"] for item in socket.messages if item["type"] == "status_snapshot"]
+        self.assertEqual(len(statuses), 3)
+        self.assertNotIn("activeAuthorization", statuses[0])
+        self.assertNotIn("activeAuthorization", statuses[1])
+        self.assertEqual(statuses[2]["activeAuthorization"]["userCode"], "ABCD-EFGH")
 
     def test_general_config_update_preserves_github_client_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

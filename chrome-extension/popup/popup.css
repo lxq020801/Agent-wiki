@@ -863,14 +863,28 @@ textarea:focus {
   font-size: 11px;
 }
 
+.github-code-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 42px;
+  margin: 8px 0 4px;
+}
+
 .github-device-panel code {
   display: block;
-  margin: 8px 0 10px;
+  margin: 0;
   color: var(--text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 22px;
   font-weight: 750;
   letter-spacing: 0;
+}
+
+.github-device-panel .github-device-expiry {
+  min-height: 16px;
+  margin: 0 0 8px;
 }
 
 .toggle-row,
