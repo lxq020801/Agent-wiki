@@ -68,6 +68,19 @@ class FakeGitHubService:
     def public_batch(self, batch):
         return {key: value for key, value in batch.items() if key not in {"items", "cancelled"}}
 
+    def import_batch(self, batch_id):
+        return {
+            "id": batch_id,
+            "state": "completed",
+            "total": 1,
+            "completed": 1,
+            "succeeded": 1,
+            "failed": 0,
+            "existing": 0,
+            "cancelled": 0,
+            "items": [],
+        }
+
 
 class BackgroundAuthGitHubService(FakeGitHubService):
     def __init__(self, *, transient_failure=False) -> None:
@@ -160,12 +173,33 @@ class BatchGitHubService(FakeGitHubService):
         super().__init__()
         self.cancel_after_first = cancel_after_first
         self.calls = 0
+        self.cancel_requested = False
+
+    def begin_import_batch(self, batch_id):
+        batch = self.import_batches[batch_id]
+        batch["state"] = "running"
+        return self.public_batch(batch)
+
+    def queued_import_items(self, batch_id):
+        return [
+            {"taskId": item["taskId"], "repository": item["repository"]}
+            for item in self.import_batches[batch_id]["items"]
+            if item["state"] == "queued"
+        ]
+
+    def begin_import_item(self, batch_id, task_id):
+        if self.cancel_requested:
+            return None
+        for item in self.import_batches[batch_id]["items"]:
+            if item["taskId"] == task_id and item["state"] == "queued":
+                item["state"] = "running"
+                return item
+        return None
 
     def ingest_repository(self, identity, *, ingest_intent):
         self.calls += 1
-        batch = next(iter(self.import_batches.values()))
         if self.cancel_after_first and self.calls == 1:
-            batch["cancelled"] = True
+            self.cancel_requested = True
         if identity["id"] == 2:
             raise GitHubServiceError("not_found", "仓库不存在")
         return {
@@ -173,6 +207,46 @@ class BatchGitHubService(FakeGitHubService):
             "state": "created",
             "repository": {"id": identity["id"], "fullName": identity["fullName"]},
         }
+
+    def _recount(self, batch):
+        batch["completed"] = sum(item["state"] in {"succeeded", "failed", "existing", "cancelled"} for item in batch["items"])
+        batch["succeeded"] = sum(item["state"] == "succeeded" for item in batch["items"])
+        batch["failed"] = sum(item["state"] == "failed" for item in batch["items"])
+        batch["cancelled"] = sum(item["state"] == "cancelled" for item in batch["items"])
+
+    def complete_import_item(self, batch_id, task_id, result):
+        batch = self.import_batches[batch_id]
+        for item in batch["items"]:
+            if item["taskId"] == task_id:
+                item["state"] = "succeeded"
+                item["result"] = result
+        batch["results"].append(result)
+        if self.cancel_requested:
+            for item in batch["items"]:
+                if item["state"] == "queued":
+                    item["state"] = "cancelled"
+        self._recount(batch)
+        return self.public_batch(batch)
+
+    def fail_import_item(self, batch_id, task_id, *, code, message, repository):
+        batch = self.import_batches[batch_id]
+        result = {"ok": False, "code": code, "message": message, "repository": repository}
+        for item in batch["items"]:
+            if item["taskId"] == task_id:
+                item["state"] = "failed"
+                item["result"] = result
+        batch["results"].append(result)
+        self._recount(batch)
+        return self.public_batch(batch)
+
+    def finish_import_batch(self, batch_id):
+        batch = self.import_batches[batch_id]
+        batch["state"] = "cancelled" if self.cancel_requested else "completed"
+        self._recount(batch)
+        return self.public_batch(batch)
+
+    def public_batch(self, batch):
+        return dict(batch)
 
 
 class GitHubProtocolTests(unittest.TestCase):
@@ -187,9 +261,9 @@ class GitHubProtocolTests(unittest.TestCase):
             "failed": 0,
             "cancelled": False,
             "items": [
-                {"id": 1, "fullName": "openai/one"},
-                {"id": 2, "fullName": "openai/missing"},
-                {"id": 3, "fullName": "openai/three"},
+                {"taskId": "item-1", "state": "queued", "repository": {"id": 1, "fullName": "openai/one"}},
+                {"taskId": "item-2", "state": "queued", "repository": {"id": 2, "fullName": "openai/missing"}},
+                {"taskId": "item-3", "state": "queued", "repository": {"id": 3, "fullName": "openai/three"}},
             ],
             "results": [],
         }
@@ -221,6 +295,21 @@ class GitHubProtocolTests(unittest.TestCase):
         self.assertNotIn("access_token", serialized)
         self.assertNotIn("authorization", serialized)
         self.assertEqual(payload["result"]["page"], 2)
+
+    def test_import_status_returns_durable_batch_snapshot(self) -> None:
+        server = LibrarianServer(enable_task_runner=False, github_service=FakeGitHubService())
+        socket = FakeWebSocket()
+        server.clients.add(socket)
+        server.client_compatibility[socket] = {"state": "compatible", "canOperate": True}
+        asyncio.run(server.handle_message(socket, {
+            "type": "github_import_status",
+            "batchId": "batch-persisted",
+            "requestId": "status-1",
+        }))
+        payload = socket.messages[-1]
+        self.assertEqual(payload["type"], "github_import_progress")
+        self.assertEqual(payload["result"]["id"], "batch-persisted")
+        self.assertEqual(payload["result"]["state"], "completed")
 
     def test_authorization_polling_continues_after_popup_disconnects(self) -> None:
         async def scenario() -> None:
@@ -470,8 +559,9 @@ class GitHubProtocolTests(unittest.TestCase):
         asyncio.run(server._run_github_import(batch["id"]))
 
         self.assertEqual(batch["state"], "cancelled")
-        self.assertEqual(batch["completed"], 1)
+        self.assertEqual(batch["completed"], 3)
         self.assertEqual(batch["succeeded"], 1)
+        self.assertEqual(batch["cancelled"], 2)
         self.assertEqual(service.calls, 1)
 
 

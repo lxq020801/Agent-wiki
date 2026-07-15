@@ -56,6 +56,7 @@ CONTROL_MUTATION_TYPES = {
     "github_repository_search",
     "github_stars_request",
     "github_import_stars",
+    "github_import_status",
     "github_import_cancel",
     "github_refresh_check",
     "github_refresh_confirm",
@@ -99,7 +100,13 @@ def _source_revision(project_root):
 
 def _source_build_id(server_source):
     digest = hashlib.sha256()
-    sources = [Path(server_source), Path(server_source).with_name("github_service.py")]
+    source = Path(server_source)
+    sources = [
+        source,
+        source.with_name("github_service.py"),
+        source.with_name("github_asset_pipeline.py"),
+        source.with_name("github_tasks.py"),
+    ]
     loaded = False
     for source in sources:
         try:
@@ -902,11 +909,19 @@ class LibrarianServer:
                 result = await asyncio.to_thread(
                     self.github_service.create_import_batch,
                     msg.get('repositories'),
+                    request_key=str(msg.get('requestId') or ''),
                 )
                 reply_type = 'github_import_accepted'
-                task = asyncio.create_task(self._run_github_import(result['id']))
-                self.github_import_tasks.add(task)
-                task.add_done_callback(self.github_import_tasks.discard)
+                if result.get('state') in {'queued', 'running'}:
+                    task = asyncio.create_task(self._run_github_import(result['id']))
+                    self.github_import_tasks.add(task)
+                    task.add_done_callback(self.github_import_tasks.discard)
+            elif msg_type == 'github_import_status':
+                result = await asyncio.to_thread(
+                    self.github_service.import_batch,
+                    str(msg.get('batchId') or ''),
+                )
+                reply_type = 'github_import_progress'
             elif msg_type == 'github_import_cancel':
                 result = await asyncio.to_thread(
                     self.github_service.cancel_import_batch,
@@ -1015,19 +1030,26 @@ class LibrarianServer:
             delay = result.get('retryAfter') or delay
 
     async def _run_github_import(self, batch_id):
-        batch = self.github_service.import_batches.get(batch_id)
-        if not batch:
+        try:
+            batch = await asyncio.to_thread(self.github_service.begin_import_batch, batch_id)
+        except GitHubServiceError:
             return
-        batch['state'] = 'running'
         await self.broadcast({
             'type': 'github_import_progress',
-            'result': self.github_service.public_batch(batch),
+            'result': batch,
             'timestamp': datetime.now().isoformat(),
         })
-        for identity in list(batch.get('items') or []):
-            if batch.get('cancelled'):
-                batch['state'] = 'cancelled'
-                break
+        queued = await asyncio.to_thread(self.github_service.queued_import_items, batch_id)
+        for queued_item in queued:
+            task_id = str(queued_item.get('taskId') or '')
+            identity = queued_item.get('repository') or {}
+            started = await asyncio.to_thread(
+                self.github_service.begin_import_item,
+                batch_id,
+                task_id,
+            )
+            if not started:
+                continue
             try:
                 result = await asyncio.to_thread(
                     self.github_service.ingest_repository,
@@ -1035,36 +1057,39 @@ class LibrarianServer:
                     ingest_intent='manual',
                 )
             except GitHubServiceError as exc:
-                item = {
-                    'ok': False,
-                    'repository': identity,
-                    'code': exc.code,
-                    'message': exc.message,
-                }
-                batch['failed'] += 1
+                batch = await asyncio.to_thread(
+                    self.github_service.fail_import_item,
+                    batch_id,
+                    task_id,
+                    code=exc.code,
+                    message=exc.message,
+                    repository=identity,
+                )
             except Exception as exc:
-                item = {
-                    'ok': False,
-                    'repository': identity,
-                    'code': 'import_failed',
-                    'message': type(exc).__name__,
-                }
-                batch['failed'] += 1
+                batch = await asyncio.to_thread(
+                    self.github_service.fail_import_item,
+                    batch_id,
+                    task_id,
+                    code='import_failed',
+                    message=type(exc).__name__,
+                    repository=identity,
+                )
             else:
-                item = result
-                batch['succeeded'] += 1
-            batch['completed'] += 1
-            batch['results'].append(item)
+                batch = await asyncio.to_thread(
+                    self.github_service.complete_import_item,
+                    batch_id,
+                    task_id,
+                    result,
+                )
             await self.broadcast({
                 'type': 'github_import_progress',
-                'result': self.github_service.public_batch(batch),
+                'result': batch,
                 'timestamp': datetime.now().isoformat(),
             })
-        if batch['state'] != 'cancelled':
-            batch['state'] = 'completed'
+        batch = await asyncio.to_thread(self.github_service.finish_import_batch, batch_id)
         await self.broadcast({
             'type': 'github_import_progress',
-            'result': self.github_service.public_batch(batch),
+            'result': batch,
             'timestamp': datetime.now().isoformat(),
         })
 
@@ -2603,6 +2628,11 @@ task_concurrency = {int(task_concurrency)}
         log(f"[Server] 任务并发数: {self.task_concurrency}")
         self.ensure_task_worker()
         await self.enqueue_pending_tasks()
+        await asyncio.to_thread(self.github_service.resume_pending_asset_events)
+        for batch_id in await asyncio.to_thread(self.github_service.pending_import_batch_ids):
+            task = asyncio.create_task(self._run_github_import(batch_id))
+            self.github_import_tasks.add(task)
+            task.add_done_callback(self.github_import_tasks.discard)
         
         async with websockets.serve(self.handle_client, self.host, self.port):
             log(f"[Server] 服务器已启动，等待连接...")

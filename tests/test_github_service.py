@@ -27,6 +27,7 @@ from server.github_service import (
     MacOSKeychainTokenStore,
     register_derived_repository,
 )
+from server.github_asset_pipeline import GitHubAssetPipeline
 
 
 class MemoryTokenStore:
@@ -239,12 +240,25 @@ class GitHubServiceTests(unittest.TestCase):
         config = root / "config.toml"
         config.write_text(f'[vault]\npath = "{vault}"\n', encoding="utf-8")
         store = MemoryTokenStore(token)
+
+        def analyze(material: dict, cleaned_readme: str, ingest_intent: str) -> str:
+            repo = material["public"]
+            return (
+                f"## 简洁概括\n{repo['fullName']} 是一个用于 API 与智能体工作流的开源项目。\n\n"
+                "## 完整内容整理\n"
+                f"仓库描述：{repo['description']}\n\n{cleaned_readme or '仓库未提供 README 正文。'}\n\n"
+                "## AI 分析\n"
+                "> 以下内容由 AI 生成，仅依据当前 GitHub 来源。\n\n"
+                f"基于当前来源，这个项目可能适合需要 {repo['language'] or '多语言'} 工具链的场景。"
+            )
+
         service = GitHubService(
             runtime_root=root / "runtime",
             config_path=config,
             client_id="Iv1Example123",
             token_store=store,
             api=api or FakeAPI(),
+            asset_pipeline=GitHubAssetPipeline(config_path=config, analyzer=analyze),
         )
         return service, store, vault
 
@@ -797,15 +811,15 @@ class GitHubServiceTests(unittest.TestCase):
             self.assertTrue(result["autoStar"]["attempted"])
             self.assertFalse(result["autoStar"]["ok"])
 
-    def test_stars_import_does_not_repeat_star_and_derived_hook_does(self) -> None:
+    def test_asset_creation_stars_once_across_import_and_derived_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             api = FakeAPI()
             service, store, vault = self.make_service(root, api=api)
             service.update_settings(auto_star=True)
             imported = service.ingest_repository({"id": 101, "fullName": "openai/example"})
-            self.assertFalse(imported["autoStar"]["attempted"])
-            self.assertNotIn(("PUT", "/user/starred/openai/example"), api.calls)
+            self.assertTrue(imported["autoStar"]["attempted"])
+            self.assertEqual(api.calls.count(("PUT", "/user/starred/openai/example")), 1)
 
             asset = vault / imported["assetPath"]
             hooked = register_derived_repository(
@@ -816,8 +830,8 @@ class GitHubServiceTests(unittest.TestCase):
                 token_store=store,
                 api=api,
             )
-            self.assertTrue(hooked["autoStar"]["attempted"])
-            self.assertIn(("PUT", "/user/starred/openai/example"), api.calls)
+            self.assertFalse(hooked["autoStar"]["attempted"])
+            self.assertEqual(api.calls.count(("PUT", "/user/starred/openai/example")), 1)
             self.assertFalse((vault / ".git").exists())
 
     def test_auth_expiry_deletes_keychain_token(self) -> None:
