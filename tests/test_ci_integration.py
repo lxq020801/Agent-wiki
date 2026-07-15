@@ -38,6 +38,121 @@ def unused_loopback_port() -> int:
 
 
 class BootstrapIntegrationTests(unittest.TestCase):
+    def test_explicit_vault_never_falls_back_to_obsidian_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sandbox = Path(directory)
+            runtime = sandbox / "runtime"
+            home = sandbox / "home"
+            home.mkdir()
+            vault = sandbox / "explicit-vault"
+            vault.mkdir()
+            with mock.patch.dict(
+                os.environ,
+                {"AGENT_WIKI_HOME": str(runtime), "HOME": str(home)},
+            ):
+                import install.bootstrap as bootstrap_module
+
+                bootstrap_module = importlib.reload(bootstrap_module)
+
+            with (
+                mock.patch.object(bootstrap_module, "ensure_douyin_venv"),
+                mock.patch.object(bootstrap_module, "check_ffmpeg"),
+                mock.patch.object(
+                    bootstrap_module,
+                    "discover_vault",
+                    side_effect=AssertionError("explicit vault must not auto-discover"),
+                ),
+            ):
+                result = bootstrap_module.bootstrap(
+                    install_deps=False,
+                    vault_path=vault,
+                    verify_websocket=False,
+                )
+
+            self.assertTrue(result.ok)
+            self.assertIn(f"explicit vault configured: {vault.resolve()}", result.actions)
+            self.assertIn(f"vault selected by explicit config: {vault.resolve()}", result.actions)
+            self.assertIn("WebSocket health check skipped by explicit isolation option", result.actions)
+            self.assertTrue((vault / "知识资产" / "知识入库").is_dir())
+            self.assertTrue((vault / "index.md").is_file())
+
+    def test_invalid_explicit_vault_reports_without_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sandbox = Path(directory)
+            runtime = sandbox / "runtime"
+            home = sandbox / "home"
+            home.mkdir()
+            runtime.mkdir()
+            config = runtime / "config.toml"
+            config.write_text(
+                f'[vault]\npath = "{sandbox / "missing-vault"}"\n',
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"AGENT_WIKI_HOME": str(runtime), "HOME": str(home)},
+            ):
+                import install.bootstrap as bootstrap_module
+
+                bootstrap_module = importlib.reload(bootstrap_module)
+
+            result = bootstrap_module.CheckResult()
+            with mock.patch.object(
+                bootstrap_module,
+                "discover_vault",
+                side_effect=AssertionError("invalid explicit vault must not auto-discover"),
+            ):
+                bootstrap_module.check_vault(result)
+
+            self.assertTrue(any(
+                "automatic discovery was not used" in item
+                for item in result.missing_user_actions
+            ))
+
+    def test_configured_obsidian_internal_path_is_rejected_before_scoring(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sandbox = Path(directory)
+            runtime = sandbox / "runtime"
+            home = sandbox / "home"
+            home.mkdir()
+            internal = sandbox / "vault" / ".ObSiDiAn" / "looks-like-vault"
+            (internal / "知识资产").mkdir(parents=True)
+            (internal / "index.md").write_text("# 知识库索引\n", encoding="utf-8")
+            runtime.mkdir()
+            (runtime / "config.toml").write_text(
+                f'[vault]\npath = "{internal}"\n',
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"AGENT_WIKI_HOME": str(runtime), "HOME": str(home)},
+            ):
+                import install.bootstrap as bootstrap_module
+
+                bootstrap_module = importlib.reload(bootstrap_module)
+
+            result = bootstrap_module.CheckResult()
+            with mock.patch.object(
+                bootstrap_module,
+                "discover_vault",
+                side_effect=AssertionError(".obsidian path must not auto-discover"),
+            ):
+                bootstrap_module.check_vault(result)
+
+            self.assertTrue(any(
+                "points inside .obsidian" in item
+                for item in result.missing_user_actions
+            ))
+            self.assertFalse((internal / "templates").exists())
+            self.assertFalse((internal / "系统记录").exists())
+
+    def test_empty_cli_vault_argument_is_rejected_before_bootstrap(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            bootstrap_module = importlib.import_module("install.bootstrap")
+            bootstrap_module.main(["--vault", ""])
+
+        self.assertEqual(caught.exception.code, 2)
+
     def test_bootstrap_is_idempotent_in_temporary_agent_wiki_home(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             sandbox = Path(directory)
@@ -153,9 +268,9 @@ class WebSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
         initial_status = await self.receive_json()
 
         self.assertEqual(ready["type"], "agent_ready")
-        self.assertEqual(ready["version"], "0.1.1")
+        self.assertEqual(ready["version"], "0.2.0")
         self.assertEqual(ready["runtime"]["product"], "agent-wiki")
-        self.assertEqual(ready["runtime"]["productVersion"], "0.1.1")
+        self.assertEqual(ready["runtime"]["productVersion"], "0.2.0")
         self.assertEqual(ready["runtime"]["protocolVersion"], 1)
         self.assertTrue(
             {"config_sync", "extension_task_ingest", "task_status"}
@@ -184,7 +299,7 @@ class WebSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "type": "handshake",
             "client": "agent-wiki-background",
             "product": "agent-wiki",
-            "version": "0.1.1",
+            "version": "0.2.0",
             "protocolVersion": 1,
         }))
         handshake_ack = await self.receive_json()

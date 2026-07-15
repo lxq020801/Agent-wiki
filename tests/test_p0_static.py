@@ -36,6 +36,7 @@ analyzer = "doubao-seed-2-0-lite-260428"
 analyzer_fallback = "doubao-seed-2-0-mini-260428"
 
 [analysis]
+video_fps_mode = "fixed_3"
 default_quality = "balanced"
 balanced_target_frames = 240
 quality_target_frames = 1250
@@ -63,6 +64,9 @@ port = 8765
     assert cfg.vault_relative_root == "知识资产/知识入库"
     assert cfg.default_quality == "quality"
     assert cfg.strategy_model == "doubao-seed-2-0-mini-260428"
+    assert cfg.video_fps_mode == "fixed_3"
+    assert cfg.fps_min == 2.0
+    assert cfg.quality_params("quality")["fps_mode"] == "fixed_3"
 
 
 def test_config_loader_rejects_invalid_ark_endpoints(tmp: Path) -> None:
@@ -376,11 +380,42 @@ class FakeImageResult:
     truncated: bool = False
 
 
+def _fake_config(tmp: Path, vault: Path, runtime_name: str = "test-runtime"):
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from config_loader import Config
+
+    runtime = tmp / runtime_name
+    runtime.mkdir(parents=True, exist_ok=True)
+    return Config(
+        ark_api_key="test",
+        ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
+        analyzer_model="doubao-seed-2-0-lite-260428",
+        analyzer_fallback="doubao-seed-2-0-mini-260428",
+        strategy_model="doubao-seed-2-0-mini-260428",
+        default_quality="quality",
+        balanced_target_frames=240,
+        quality_target_frames=1250,
+        fps_min=0.2,
+        fps_max=5.0,
+        file_active_timeout_sec=120,
+        cookie_path=runtime / "cookie" / "douyin.txt",
+        vault_path=vault,
+        vault_relative_root="知识资产/知识入库",
+        server_enabled=True,
+        server_host="127.0.0.1",
+        server_port=8765,
+        config_file=runtime / "config.toml",
+    )
+
+
 def _derived_candidate_json(*, name: str = "LangGraph", url: str = "https://github.com/langchain-ai/langgraph") -> str:
     return json.dumps({
         "candidates": [
             {
                 "name": name,
+                "subject_role": "primary",
                 "target_type": "github_project",
                 "target_url": url,
                 "subtype": "",
@@ -405,7 +440,7 @@ def _derived_candidate_json(*, name: str = "LangGraph", url: str = "https://gith
     }, ensure_ascii=False)
 
 
-def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
+def test_derive_strategy_keeps_all_primary_candidates_dedupes_and_redacts(tmp: Path) -> None:
     import sys
 
     os.environ["AGENT_WIKI_HOME"] = str(tmp / "derive-runtime")
@@ -434,6 +469,7 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
     candidates = [
         {
             "name": "LangGraph",
+            "subject_role": "primary",
             "target_type": "github_project",
             "target_url": "https://github.com/langchain-ai/langgraph/tree/main?utm_source=douyin",
             "reason": "父视频用它解释 Agent Harness 状态图。",
@@ -443,6 +479,7 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
         },
         {
             "name": "LangGraph duplicate",
+            "subject_role": "primary",
             "target_type": "github_project",
             "target_url": "https://github.com/langchain-ai/langgraph/issues/1",
             "reason": "重复线索，分数更低，应被同源去重。",
@@ -454,11 +491,13 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
     for index in range(9):
         candidates.append({
             "name": f"Official API Doc {index}",
+            "subject_role": "primary",
             "target_type": "official_doc",
             "target_url": f"https://example.com/docs/api/{index}?utm_campaign=x",
             "subtype": "api_doc",
             "reason": f"第 {index} 个官方文档线索，用于核验 API 参数。",
             "evidence": [f"时间码 0{index}:10 出现文档名"],
+            "confidence": 0.9,
             "scores": high_scores,
             "requires_confirmation": False,
         })
@@ -503,7 +542,8 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
     )
 
     assert decision["enabled"] is True
-    assert len(decision["items"]) <= 3
+    assert len(decision["items"]) == 10
+    assert decision["limits"] == {"candidates": None}
     assert decision["counts"]["suppressed"] >= 1
     assert len({item["dedupe_key"] for item in decision["items"]}) == len(decision["items"])
     existing_items = [
@@ -518,7 +558,7 @@ def test_derive_strategy_scores_limits_dedupes_and_redacts(tmp: Path) -> None:
     assert all(item.get("execution_status") != "queued" for item in decision["items"])
 
     public = public_derived_tasks(decision)
-    assert len(public) <= 3
+    assert len(public) == 10
     assert all(item["status"] in {"candidate", "existing_related"} for item in public)
     assert all(item["decision"] == "candidate" for item in public)
     log_text = (tmp / "derive-runtime" / "logs" / "derive-strategy-events.jsonl").read_text(encoding="utf-8")
@@ -570,6 +610,7 @@ def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp
         "candidates": [
             {
                 "name": "LangGraph",
+                "subject_role": "primary",
                 "target_type": "github_project",
                 "mentioned_context": "视频说 LangGraph 用于 Agent 状态图和工作流编排。",
                 "reason": "这是父视频方法可执行化的关键项目。",
@@ -580,6 +621,7 @@ def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp
             },
             {
                 "name": "Some API Docs",
+                "subject_role": "primary",
                 "target_type": "official_doc",
                 "mentioned_context": "视频提到某个 API，但没有给链接。",
                 "reason": "需要官方文档核验。",
@@ -635,6 +677,7 @@ def test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp: Path) -> No
         "candidates": [
             {
                 "name": "Official Docs",
+                "subject_role": "primary",
                 "target_type": "official_doc",
                 "target_url": "https://docs.example.com/api?token=secret&utm_source=x",
                 "reason": "需要核验 API 参数。",
@@ -644,6 +687,7 @@ def test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp: Path) -> No
             },
             {
                 "name": "Credential Repo",
+                "subject_role": "primary",
                 "target_type": "github_project",
                 "target_url": "https://user:pass@github.com/langchain-ai/langgraph",
                 "reason": "视频说它用于状态图。",
@@ -683,12 +727,144 @@ def test_knowledge_prompts_do_not_force_github_manual_confirmation() -> None:
     image_prompt = (SCRIPTS / "prompts" / "image_post_knowledge_ingest.md").read_text(encoding="utf-8")
     for prompt in (video_prompt, image_prompt):
         assert '"requires_confirmation": false' in prompt
-        assert "最多给 `3` 个强候选" in prompt
-        assert "默认不要生成派生候选" in prompt
-        assert "高置信 GitHub 项目候选可以设为 `false`" in prompt
-        assert "由执行层通过 GitHub API + README 解析" in prompt
+        assert "不设候选数量上限" in prompt
+        assert "主要介绍对象" in prompt
+        assert "顺带提及" in prompt
+        assert "案例" in prompt
+        assert "即使缺 URL，也可以设为 `false`" in prompt
+        assert "GitHub API 搜索解析" in prompt
+        assert "## 简洁概括" in prompt
+        assert "## 完整内容整理" in prompt
+        assert "## AI 分析" in prompt
+        assert '"subject_role": "primary"' in prompt
         assert '"evidence_strength": 5' in prompt
         assert '"ambiguity_inverse": 4' in prompt
+
+
+def test_derive_strategy_keeps_four_primary_projects_and_suppresses_incidental(tmp: Path) -> None:
+    import sys
+
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "four-project-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    from derive_strategy import derive_tasks_from_analysis, public_derived_tasks
+
+    scores = {
+        "knowledge_value": 5,
+        "parent_dependency": 5,
+        "evidence_strength": 5,
+        "actionability": 5,
+        "freshness_risk": 4,
+        "novelty": 5,
+        "asset_fit": 5,
+        "cost_risk_inverse": 5,
+        "ambiguity_inverse": 4,
+    }
+    names = ["ChatCut", "video-use", "HyperFrames", "Remotion"]
+    candidates = [
+        {
+            "name": name,
+            "subject_role": "primary",
+            "target_type": "github_project",
+            "parent_context": f"视频把 {name} 作为案例逐一重点介绍和演示。",
+            "reason": f"{name} 是视频的主要介绍对象。",
+            "evidence": [f"画面和口播连续展示 {name} 的功能与使用方式"],
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "scores": scores,
+        }
+        for name in names
+    ]
+    candidates.append({
+        "name": "FFmpeg",
+        "subject_role": "mentioned",
+        "target_type": "github_project",
+        "parent_context": "视频只在说明依赖时顺带提及 FFmpeg。",
+        "reason": "这是背景依赖，不是主要介绍对象。",
+        "evidence": ["安装命令中出现一次"],
+        "confidence": 0.95,
+        "scores": scores,
+    })
+    analysis = "## 派生决策 JSON\n```json\n" + json.dumps(
+        {"candidates": candidates}, ensure_ascii=False
+    ) + "\n```"
+    vault = tmp / "four-project-vault"
+    vault.mkdir()
+    decision = derive_tasks_from_analysis(
+        analysis,
+        source_id="four-projects",
+        source_url="https://v.douyin.com/four-projects/",
+        source_media="douyin_video",
+        ingest_intent="knowledge_ingest",
+        vault_path=vault,
+        task_id="four-project-task",
+    )
+
+    public = public_derived_tasks(decision)
+    assert [item["name"] for item in public] == names
+    assert all(item["autoEligible"] for item in public)
+    assert all(item["status"] == "auto_ready" for item in public)
+    assert decision["counts"]["retained"] == 4
+    assert decision["counts"]["suppressed"] == 1
+    audit_path = tmp / "four-project-runtime" / decision["audit_artifacts"]["files"]["derive_scored_retained_candidates"]
+    assert "object_not_primary_subject" in audit_path.read_text(encoding="utf-8")
+
+
+def test_derive_executor_github_search_failure_and_ambiguity_are_mocked(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import derive_executor
+
+    original = derive_executor._json_request
+    try:
+        derive_executor._json_request = lambda url, timeout=20: {"items": []}
+        try:
+            derive_executor.resolve_github_target({"name": "MissingProject"})
+        except derive_executor.DeriveError as exc:
+            assert exc.kind == "needs_target"
+            assert exc.recoverable is True
+        else:
+            raise AssertionError("missing GitHub result must stay pending")
+
+        repos = [
+            {
+                "name": "tool-one",
+                "full_name": "one/tool-one",
+                "description": "video editing tool",
+                "stargazers_count": 10,
+                "owner": {"login": "one"},
+                "html_url": "https://github.com/one/tool-one",
+            },
+            {
+                "name": "tool-two",
+                "full_name": "two/tool-two",
+                "description": "video editing tool",
+                "stargazers_count": 10,
+                "owner": {"login": "two"},
+                "html_url": "https://github.com/two/tool-two",
+            },
+        ]
+
+        def fake_request(url: str, *, timeout: int = 20):
+            if "search/repositories" in url:
+                return {"items": repos}
+            if url.endswith("/readme"):
+                return {"content": ""}
+            return repos[0] if "/one/" in url else repos[1]
+
+        derive_executor._json_request = fake_request
+        try:
+            derive_executor.resolve_github_target({
+                "name": "Tool",
+                "parentContext": "视频主要介绍一个视频编辑工具，但没有给出作者。",
+            })
+        except derive_executor.DeriveError as exc:
+            assert exc.kind == "ambiguous_target"
+            assert "补充明确 GitHub URL" in exc.hint
+        else:
+            raise AssertionError("non-unique GitHub match must require confirmation")
+    finally:
+        derive_executor._json_request = original
 
 
 def test_vault_write_schema(tmp: Path) -> None:
@@ -741,14 +917,109 @@ def test_vault_write_schema(tmp: Path) -> None:
     assert "source_media: douyin_video" in text
     assert "ingest_intent: knowledge_ingest" in text
     assert "source_url:" in text
-    assert "tags: [douyin, knowledge-asset, case-study, video-analysis]" in text
+    assert "tags: [ai-agent, knowledge-asset, video-analysis, douyin]" in text
+    assert 'source_id: "1234567890123456789"' in text
+    assert "## 简洁概括" in text
+    assert "## 完整内容整理" in text
+    assert "## AI 分析" in text
+    assert "### 派生状态（系统）" in text
+    assert re.findall(r"^##\s+", text, re.MULTILINE) == ["## ", "## ", "## "]
+    assert "model:" not in text
+    assert "input_tokens:" not in text
+    assert "cost_rmb_estimate:" not in text
     index = vault / "index.md"
     assert index.exists()
     index_text = index.read_text(encoding="utf-8")
     assert "## 知识入库" in index_text
     assert "[[" in index_text
-    assert git_status in {"committed", "no changes to commit"}
-    assert (vault / ".git").exists()
+    assert git_status == "not_managed"
+    assert not (vault / ".git").exists()
+    assert not (vault / "rules").exists()
+    assert not (vault / "templates").exists()
+    assert not (vault / "SCHEMA.md").exists()
+    assert not (vault / ".gitignore").exists()
+
+
+def test_duplicate_source_ingest_is_idempotent_and_preserves_existing_git(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from ingest import write_to_vault
+
+    vault = tmp / "duplicate-vault"
+    vault.mkdir()
+    git_dir = vault / ".git"
+    git_dir.mkdir()
+    head = git_dir / "HEAD"
+    head.write_text("ref: refs/heads/user-history\n", encoding="utf-8")
+    video = tmp / "duplicate.mp4"
+    video.write_bytes(b"original-video")
+    cfg = _fake_config(tmp, vault, "duplicate-runtime")
+    result = FakeResult(text=(
+        "## 简洁概括\n展示 Agent 知识入库流程。\n\n"
+        "## 完整内容整理\n视频逐步说明抓取、分析和写入。\n\n"
+        "## AI 分析\n从当前来源看，这套流程可能适合个人知识管理。\n\n"
+        "## 派生决策 JSON\n```json\n{\"candidates\": []}\n```"
+    ))
+
+    first_path, first_status = write_to_vault(
+        cfg, FakeMeta(), video, result,
+        {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+    )
+    first_text = first_path.read_text(encoding="utf-8")
+    second_path, second_status = write_to_vault(
+        cfg, FakeMeta(), video,
+        FakeResult(text="这个内容不应覆盖第一次入库。"),
+        {"input_tokens": 99, "output_tokens": 99, "total_tokens": 198},
+    )
+
+    assert first_status == "not_managed"
+    assert second_status == "existing_source"
+    assert second_path == first_path
+    assert first_path.read_text(encoding="utf-8") == first_text
+    assert len(list((vault / "知识资产" / "知识入库").glob("*.md"))) == 1
+    assert "资产总数：1" in (vault / "index.md").read_text(encoding="utf-8")
+    assert head.read_text(encoding="utf-8") == "ref: refs/heads/user-history\n"
+
+
+def test_index_count_only_includes_valid_indexed_assets(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from ingest import _update_index, write_to_vault
+
+    vault = tmp / "index-count-vault"
+    vault.mkdir()
+    video = tmp / "index-count.mp4"
+    video.write_bytes(b"video")
+    cfg = _fake_config(tmp, vault, "index-count-runtime")
+    md_path, _ = write_to_vault(
+        cfg, FakeMeta(), video, FakeResult(),
+        {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+    )
+    orphan = vault / "知识资产" / "知识入库" / "orphan.md"
+    orphan.write_text(
+        "---\nid: orphan-001\nstatus: active\n---\n# Orphan\n",
+        encoding="utf-8",
+    )
+    index = vault / "index.md"
+    index.write_text(
+        index.read_text(encoding="utf-8")
+        + "- [[missing-asset|断链]] — 不应计数\n",
+        encoding="utf-8",
+    )
+    _update_index(
+        vault,
+        md_path,
+        "A Douyin Test Video",
+        "展示 Agent 入库流程。",
+        tags=("ai-agent", "knowledge-asset", "video-analysis", "douyin"),
+    )
+
+    index_text = index.read_text(encoding="utf-8")
+    assert "资产总数：1" in index_text
+    assert orphan.stem not in index_text
+    assert "missing-asset" in index_text
 
 
 def test_derive_strategy_ignores_candidates_json_outside_derived_section(tmp: Path) -> None:
@@ -893,18 +1164,17 @@ def test_vault_write_includes_derived_tasks_and_record(tmp: Path) -> None:
     )
 
     text = md_path.read_text(encoding="utf-8")
-    assert "derived_candidate_record:" in text
-    assert 'derived_candidate_ids: ["dt-test"]' in text
+    assert "derived_candidate_record:" not in text
+    assert "derived_candidate_ids:" not in text
     assert "target_type:" not in text.split("---", 2)[1]
-    assert "## 派生任务候选" in text
+    assert "### 派生状态（系统）" in text
     assert "[LangGraph](https://github.com/langchain-ai/langgraph)" in text
-    assert "## 九、派生决策 JSON" not in text
+    assert "当前没有待执行或已完成的派生" not in text
+    assert "派生决策 JSON" not in text
     assert "候选名称" not in text
 
-    records = list((vault / "系统记录" / "派生任务候选").glob("*.json"))
-    assert len(records) == 1
-    record = json.loads(records[0].read_text(encoding="utf-8"))
-    item = record["items"][0]
+    assert not (vault / "系统记录").exists()
+    item = derived_decision["items"][0]
     assert item["parent_task_id"] == "task-derived"
     assert item["parent_asset_id"]
     assert item["parent_asset_path"] == str(md_path.relative_to(vault))
@@ -1093,7 +1363,13 @@ def test_image_post_vault_write_schema(tmp: Path) -> None:
     assert "asset_family: knowledge_asset" in text
     assert "source_media: douyin_image_post" in text
     assert "ingest_intent: knowledge_ingest" in text
-    assert "tags: [douyin, knowledge-asset, case-study, image-analysis]" in text
+    assert "tags: [knowledge-asset, image-analysis, douyin]" in text
+    assert 'source_id: "1234567890123456789"' in text
+    assert "## 简洁概括" in text
+    assert "## 完整内容整理" in text
+    assert "## AI 分析" in text
+    assert "model:" not in text
+    assert "total_tokens:" not in text
     assert "![[raw/images/" in text
     assert (vault / "raw" / "images").exists()
     index_text = (vault / "index.md").read_text(encoding="utf-8")
@@ -1102,7 +1378,7 @@ def test_image_post_vault_write_schema(tmp: Path) -> None:
     assert "`#image-analysis`" in index_text
     assert "第二行不应该进入标题" not in index_text
     assert all(line.count("[[") == line.count("]]") for line in index_text.splitlines())
-    assert git_status in {"committed", "no changes to commit"}
+    assert git_status == "not_managed"
 
 
 def test_vault_slug_preserves_chinese_title() -> None:
@@ -1574,11 +1850,12 @@ def test_websocket_config_writer(tmp: Path) -> None:
     assert cfg.vault_relative_root == "知识资产/知识入库"
     assert cfg.default_quality == "quality"
     assert cfg.quality_target_frames == 1250
-    assert cfg.fps_min == 0.2
+    assert cfg.fps_min == 2.0
     assert cfg.fps_max == 5.0
     assert cfg.response_timeout_sec == 900
     assert cfg.strategy_model == "doubao-seed-2-0-mini-260428"
     assert cfg.chunk_concurrency == 4
+    assert cfg.video_fps_mode == "auto"
     assert server.task_concurrency == 3
 
     config_path = tmp / "ws-runtime" / "config.toml"
@@ -1632,6 +1909,395 @@ def test_quality_fps_stays_5_until_safe_frame_target() -> None:
     assert truncated is False
 
 
+def _prescan_metrics(
+    *,
+    mean: float,
+    p90: float,
+    peak: float,
+    point_ratio: float,
+    coverage_ratio: float = 1.0,
+) -> dict:
+    return {
+        "ok": True,
+        "mean_change_score": mean,
+        "p90_change_score": p90,
+        "peak_change_score": peak,
+        "change_point_ratio": point_ratio,
+        "coverage_ratio": coverage_ratio,
+    }
+
+
+def test_adaptive_sampling_regression_scenarios() -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from video_sampling import decide_sampling_fps
+
+    low_change_51s = decide_sampling_fps(
+        mode="auto",
+        duration_sec=51.5,
+        prescan=_prescan_metrics(
+            mean=0.003,
+            p90=0.009,
+            peak=0.08,
+            point_ratio=0.02,
+        ),
+    )
+    assert low_change_51s["selected_fps"] == 2.0
+    assert low_change_51s["fallback_applied"] is False
+
+    complex_demo = decide_sampling_fps(
+        mode="auto",
+        duration_sec=180,
+        prescan=_prescan_metrics(
+            mean=0.041,
+            p90=0.11,
+            peak=0.45,
+            point_ratio=0.22,
+        ),
+        risk_hints={"presentation_risk": 4, "ocr_risk": 5, "action_risk": 5},
+    )
+    assert complex_demo["selected_fps"] == 5.0
+
+    ultra_long = decide_sampling_fps(
+        mode="auto",
+        duration_sec=3600,
+        prescan=_prescan_metrics(
+            mean=0.002,
+            p90=0.008,
+            peak=0.04,
+            point_ratio=0.01,
+            coverage_ratio=1 / 6,
+        ),
+    )
+    assert ultra_long["selected_fps"] == 3.0
+    assert any("ultra-long" in reason for reason in ultra_long["decision_reasons"])
+
+    failed = decide_sampling_fps(
+        mode="auto",
+        duration_sec=51.5,
+        prescan={"ok": False, "failure_reason": "ffmpeg timeout"},
+    )
+    assert failed["selected_fps"] == 5.0
+    assert failed["fallback_applied"] is True
+    assert failed["fallback_reason"] == "ffmpeg timeout"
+
+    for mode, expected in (("fixed_2", 2.0), ("fixed_3", 3.0), ("fixed_5", 5.0)):
+        fixed = decide_sampling_fps(
+            mode=mode,
+            duration_sec=51.5,
+            prescan={"ok": False, "failure_reason": "must be ignored"},
+        )
+        assert fixed["selected_fps"] == expected
+        assert fixed["fallback_applied"] is False
+
+
+def test_local_prescan_writes_reproduction_evidence(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import video_sampling
+
+    frame_size = 96 * 54
+    raw = bytes(frame_size) + bytes(frame_size) + bytes([255]) * frame_size
+    calls = []
+
+    def fake_runner(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout=raw, stderr=b"")
+
+    result = video_sampling.prescan_video(
+        tmp / "sample.mp4",
+        51.5,
+        thumbnail_dir=tmp / "thumbs",
+        runner=fake_runner,
+    )
+
+    assert result["ok"] is True
+    assert result["purpose"] == "local_visual_change_measurement_only"
+    assert result["sample_fps"] == 1.0
+    assert result["sample_count"] == 3
+    assert result["timestamps_sec"] == [0.0, 1.0, 2.0]
+    assert [item["timestamp_sec"] for item in result["change_points"]] == [2.0]
+    assert result["visual_risk_proxies"]["basis"] == "visual_change_only_not_ocr_or_content_recognition"
+    assert result["visual_risk_proxies"]["action_risk"] == 5.0
+    assert len(list((tmp / "thumbs").glob("*.pgm"))) == 3
+    assert "fps=1" in calls[0][0][calls[0][0].index("-vf") + 1]
+
+
+def test_analyzer_uses_adaptive_sampling_and_persists_provider_facts(tmp: Path) -> None:
+    import asyncio
+    import sys
+
+    runtime = tmp / "adaptive-analyzer-runtime"
+    os.environ["AGENT_WIKI_HOME"] = str(runtime)
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    video = tmp / "low-change-51s.mp4"
+    video.write_bytes(b"fake-video")
+    uploads = []
+    progress = []
+
+    async def fake_upload(client, path, *, fps, model):
+        uploads.append((Path(path).name, fps, model))
+        return SimpleNamespace(id="file-adaptive", status="processing", filename="private.mp4")
+
+    async def fake_wait(*args, **kwargs):
+        return SimpleNamespace(id="file-adaptive", status="active")
+
+    async def fake_stream(*args, **kwargs):
+        return analyzer.ResponseCallResult(
+            text="自适应分析结果",
+            usage={
+                "input_tokens": 100,
+                "input_tokens_details": {"audio_tokens": 10},
+                "output_tokens": 20,
+                "output_tokens_details": {"reasoning_tokens": 5},
+                "total_tokens": 120,
+            },
+            response_id="resp-do-not-audit",
+        )
+
+    async def on_progress(stage, info):
+        progress.append((stage, info))
+
+    old_duration = analyzer.get_duration_sec
+    old_prescan = analyzer.prescan_video
+    old_build_client = analyzer._build_client
+    old_build_response = analyzer._build_response_client
+    old_upload = analyzer._upload_with_preprocess
+    old_wait = analyzer._wait_for_active
+    old_stream = analyzer._stream_responses
+    try:
+        analyzer.get_duration_sec = lambda path: 51.5
+        analyzer.prescan_video = lambda *args, **kwargs: {
+            **_prescan_metrics(mean=0.002, p90=0.008, peak=0.03, point_ratio=0.01),
+            "purpose": "local_visual_change_measurement_only",
+            "sample_fps": 1.0,
+            "sample_count": 52,
+            "elapsed_sec": 0.7,
+            "timestamps_sec": [float(i) for i in range(52)],
+            "thumbnail_manifest": [
+                {"timestamp_sec": float(i), "thumbnail": f"frame-{i:04d}.pgm"}
+                for i in range(52)
+            ],
+            "change_points": [],
+            "failure_reason": "",
+        }
+        analyzer._build_client = lambda *args, **kwargs: SimpleNamespace()
+        analyzer._build_response_client = lambda *args, **kwargs: SimpleNamespace()
+        analyzer._upload_with_preprocess = fake_upload
+        analyzer._wait_for_active = fake_wait
+        analyzer._stream_responses = fake_stream
+        result = asyncio.run(analyzer.analyze_video(
+            video,
+            "prompt",
+            api_key="test-key",
+            endpoint="https://ark.cn-beijing.volces.com/api/v3",
+            model="doubao-seed-2-0-lite-260428",
+            source_id="source-adaptive",
+            audit_id="task-adaptive",
+            quality_params={"fps_mode": "auto", "target_frames": 1250},
+            on_progress=on_progress,
+        ))
+    finally:
+        analyzer.get_duration_sec = old_duration
+        analyzer.prescan_video = old_prescan
+        analyzer._build_client = old_build_client
+        analyzer._build_response_client = old_build_response
+        analyzer._upload_with_preprocess = old_upload
+        analyzer._wait_for_active = old_wait
+        analyzer._stream_responses = old_stream
+
+    assert uploads == [("low-change-51s.mp4", 2.0, "doubao-seed-2-0-lite-260428")]
+    assert result.fps_used == 2.0
+    assert result.actual_frames_estimate == 103
+    assert any(stage == "prescanning_done" for stage, _ in progress)
+    assert any(stage == "fps_decided" and info["mode"] == "auto" for stage, info in progress)
+    evidence_path = runtime / "run-artifacts" / "task-adaptive" / "01-sampling" / "evidence.json"
+    evidence_text = evidence_path.read_text(encoding="utf-8")
+    evidence = json.loads(evidence_text)
+    vendor = evidence["truth_boundaries"]["vendor_returned_facts"]
+    assert vendor["actual_model_frames"] is None
+    assert vendor["files"][0]["active_response"]["status"] == "active"
+    assert vendor["responses"][0]["usage"]["input_tokens_details"]["audio_tokens"] == 10
+    assert "resp-do-not-audit" not in evidence_text
+    assert "private.mp4" not in evidence_text
+
+
+def test_sampling_audit_keeps_truth_boundaries_and_redacts(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    prescan = {
+        "ok": True,
+        "purpose": "local_visual_change_measurement_only",
+        "sample_count": 2,
+        "timestamps_sec": [0.0, 1.0],
+        "thumbnail_manifest": [{"timestamp_sec": 0.0, "thumbnail": "frame.pgm"}],
+    }
+    decision = {"mode": "auto", "selected_fps": 2.0, "policy_version": "test"}
+    evidence = analyzer._new_sampling_evidence(
+        mode="auto",
+        duration_sec=51.5,
+        prescan=prescan,
+        decision=decision,
+    )
+    analyzer._record_upload_evidence(
+        evidence,
+        phase="precision_analysis",
+        fps=2.0,
+        duration_sec=51.5,
+        model="doubao-seed-2-0-lite-260428",
+        file_obj={
+            "id": "file-safe",
+            "status": "processing",
+            "authorization": "Bearer secret",
+            "url": "https://example.test/upload?api_key=secret",
+        },
+        active_obj={"id": "file-safe", "status": "active", "cookie": "sid=secret"},
+    )
+    analyzer._record_response_evidence(
+        evidence,
+        phase="precision_analysis",
+        model="doubao-seed-2-0-lite-260428",
+        usage={"input_tokens": 10, "output_tokens": 2},
+        text_length=100,
+        intent="knowledge_ingest",
+    )
+    artifacts = {}
+    analyzer._persist_sampling_evidence(tmp, artifacts, evidence)
+    payload = json.loads((tmp / "01-sampling" / "evidence.json").read_text(encoding="utf-8"))
+    text = json.dumps(payload)
+
+    assert payload["truth_boundaries"]["local_reproduction_evidence"]["facts"]["sample_count"] == 2
+    request = payload["truth_boundaries"]["upload_request_facts"]["requests"][0]
+    assert request["requested_fps"] == 2.0
+    assert request["planned_frame_count"] == 103
+    vendor = payload["truth_boundaries"]["vendor_returned_facts"]
+    assert vendor["actual_model_frames"] is None
+    assert vendor["actual_model_frames_availability"] == "not_returned_by_provider"
+    assert vendor["files"][0]["active_response"]["status"] == "active"
+    assert vendor["responses"][0]["usage"]["input_tokens"] == 10
+    assert "secret" not in text
+    assert "authorization" not in text.lower()
+    assert "cookie" not in text.lower()
+    assert "response_id" not in text.lower()
+
+
+def test_official_tiered_cost_and_display_rules() -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+    from cost_estimator import estimate_cost_rmb, format_cost_rmb
+
+    sample = estimate_cost_rmb("doubao-seed-2-0-lite-260428", {
+        "input_tokens": 84_691,
+        "input_tokens_details": {"audio_tokens": 322},
+        "output_tokens": 2_517,
+        "output_tokens_details": {"reasoning_tokens": 1_146},
+        "total_tokens": 87_208,
+    })
+    assert sample["non_audio_input_tokens"] == 84_369
+    assert sample["audio_input_tokens"] == 322
+    assert sample["reasoning_tokens"] == 1_146
+    assert sample["cost_rmb_estimate"] == 0.0938709
+    assert sample["cost_rmb_display"] == "¥0.09"
+    assert sample["pricing"]["input_length_tier"] == "(32000, 128000]"
+    assert sample["pricing"]["rates"] == {
+        "non_audio_input": 0.9,
+        "audio_input": 13.5,
+        "output": 5.4,
+    }
+
+    expected_rates = (
+        (32_000, 0.6),
+        (32_001, 0.9),
+        (128_000, 0.9),
+        (128_001, 1.8),
+        (256_000, 1.8),
+    )
+    for input_tokens, expected_rate in expected_rates:
+        estimate = estimate_cost_rmb("doubao-seed-2-0-lite-260428", {
+            "input_tokens": input_tokens,
+            "output_tokens": 0,
+            "total_tokens": input_tokens,
+        })
+        assert estimate["pricing"]["rates"]["non_audio_input"] == expected_rate
+    over_verified_tiers = estimate_cost_rmb("doubao-seed-2-0-lite-260428", {
+        "input_tokens": 256_001,
+        "output_tokens": 0,
+        "total_tokens": 256_001,
+    })
+    assert over_verified_tiers["estimate_available"] is False
+
+    split = estimate_cost_rmb("doubao-seed-2-0-lite-260428", {
+        "input_tokens": 1_000,
+        "input_tokens_details": {"audio_tokens": 200},
+        "output_tokens": 0,
+        "total_tokens": 1_000,
+    })
+    assert split["non_audio_input_tokens"] == 800
+    assert split["audio_input_tokens"] == 200
+    assert split["cost_rmb_estimate"] == 0.00228
+    assert split["cost_rmb_display"] == "<¥0.01"
+    assert format_cost_rmb(0) == "¥0.00"
+    assert format_cost_rmb(0.009999) == "<¥0.01"
+    assert format_cost_rmb(0.095) == "¥0.10"
+
+    combined = analyzer._combine_usage([
+        {
+            "input_tokens": 10,
+            "input_tokens_details": {"audio_tokens": 2},
+            "output_tokens": 3,
+            "output_tokens_details": {"reasoning_tokens": 1},
+        },
+        {
+            "input_tokens": 20,
+            "input_tokens_details": {"audio_tokens": 4},
+            "output_tokens": 5,
+            "output_tokens_details": {"reasoning_tokens": 2},
+        },
+    ])
+    assert combined["input_tokens"] == 30
+    assert combined["input_tokens_details"]["audio_tokens"] == 6
+    assert combined["output_tokens_details"]["reasoning_tokens"] == 3
+
+    unavailable = estimate_cost_rmb("unknown-model", {
+        "input_tokens": 10,
+        "output_tokens": 2,
+        "total_tokens": 12,
+    })
+    assert unavailable["estimate_available"] is False
+    assert unavailable["cost_rmb_estimate"] is None
+    assert unavailable["cost_rmb_display"] == "不可用"
+
+    multi_model = estimate_cost_rmb("doubao-seed-2-0-lite-260428", {
+        "input_tokens": 2_000,
+        "output_tokens": 0,
+        "total_tokens": 2_000,
+        "usage_by_model": {
+            "doubao-seed-2-0-lite-260428": {
+                "input_tokens": 1_000,
+                "output_tokens": 0,
+                "total_tokens": 1_000,
+            },
+            "doubao-seed-2-0-mini-260428": {
+                "input_tokens": 1_000,
+                "output_tokens": 0,
+                "total_tokens": 1_000,
+            },
+        },
+    })
+    assert multi_model["cost_rmb_estimate"] == 0.0008
+    assert multi_model["cost_rmb_display"] == "<¥0.01"
+    assert len(multi_model["cost_breakdown_by_model"]) == 2
+
+
 def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
     import sys
     import time
@@ -1642,11 +2308,13 @@ def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
 
     assert analyzer.should_chunk_video(600) is False
     assert analyzer.should_chunk_video(601) is True
-    assert analyzer._long_overview_fps(1200) == 1.0
-    assert analyzer._long_overview_fps(1800) == 1.0
-    assert analyzer._ultra_long_threshold_sec() == 1230.0
-    assert analyzer._is_ultra_long_video(1230) is False
-    assert analyzer._is_ultra_long_video(1231) is True
+    assert analyzer._chunk_plan(300) == []
+    assert len(analyzer._chunk_plan(300, force_for_frame_budget=True)) == 2
+    assert analyzer._long_overview_fps(1200) == 2.0
+    assert analyzer._long_overview_fps(1800) == 2.0
+    assert analyzer._ultra_long_threshold_sec() == 615.0
+    assert analyzer._is_ultra_long_video(615) is False
+    assert analyzer._is_ultra_long_video(616) is True
     assert analyzer._is_ultra_long_video(1800) is True
     plan = analyzer._chunk_plan(601)
     assert len(plan) == 3
@@ -1743,6 +2411,7 @@ def test_status_writer_redacts_sensitive_fields(tmp: Path) -> None:
             "ok": True,
         },
     })
+    writer.update(cost_estimate={"cost_rmb_estimate": 0.09, "cost_rmb_display": "¥0.09"})
     writer.update(ok=False, stage="failed", error="failed with api_key=sk-error and resp-error")
 
     text = writer.path.read_text(encoding="utf-8")
@@ -1752,6 +2421,14 @@ def test_status_writer_redacts_sensitive_fields(tmp: Path) -> None:
     assert data["elapsed_sec"] >= 0
     assert data["task_duration_sec"] == data["elapsed_sec"]
     assert data["chunk_progress"]["2"]["chunk_uploaded"]["file_id"] == "file-safe"
+    assert [item["stage"] for item in data["audit_events"]] == [
+        "queued",
+        "chunk_uploaded",
+        "analyzing_done",
+        "cost_estimated",
+        "failed",
+    ]
+    assert [item["sequence"] for item in data["audit_events"]] == [1, 2, 3, 4, 5]
     assert "resp-secret" not in text
     assert "resp-old" not in text
     assert "sk-secret" not in text
@@ -2134,7 +2811,12 @@ def test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp: Path)
 
     assert strategy["ok"] is True
     assert all(item["recommended_fps"] == 2.0 for item in strategy["chunks"])
-    assert ("upload", 1.0, "doubao-seed-2-0-mini-260428") in calls
+    assert strategy["usage_by_model"]["doubao-seed-2-0-mini-260428"] == {
+        "input_tokens": 15,
+        "output_tokens": 5,
+        "total_tokens": 20,
+    }
+    assert ("upload", 2.0, "doubao-seed-2-0-mini-260428") in calls
     assert ("stream", "doubao-seed-2-0-mini-260428", "file-overview", None) in calls
     assert ("repair", "doubao-seed-2-0-mini-260428", "resp-overview", True) in calls
     assert any(stage == "repairing_overview_strategy" for stage, _ in progress)
@@ -2261,7 +2943,7 @@ def test_prepare_long_video_strategy_chunks_unsafe_full_overview(tmp: Path) -> N
         analyzer._call_text_responses = old_text
 
     assert len(upload_calls) == len(plan)
-    assert all(call[1] == 1.0 for call in upload_calls)
+    assert all(call[1] == 2.0 for call in upload_calls)
     assert len(stream_calls) == len(plan)
     assert synth_calls == [("doubao-seed-2-0-mini-260428", None, True)]
     assert strategy["ok"] is True
@@ -2294,6 +2976,7 @@ def test_strategy_log_redacts_sensitive_values(tmp: Path) -> None:
             "arkApiKey=sk-camel\n"
             "{\"api_key\":\"sk-json\",\"cookie\":\"sid=json\",\"response_id\":\"abc-json\"}\n"
             "response_id=resp-secret"
+            "\nhttps://example.test/api?access_token=query-secret&signature=sig-secret"
         ),
         "nested": {
             "response_id": "resp-nested",
@@ -2318,6 +3001,8 @@ def test_strategy_log_redacts_sensitive_values(tmp: Path) -> None:
     assert "sid=json" not in text
     assert "abc-json" not in text
     assert "resp-secret" not in text
+    assert "query-secret" not in text
+    assert "sig-secret" not in text
     assert "resp-nested" not in text
     assert "abc-camel-response" not in text
     assert "sk-plan-camel" not in text
@@ -3074,14 +3759,14 @@ def test_analyzer_ark_file_protocol(tmp: Path) -> None:
         analyzer._upload_with_preprocess(
             client,
             video,
-            fps=0.3,
+            fps=2.0,
             model="doubao-seed-2-1-pro-260628",
         )
     )
     assert result.id == "file-uploaded"
     assert client.files.create_kwargs["purpose"] == "user_data"
     preprocess = client.files.create_kwargs["preprocess_configs"]["video"]
-    assert preprocess == {"fps": 0.3, "model": "doubao-seed-2-1-pro-260628"}
+    assert preprocess == {"fps": 2.0, "model": "doubao-seed-2-1-pro-260628"}
 
     class FallbackFiles:
         def __init__(self) -> None:
@@ -3100,14 +3785,26 @@ def test_analyzer_ark_file_protocol(tmp: Path) -> None:
         analyzer._upload_with_preprocess(
             fallback_client,
             video,
-            fps=0.5,
+            fps=3.0,
             model="doubao-seed-2-1-pro-260628",
         )
     )
     assert fallback_result.id == "file-fallback"
     assert fallback_client.files.calls == 2
     fallback_preprocess = fallback_client.files.create_kwargs["extra_body"]["preprocess_configs"]["video"]
-    assert fallback_preprocess == {"fps": 0.5, "model": "doubao-seed-2-1-pro-260628"}
+    assert fallback_preprocess == {"fps": 3.0, "model": "doubao-seed-2-1-pro-260628"}
+
+    try:
+        asyncio.run(analyzer._upload_with_preprocess(
+            client,
+            video,
+            fps=1.0,
+            model="doubao-seed-2-1-pro-260628",
+        ))
+    except analyzer.AnalyzerError as e:
+        assert "2-5" in str(e)
+    else:
+        raise AssertionError("model video uploads must never use 1 FPS")
 
     safe_size = tmp / "500mb.mp4"
     with safe_size.open("wb") as f:
@@ -3975,7 +4672,12 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
         'title: "父视频：Agent Harness"\n'
         "related: []\n"
         "---\n"
-        "# 父视频：Agent Harness\n\n正文\n",
+        "# 父视频：Agent Harness\n\n正文\n\n"
+        "## AI 分析\n\n> 以下内容由 AI 生成。\n\n"
+        "### 派生状态（系统）\n\n"
+        "| 决策 | 类型 | 名称 | 分数 | 状态 | 原因 |\n"
+        "|---|---|---|---:|---|---|\n"
+        "| candidate | github_project | LangGraph | 95 | auto_ready | 父视频主要介绍 LangGraph。 |\n",
         encoding="utf-8",
     )
     cfg = Config(
@@ -4062,17 +4764,31 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
 
     original_resolve = derive_executor.resolve_target
     original_model = derive_executor._call_lite_model
-    original_git = derive_executor._git_commit
+    original_register = derive_executor.register_derived_repository
+    register_calls = []
+
+    def fake_register(repository, asset_path, vault_path, **_kwargs):
+        asset_path = Path(asset_path)
+        vault_path = Path(vault_path)
+        parent_text = parent.read_text(encoding="utf-8")
+        index_text = (vault_path / "index.md").read_text(encoding="utf-8")
+        assert asset_path.exists()
+        assert f"[[{asset_path.stem}|" in index_text
+        assert "| completed | github_project |" in parent_text
+        assert not (vault_path / ".git").exists()
+        register_calls.append(repository)
+        return {"ok": True, "autoStar": {"attempted": False, "ok": True}}
+
     try:
         derive_executor.resolve_target = fake_resolve
         derive_executor._call_lite_model = fake_model
-        derive_executor._git_commit = lambda vault_path, title, touched, asset_type: "committed"
+        derive_executor.register_derived_repository = fake_register
         sw = FakeStatusWriter()
         summary = derive_executor.execute_derived_task(task, cfg, sw)
     finally:
         derive_executor.resolve_target = original_resolve
         derive_executor._call_lite_model = original_model
-        derive_executor._git_commit = original_git
+        derive_executor.register_derived_repository = original_register
 
     child = Path(summary["vault_path"])
     assert child.exists()
@@ -4091,8 +4807,16 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
     assert '"repo"' not in child_text
     assert '"readme"' not in child_text
     assert "derived_from:" in child_text
-    assert "parent_candidate_id: \"dt-e2e\"" in child_text
+    assert "parent_candidate_id:" not in child_text
+    assert "parent_task_id:" not in child_text
+    assert "model:" not in child_text
+    assert "input_tokens:" not in child_text
+    assert "total_tokens:" not in child_text
     assert "## 相关资产" in parent_text
+    assert "completed" in parent_text
+    table_child_link = child_link.replace("|", "\\|")
+    assert f"| completed | github_project | {table_child_link} | 95 | completed |" in parent_text
+    assert not (vault / "系统记录").exists()
     assert (vault / "index.md").exists()
     assert summary["audit_artifacts"]["dir"] == "run-artifacts/child-task"
     artifact_files = summary["audit_artifacts"]["files"]
@@ -4120,9 +4844,68 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
     for text in (parent_text, child_text):
         for match in re.findall(r"!?\[\[([^|\]#]+)", text):
             target_stem = match.split("|", 1)[0].split("#", 1)[0]
+            target_stem = target_stem.rstrip("\\")
             assert target_stem in all_stems, target_stem
     assert any(update.get("stage") == "resolving_target" for update in sw.updates)
-    assert summary["git_status"] == "committed"
+    assert summary["git_status"] == "not_managed"
+    assert len(register_calls) == 1
+    assert summary["github_integration"]["autoStar"]["attempted"] is False
+    assert not (vault / ".git").exists()
+
+
+def test_derived_completion_matches_exact_candidate_identity(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from ingest import mark_derived_candidate_executed
+
+    parent = tmp / "candidate-identity-parent.md"
+    parent.write_text(
+        "# Parent\n\n## AI 分析\n\n### 派生状态（系统）\n\n"
+        "| 决策 | 类型 | 名称 | 分数 | 状态 | 原因 |\n"
+        "|---|---|---|---:|---|---|\n"
+        "| candidate | github_project | [Lang](https://github.com/example/lang) | 90 | auto_ready | A |\n"
+        "| candidate | github_project | [LangGraph](https://github.com/example/langgraph) | 95 | auto_ready | B |\n",
+        encoding="utf-8",
+    )
+
+    mark_derived_candidate_executed(
+        parent,
+        candidate_name="LangGraph",
+        candidate_type="github_project",
+        candidate_url="https://github.com/example/langgraph",
+        child_link="[[langgraph|LangGraph]]",
+    )
+
+    text = parent.read_text(encoding="utf-8")
+    assert "| candidate | github_project | [Lang](https://github.com/example/lang) | 90 | auto_ready |" in text
+    assert "| completed | github_project | [[langgraph\\|LangGraph]] | 95 | completed |" in text
+
+    mark_derived_candidate_executed(
+        parent,
+        candidate_name="LangGraph",
+        candidate_type="github_project",
+        candidate_url="https://github.com/example/langgraph",
+        child_link="[[langgraph|LangGraph]]",
+    )
+    rerun_text = parent.read_text(encoding="utf-8")
+    assert rerun_text == text
+    assert "- 已完成：" not in rerun_text
+
+    legacy = tmp / "candidate-identity-legacy-parent.md"
+    legacy.write_text(
+        "# Parent\n\n## AI 分析\n\n### 派生状态（系统）\n\n"
+        "- 已完成：[[legacy-child|Legacy Child]]\n",
+        encoding="utf-8",
+    )
+    mark_derived_candidate_executed(
+        legacy,
+        candidate_name="Legacy Child",
+        candidate_type="github_project",
+        child_link="[[legacy-child|Legacy Child]]",
+    )
+    legacy_text = legacy.read_text(encoding="utf-8")
+    assert legacy_text.count("- 已完成：[[legacy-child|Legacy Child]]") == 1
 
 
 def test_derive_executor_main_preserves_derived_ingest_status(tmp: Path) -> None:
@@ -4237,13 +5020,17 @@ def main() -> int:
         test_douyin_share_text_url_extraction()
         test_download_video_resumes_partial_file(tmp)
         test_ingest_url_preserves_share_text_argument()
-        test_derive_strategy_scores_limits_dedupes_and_redacts(tmp)
+        test_derive_strategy_keeps_all_primary_candidates_dedupes_and_redacts(tmp)
         test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp)
         test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp)
         test_knowledge_prompts_do_not_force_github_manual_confirmation()
+        test_derive_strategy_keeps_four_primary_projects_and_suppresses_incidental(tmp)
+        test_derive_executor_github_search_failure_and_ambiguity_are_mocked(tmp)
         test_derive_strategy_ignores_candidates_json_outside_derived_section(tmp)
         test_normalize_ingest_intent_rejects_removed_viral_intent()
         test_vault_write_schema(tmp)
+        test_duplicate_source_ingest_is_idempotent_and_preserves_existing_git(tmp)
+        test_index_count_only_includes_valid_indexed_assets(tmp)
         test_vault_write_includes_derived_tasks_and_record(tmp)
         test_image_post_metadata_detection_from_image_infos()
         test_image_post_without_image_urls_fails_clearly()
@@ -4257,6 +5044,11 @@ def main() -> int:
         test_analyzer_rejects_empty_response_text(tmp)
         test_websocket_config_writer(tmp)
         test_quality_fps_stays_5_until_safe_frame_target()
+        test_adaptive_sampling_regression_scenarios()
+        test_local_prescan_writes_reproduction_evidence(tmp)
+        test_analyzer_uses_adaptive_sampling_and_persists_provider_facts(tmp)
+        test_sampling_audit_keeps_truth_boundaries_and_redacts(tmp)
+        test_official_tiered_cost_and_display_rules()
         test_video_chunk_threshold_and_memory_store(tmp)
         test_status_writer_redacts_sensitive_fields(tmp)
         test_long_video_strategy_accepts_top_level_segments_and_partial_fallback()
@@ -4293,6 +5085,7 @@ def main() -> int:
         test_derive_executor_existing_child_backlink_is_cleaned(tmp)
         test_derive_executor_sanitizes_leading_h1()
         test_derive_executor_execute_task_writes_child_and_backlinks(tmp)
+        test_derived_completion_matches_exact_candidate_identity(tmp)
         test_derive_executor_main_preserves_derived_ingest_status(tmp)
         test_websocket_auto_enqueue_respects_ignored_candidate(tmp)
         test_websocket_rejects_removed_viral_intent(tmp)

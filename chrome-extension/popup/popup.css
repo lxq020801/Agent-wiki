@@ -24,6 +24,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   display: flex;
   width: var(--popup-width);
@@ -842,6 +846,236 @@ textarea:focus {
   display: block;
 }
 
+.github-auth-actions {
+  margin-bottom: 10px;
+}
+
+.github-device-panel {
+  margin-bottom: 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+}
+
+.github-device-panel p {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.github-device-panel code {
+  display: block;
+  margin: 8px 0 10px;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 22px;
+  font-weight: 750;
+  letter-spacing: 0;
+}
+
+.toggle-row,
+.select-all-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  cursor: pointer;
+}
+
+.toggle-row {
+  min-height: 52px;
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+}
+
+.toggle-row span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.toggle-row b {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.toggle-row small {
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.toggle-row input,
+.select-all-row input,
+.github-repo-select {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.github-tool,
+.github-refresh-panel {
+  padding-top: 11px;
+  border-top: 1px solid var(--border);
+}
+
+.github-tool + .github-tool,
+.github-refresh-panel {
+  margin-top: 11px;
+}
+
+.inline-input-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+
+.inline-input-action button.small {
+  min-height: 40px;
+}
+
+.select-all-row {
+  justify-content: flex-start;
+  margin-bottom: 7px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.github-list {
+  display: flex;
+  max-height: 220px;
+  flex-direction: column;
+  gap: 1px;
+  overflow-y: auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.github-list .empty {
+  padding: 16px 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-align: center;
+}
+
+.github-repo-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 56px;
+  padding: 7px 2px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.github-repo-row:last-child {
+  border-bottom: 0;
+}
+
+.github-repo-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.github-repo-copy strong,
+.github-repo-copy span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.github-repo-copy strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.github-repo-copy span {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.github-repo-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.github-repo-actions button {
+  min-height: 28px;
+  padding: 0 7px;
+}
+
+.github-ingested-badge {
+  color: var(--success);
+  font-size: 10px;
+}
+
+.load-more {
+  margin-top: 7px;
+}
+
+.github-import-actions {
+  margin-top: 9px;
+}
+
+.github-progress {
+  margin-top: 9px;
+}
+
+.github-progress > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.github-progress progress {
+  width: 100%;
+  height: 5px;
+  margin-top: 6px;
+  accent-color: var(--primary);
+}
+
+.github-import-results {
+  display: flex;
+  max-height: 120px;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 6px;
+  overflow-y: auto;
+  font-size: 10px;
+}
+
+.github-import-result {
+  color: var(--success);
+  overflow-wrap: anywhere;
+}
+
+.github-import-result.failed {
+  color: var(--error);
+}
+
+.github-refresh-panel h3 {
+  margin-bottom: 7px;
+}
+
+.github-refresh-panel ul {
+  margin: 0 0 9px;
+  padding-left: 18px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .task-list {
   display: flex;
   flex-direction: column;
@@ -896,6 +1130,10 @@ textarea:focus {
   font-size: 11px;
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+
+.task-detail.warning {
+  color: var(--warning);
 }
 
 .task-progress {

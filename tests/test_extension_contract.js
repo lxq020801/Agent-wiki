@@ -48,7 +48,7 @@ async function main() {
     },
     notifications: { create() {} },
     runtime: {
-      getManifest: () => ({ version: '0.1.1' }),
+      getManifest: () => ({ version: '0.2.0' }),
       lastError: null,
       onInstalled: extensionEvent(),
       onMessage: extensionEvent(),
@@ -102,7 +102,7 @@ async function main() {
     type: 'handshake',
     client: 'agent-wiki-background',
     product: 'agent-wiki',
-    version: '0.1.1',
+    version: '0.2.0',
     protocolVersion: 1
   });
 
@@ -115,7 +115,7 @@ async function main() {
 
   const compatibleRuntime = {
     product: 'agent-wiki',
-    productVersion: '0.1.1',
+    productVersion: '0.2.0',
     protocolVersion: 1,
     sourceRevision: 'abcdef123456',
     buildId: 'src-1234567890abcdef',
@@ -127,12 +127,12 @@ async function main() {
     compatibility: {
       state: 'compatible',
       canOperate: true,
-      clientVersion: '0.1.1',
+      clientVersion: '0.2.0',
       clientProtocolVersion: 1
     }
   })})`, context);
   assert.equal(stored.runtimeCompatibility.canOperate, true);
-  assert.equal(stored.agentRuntime.productVersion, '0.1.1');
+  assert.equal(stored.agentRuntime.productVersion, '0.2.0');
 
   const candidate = {
     url: 'https://www.douyin.com/video/7390000000000000000',

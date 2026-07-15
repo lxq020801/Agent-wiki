@@ -29,6 +29,7 @@ const SETTINGS_DETAIL_TITLES = {
   'video-settings': '模型与并发',
   'vault-settings': '知识库',
   'cookie-settings': '抖音 Cookie',
+  'github-settings': 'GitHub',
   'task-settings': '任务状态'
 };
 const PENDING_COOKIE_KEYS = [
@@ -59,6 +60,16 @@ let lastSettingsTrigger = null;
 let runtimeCompatibility = null;
 let runtimeSyncStarted = false;
 const pendingDerivedActions = new Map();
+let githubAuthFlow = null;
+let githubAuthPollTimer = null;
+let githubStars = [];
+let githubStarsPage = 0;
+let githubStarsHasNext = false;
+let githubSelected = new Set();
+let githubImportBatch = null;
+let githubRefresh = null;
+let githubIsConfigured = false;
+let githubIsAuthenticated = false;
 
 function debugLog(...args) {
   if (DEBUG_LOGS) console.log(...args);
@@ -333,6 +344,10 @@ function requestTaskStatus() {
   sendToAgent({ type: 'task_status_request' });
 }
 
+function requestGithubStatus() {
+  return sendToAgent({ type: 'github_status_request', requestId: `github-status-${Date.now()}` });
+}
+
 function derivedActionKey(taskId, candidateId) {
   return `${taskId || ''}:${candidateId || ''}`;
 }
@@ -480,6 +495,28 @@ function handleAgentMessage(msg) {
       showHint('task-hint', msg.message || '派生操作失败', 'error');
       requestTaskStatus();
       break;
+    case 'github_status':
+      applyGithubStatus(msg.result || {});
+      break;
+    case 'github_auth_state':
+      applyGithubAuthState(msg.result || {});
+      break;
+    case 'github_repository_results':
+      applyGithubSearchResults(msg.result || {});
+      break;
+    case 'github_stars_results':
+      applyGithubStarsResults(msg.result || {});
+      break;
+    case 'github_import_accepted':
+    case 'github_import_progress':
+      applyGithubImportProgress(msg.result || {});
+      break;
+    case 'github_refresh_state':
+      applyGithubRefreshState(msg.result || {});
+      break;
+    case 'github_error':
+      applyGithubError(msg.result || {});
+      break;
     case 'error':
       showHint('config-hint', msg.message || msg.error || 'Agent 返回错误', 'error', { persist: true });
       break;
@@ -537,6 +574,7 @@ function applyStatusSnapshot(status) {
   applyVideoStatus(status.videoAnalysis || {});
   applyCookieStatus(status.cookie || {});
   applyTaskStatus(status.tasks || {});
+  applyGithubStatus(status.github || {});
 }
 
 function applyVaultStatus(status) {
@@ -607,6 +645,426 @@ function applyCookieStatus(status) {
   }
 }
 
+function githubConfigured(status) {
+  return Boolean(typeof status.configured === 'object' ? status.configured.configured : status.configured);
+}
+
+function applyGithubStatus(status) {
+  const configured = githubConfigured(status);
+  const authenticated = Boolean(status.authenticated);
+  githubIsConfigured = configured;
+  githubIsAuthenticated = authenticated;
+  const account = status.account || {};
+  const login = account.login || '';
+  const summary = document.getElementById('settings-github-summary');
+  const dot = document.getElementById('settings-github-dot');
+  const copy = document.getElementById('github-account-copy');
+  const loginButton = document.getElementById('github-login');
+  const logoutButton = document.getElementById('github-logout');
+
+  if (authenticated) {
+    summary.textContent = login ? `@${login}` : '已登录';
+    summary.className = 'online';
+    dot.className = 'status-dot inline-dot online';
+    copy.textContent = login ? `已登录 @${login}` : 'GitHub 已登录';
+  } else if (!configured) {
+    summary.textContent = '缺少 client ID';
+    summary.className = 'offline';
+    dot.className = 'status-dot inline-dot offline';
+    copy.textContent = 'GitHub App 尚未配置';
+  } else if (status.state === 'unchecked') {
+    summary.textContent = '待检查';
+    summary.className = 'warning';
+    dot.className = 'status-dot inline-dot warning';
+    copy.textContent = '打开页面后检查 GitHub 登录状态';
+  } else {
+    summary.textContent = '未登录';
+    summary.className = 'warning';
+    dot.className = 'status-dot inline-dot warning';
+    copy.textContent = '尚未登录 GitHub';
+  }
+
+  loginButton.hidden = authenticated;
+  loginButton.disabled = !configured;
+  logoutButton.hidden = !authenticated;
+  document.getElementById('github-auto-star').checked = Boolean(status.settings?.autoStar);
+  document.getElementById('github-auto-star').disabled = !authenticated;
+  document.getElementById('github-search-query').disabled = !authenticated;
+  document.getElementById('github-search').disabled = !authenticated;
+  document.getElementById('github-load-stars').disabled = !authenticated;
+  document.getElementById('github-select-all').disabled = !authenticated || !githubStars.length;
+  updateGithubSelection();
+  if (status.activeImport && status.activeImport.id !== githubImportBatch?.id) {
+    applyGithubImportProgress(status.activeImport);
+  }
+
+  if (status.message && !authenticated && !githubAuthFlow) {
+    showHint('github-hint', status.message, configured ? 'warning' : 'error', { persist: true });
+  } else if (authenticated && !githubAuthFlow) {
+    showHint('github-hint', login ? `GitHub 已连接：@${login}` : 'GitHub 已连接', 'success', { persist: true });
+  }
+}
+
+function clearGithubAuthFlow() {
+  clearTimeout(githubAuthPollTimer);
+  githubAuthPollTimer = null;
+  githubAuthFlow = null;
+  document.getElementById('github-device-panel').hidden = true;
+  document.getElementById('github-login').disabled = !githubIsConfigured;
+}
+
+function scheduleGithubAuthPoll(seconds) {
+  clearTimeout(githubAuthPollTimer);
+  githubAuthPollTimer = setTimeout(() => {
+    if (!githubAuthFlow?.flowId) return;
+    sendToAgent({
+      type: 'github_auth_poll',
+      requestId: `github-auth-poll-${Date.now()}`,
+      flowId: githubAuthFlow.flowId
+    });
+  }, Math.max(1, Number(seconds) || 5) * 1000);
+}
+
+function startGithubAuthorization() {
+  const button = document.getElementById('github-login');
+  button.disabled = true;
+  showHint('github-hint', '正在向 GitHub 请求设备授权码', 'warning', { persist: true });
+  if (!sendToAgent({ type: 'github_auth_start', requestId: `github-auth-${Date.now()}` })) {
+    button.disabled = false;
+    showHint('github-hint', runtimeUnavailableMessage(), 'error', { persist: true });
+  }
+}
+
+function applyGithubAuthState(result) {
+  if (result.state === 'waiting_for_user') {
+    githubAuthFlow = {
+      flowId: result.flowId,
+      verificationUri: result.verificationUri,
+      expiresAt: result.expiresAt
+    };
+    document.getElementById('github-user-code').textContent = result.userCode || '';
+    document.getElementById('github-device-panel').hidden = false;
+    document.getElementById('github-login').disabled = true;
+    showHint('github-hint', '等待你在 GitHub 完成授权', 'warning', { persist: true });
+    scheduleGithubAuthPoll(result.interval || 5);
+    return;
+  }
+  if (result.state === 'authorization_pending') {
+    scheduleGithubAuthPoll(result.retryAfter || 5);
+    return;
+  }
+  if (result.state === 'ready') {
+    clearGithubAuthFlow();
+    showHint('github-hint', 'GitHub 登录成功', 'success', { persist: true });
+    requestGithubStatus();
+    return;
+  }
+  if (result.state === 'cancelled') {
+    clearGithubAuthFlow();
+    showHint('github-hint', '已取消 GitHub 登录', 'warning', { persist: true });
+  }
+}
+
+function cancelGithubAuthorization() {
+  if (githubAuthFlow?.flowId) {
+    sendToAgent({ type: 'github_auth_cancel', flowId: githubAuthFlow.flowId });
+  }
+  clearGithubAuthFlow();
+}
+
+function openGithubAuthorization() {
+  const url = githubAuthFlow?.verificationUri;
+  if (url) chrome.tabs.create({ url });
+}
+
+function logoutGithub() {
+  showHint('github-hint', '正在退出 GitHub', 'warning', { persist: true });
+  sendToAgent({ type: 'github_logout', requestId: `github-logout-${Date.now()}` });
+}
+
+function saveGithubAutoStar() {
+  const autoStar = document.getElementById('github-auto-star').checked;
+  if (!sendToAgent({ type: 'github_settings_update', autoStar })) {
+    showHint('github-hint', runtimeUnavailableMessage(), 'error', { persist: true });
+    return;
+  }
+  showHint('github-hint', autoStar ? '已开启派生成功后自动 Star' : '已关闭自动 Star', 'success');
+}
+
+function searchGithubRepositories() {
+  const query = document.getElementById('github-search-query').value.trim();
+  if (query.length < 2) {
+    showHint('github-hint', '请输入至少 2 个字符', 'warning');
+    return;
+  }
+  const button = document.getElementById('github-search');
+  button.disabled = true;
+  button.textContent = '搜索中';
+  const list = document.getElementById('github-search-results');
+  list.replaceChildren(makeEmptyGithubRow('正在搜索 GitHub 仓库'));
+  if (!sendToAgent({ type: 'github_repository_search', query, page: 1, perPage: 20 })) {
+    button.disabled = false;
+    button.textContent = '搜索';
+    list.replaceChildren(makeEmptyGithubRow(runtimeUnavailableMessage()));
+  }
+}
+
+function applyGithubSearchResults(result) {
+  const button = document.getElementById('github-search');
+  button.disabled = false;
+  button.textContent = '搜索';
+  renderGithubRepositories('github-search-results', result.repositories || [], { selectable: false });
+  if (!(result.repositories || []).length) showHint('github-hint', '没有找到匹配的 GitHub 仓库', 'warning');
+}
+
+function loadGithubStars({ append = false } = {}) {
+  const page = append ? githubStarsPage + 1 : 1;
+  const button = append ? document.getElementById('github-load-more-stars') : document.getElementById('github-load-stars');
+  button.disabled = true;
+  button.textContent = '读取中';
+  if (!append) document.getElementById('github-stars-list').replaceChildren(makeEmptyGithubRow('正在读取你的 Stars'));
+  if (!sendToAgent({ type: 'github_stars_request', page, perPage: 50 })) {
+    button.disabled = false;
+    button.textContent = append ? '加载更多' : '读取';
+    showHint('github-hint', runtimeUnavailableMessage(), 'error', { persist: true });
+  }
+}
+
+function applyGithubStarsResults(result) {
+  const page = Number(result.page || 1);
+  const incoming = Array.isArray(result.repositories) ? result.repositories : [];
+  if (page <= 1) githubSelected.clear();
+  githubStars = page > 1 ? githubStars.concat(incoming) : incoming;
+  githubStarsPage = page;
+  githubStarsHasNext = Boolean(result.hasNext);
+  document.getElementById('github-load-stars').disabled = false;
+  document.getElementById('github-load-stars').textContent = '重新读取';
+  const more = document.getElementById('github-load-more-stars');
+  more.disabled = false;
+  more.textContent = '加载更多';
+  more.hidden = !githubStarsHasNext;
+  renderGithubRepositories('github-stars-list', githubStars, { selectable: true });
+  document.getElementById('github-select-all').disabled = !githubStars.length;
+  updateGithubSelection();
+  if (!githubStars.length) showHint('github-hint', '你的 GitHub Stars 列表为空', 'warning');
+}
+
+function githubRepositoryKey(repo) {
+  return String(repo.id || repo.fullName || '').toLowerCase();
+}
+
+function makeEmptyGithubRow(text) {
+  const empty = document.createElement('div');
+  empty.className = 'empty';
+  empty.textContent = text;
+  return empty;
+}
+
+function renderGithubRepositories(listId, repositories, { selectable }) {
+  const list = document.getElementById(listId);
+  list.replaceChildren();
+  if (!repositories.length) {
+    list.appendChild(makeEmptyGithubRow(selectable ? '没有可导入的 Star' : '没有搜索结果'));
+    return;
+  }
+  for (const repo of repositories) {
+    const row = document.createElement('div');
+    row.className = 'github-repo-row';
+    row.dataset.repositoryId = String(repo.id || '');
+    row.dataset.fullName = repo.fullName || '';
+    if (selectable) {
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'github-repo-select';
+      checkbox.checked = githubSelected.has(githubRepositoryKey(repo));
+      checkbox.setAttribute('aria-label', `选择 ${repo.fullName || '仓库'}`);
+      row.appendChild(checkbox);
+    } else {
+      const badge = document.createElement('span');
+      badge.className = repo.ingested ? 'github-ingested-badge' : '';
+      badge.textContent = repo.ingested ? '已入库' : 'GitHub';
+      row.appendChild(badge);
+    }
+    const copy = document.createElement('span');
+    copy.className = 'github-repo-copy';
+    const title = document.createElement('strong');
+    title.textContent = repo.fullName || repo.name || '未命名仓库';
+    const meta = document.createElement('span');
+    meta.textContent = `${repo.language || '未标注语言'} · ${Number(repo.stars || 0).toLocaleString('zh-CN')} Stars`;
+    copy.append(title, meta);
+    row.appendChild(copy);
+    const actions = document.createElement('span');
+    actions.className = 'github-repo-actions';
+    if (repo.ingested) {
+      const refresh = document.createElement('button');
+      refresh.type = 'button';
+      refresh.className = 'secondary small github-refresh-check';
+      refresh.textContent = '检查更新';
+      actions.appendChild(refresh);
+    }
+    row.appendChild(actions);
+    list.appendChild(row);
+  }
+}
+
+function updateGithubSelection() {
+  document.getElementById('github-selection-count').textContent = `已选择 ${githubSelected.size} 个`;
+  const button = document.getElementById('github-import-selected');
+  button.disabled = !githubIsAuthenticated || !githubSelected.size || Boolean(
+    githubImportBatch && ['queued', 'running'].includes(githubImportBatch.state)
+  );
+  const all = document.getElementById('github-select-all');
+  const keys = githubStars.map(githubRepositoryKey).filter(Boolean);
+  all.checked = Boolean(keys.length && keys.every(key => githubSelected.has(key)));
+  all.indeterminate = Boolean(keys.some(key => githubSelected.has(key)) && !all.checked);
+}
+
+function importSelectedGithubStars() {
+  const repositories = githubStars
+    .filter(repo => githubSelected.has(githubRepositoryKey(repo)))
+    .map(repo => ({ id: repo.id, fullName: repo.fullName }));
+  if (!repositories.length) return;
+  document.getElementById('github-import-selected').disabled = true;
+  document.getElementById('github-import-progress').hidden = false;
+  showHint('github-hint', `正在提交 ${repositories.length} 个仓库`, 'warning', { persist: true });
+  if (!sendToAgent({ type: 'github_import_stars', repositories, requestId: `github-import-${Date.now()}` })) {
+    updateGithubSelection();
+    showHint('github-hint', runtimeUnavailableMessage(), 'error', { persist: true });
+  }
+}
+
+function applyGithubImportProgress(result) {
+  githubImportBatch = result;
+  const running = ['queued', 'running'].includes(result.state);
+  document.getElementById('github-import-progress').hidden = false;
+  document.getElementById('github-progress-copy').textContent = result.state === 'completed'
+    ? '导入完成'
+    : result.state === 'cancelled' ? '导入已取消' : '正在导入';
+  document.getElementById('github-progress-count').textContent = `${result.completed || 0} / ${result.total || 0}`;
+  const bar = document.getElementById('github-progress-bar');
+  bar.max = Math.max(1, Number(result.total || 0));
+  bar.value = Number(result.completed || 0);
+  document.getElementById('github-cancel-import').hidden = !running;
+  const results = document.getElementById('github-import-results');
+  results.replaceChildren();
+  for (const item of result.results || []) {
+    const line = document.createElement('div');
+    line.className = `github-import-result${item.ok ? '' : ' failed'}`;
+    const repo = item.repository || {};
+    line.textContent = item.ok
+      ? `${repo.fullName || '仓库'}：${item.state === 'existing' ? '已存在' : '已入库'}`
+      : `${repo.fullName || repo.id || '仓库'}：${item.message || '导入失败'}`;
+    results.appendChild(line);
+  }
+  updateGithubSelection();
+  if (!running) {
+    const failed = Number(result.failed || 0);
+    showHint(
+      'github-hint',
+      result.state === 'cancelled'
+        ? `导入已取消，完成 ${result.completed || 0} 个`
+        : `导入完成：成功 ${result.succeeded || 0} 个，失败 ${failed} 个`,
+      failed ? 'warning' : 'success',
+      { persist: true }
+    );
+    loadGithubStars();
+  }
+}
+
+function cancelGithubImport() {
+  if (githubImportBatch?.id) sendToAgent({ type: 'github_import_cancel', batchId: githubImportBatch.id });
+}
+
+function checkGithubRefresh(row) {
+  if (!row) return;
+  const button = row.querySelector('.github-refresh-check');
+  if (button) {
+    button.disabled = true;
+    button.textContent = '检查中';
+  }
+  const sent = sendToAgent({
+    type: 'github_refresh_check',
+    requestId: `github-refresh-${Date.now()}`,
+    repository: { id: Number(row.dataset.repositoryId || 0), fullName: row.dataset.fullName || '' }
+  });
+  if (!sent && button) {
+    button.disabled = false;
+    button.textContent = '检查更新';
+  }
+}
+
+function refreshValue(change, side) {
+  const value = change[side];
+  if (change.field === 'readmeSha256') return side === 'before' ? '原 README' : '新 README';
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  return String(value ?? '无').slice(0, 48);
+}
+
+function applyGithubRefreshState(result) {
+  document.querySelectorAll('.github-refresh-check').forEach(button => {
+    button.disabled = false;
+    button.textContent = '检查更新';
+  });
+  const panel = document.getElementById('github-refresh-panel');
+  document.getElementById('github-confirm-refresh').disabled = false;
+  if (result.state === 'confirmation_required') {
+    githubRefresh = result;
+    panel.hidden = false;
+    document.getElementById('github-refresh-title').textContent = `${result.repository?.fullName || '项目'} 有更新`;
+    const list = document.getElementById('github-refresh-changes');
+    list.replaceChildren();
+    for (const change of result.changes || []) {
+      const item = document.createElement('li');
+      item.textContent = `${change.label}：${refreshValue(change, 'before')} → ${refreshValue(change, 'after')}`;
+      list.appendChild(item);
+    }
+    showHint('github-hint', result.message || '确认后一起更新', 'warning', { persist: true });
+    return;
+  }
+  panel.hidden = true;
+  githubRefresh = null;
+  if (result.state === 'no_changes') {
+    showHint('github-hint', result.message || '项目资料没有变化', 'success', { persist: true });
+  } else if (result.state === 'updated') {
+    showHint('github-hint', '项目资料已更新', 'success', { persist: true });
+    loadGithubStars();
+  } else if (result.state === 'cancelled') {
+    showHint('github-hint', '已取消项目刷新', 'warning');
+  }
+}
+
+function confirmGithubRefresh() {
+  if (!githubRefresh?.refreshId) return;
+  document.getElementById('github-confirm-refresh').disabled = true;
+  if (!sendToAgent({ type: 'github_refresh_confirm', refreshId: githubRefresh.refreshId })) {
+    document.getElementById('github-confirm-refresh').disabled = false;
+    showHint('github-hint', runtimeUnavailableMessage(), 'error', { persist: true });
+  }
+}
+
+function cancelGithubRefresh() {
+  if (githubRefresh?.refreshId) sendToAgent({ type: 'github_refresh_cancel', refreshId: githubRefresh.refreshId });
+  document.getElementById('github-refresh-panel').hidden = true;
+  githubRefresh = null;
+}
+
+function applyGithubError(result) {
+  document.getElementById('github-login').disabled = !githubIsConfigured;
+  document.getElementById('github-search').disabled = !githubIsAuthenticated;
+  document.getElementById('github-search').textContent = '搜索';
+  document.getElementById('github-load-stars').disabled = !githubIsAuthenticated;
+  document.getElementById('github-load-stars').textContent = '读取';
+  document.getElementById('github-confirm-refresh').disabled = false;
+  document.querySelectorAll('.github-refresh-check').forEach(button => {
+    button.disabled = false;
+    button.textContent = '检查更新';
+  });
+  if (String(result.requestType || '').startsWith('github_auth')) clearGithubAuthFlow();
+  const retry = result.retryAfter ? `（约 ${result.retryAfter} 秒后重试）` : '';
+  showHint('github-hint', `${result.message || 'GitHub 操作失败'}${retry}`, 'error', { persist: true });
+  if (result.code === 'auth_expired') requestGithubStatus();
+}
+
 function applyTaskStatus(snapshot) {
   const items = Array.isArray(snapshot.items) ? snapshot.items : [];
   const running = Number(snapshot.running || 0);
@@ -669,7 +1127,13 @@ function renderTaskList(targetId, items) {
     if (task.ok === false) {
       detail.textContent = task.error || task.hint || '任务失败';
     } else if (task.ok === true && (task.stage === 'done' || task.displayStage === 'done')) {
-      detail.textContent = task.vaultPath ? compactPath(task.vaultPath) : '已写入知识库';
+      const star = task.githubIntegration?.autoStar;
+      if (star?.attempted && star.ok === false) {
+        detail.textContent = `资产已写入；自动 Star 失败：${star.message || '请检查 GitHub 权限'}`;
+        detail.classList.add('warning');
+      } else {
+        detail.textContent = task.vaultPath ? compactPath(task.vaultPath) : '已写入知识库';
+      }
     } else {
       detail.textContent = task.url || '任务已进入队列';
     }
@@ -1390,6 +1854,7 @@ function openSettingsDetail(targetId) {
   const title = target.dataset.title || SETTINGS_DETAIL_TITLES[target.id] || '设置';
   document.getElementById('settings-detail-title').textContent = title;
   setView('settings-detail-view');
+  if (target.id === 'github-settings') requestGithubStatus();
   requestAnimationFrame(() => target.focus({ preventScroll: true }));
 }
 
@@ -1494,6 +1959,49 @@ function bindDerivedTaskActions() {
   });
 }
 
+function bindGithubControls() {
+  bindClick('refresh-github-status', requestGithubStatus);
+  bindClick('github-login', startGithubAuthorization);
+  bindClick('github-logout', logoutGithub);
+  bindClick('github-open-authorization', openGithubAuthorization);
+  bindClick('github-cancel-authorization', cancelGithubAuthorization);
+  bindClick('github-search', searchGithubRepositories);
+  bindClick('github-load-stars', () => loadGithubStars());
+  bindClick('github-load-more-stars', () => loadGithubStars({ append: true }));
+  bindClick('github-import-selected', importSelectedGithubStars);
+  bindClick('github-cancel-import', cancelGithubImport);
+  bindClick('github-confirm-refresh', confirmGithubRefresh);
+  bindClick('github-cancel-refresh', cancelGithubRefresh);
+  document.getElementById('github-auto-star').addEventListener('change', saveGithubAutoStar);
+  document.getElementById('github-search-query').addEventListener('keydown', event => {
+    if (event.key === 'Enter') searchGithubRepositories();
+  });
+  document.getElementById('github-select-all').addEventListener('change', event => {
+    for (const repo of githubStars) {
+      const key = githubRepositoryKey(repo);
+      if (!key) continue;
+      if (event.target.checked) githubSelected.add(key);
+      else githubSelected.delete(key);
+    }
+    renderGithubRepositories('github-stars-list', githubStars, { selectable: true });
+    updateGithubSelection();
+  });
+  document.getElementById('github-stars-list').addEventListener('change', event => {
+    const checkbox = event.target.closest('.github-repo-select');
+    if (!checkbox) return;
+    const row = checkbox.closest('.github-repo-row');
+    const key = String(row?.dataset.repositoryId || row?.dataset.fullName || '').toLowerCase();
+    if (!key) return;
+    if (checkbox.checked) githubSelected.add(key);
+    else githubSelected.delete(key);
+    updateGithubSelection();
+  });
+  document.getElementById('github-settings').addEventListener('click', event => {
+    const button = event.target.closest('.github-refresh-check');
+    if (button) checkGithubRefresh(button.closest('.github-repo-row'));
+  });
+}
+
 function syncModelPresetFromInput() {
   setControlValue('analysis-model-preset', presetFromModel(document.getElementById('analysis-model-id').value));
   updateVideoSettingsSummary();
@@ -1538,6 +2046,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   bindOptionControls();
   bindDerivedTaskActions();
+  bindGithubControls();
   if (!hasExtensionApis()) {
     renderDouyinPreview({
       ok: false,

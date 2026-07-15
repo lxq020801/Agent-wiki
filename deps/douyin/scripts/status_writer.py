@@ -25,6 +25,7 @@ _REDACTED_KEYS = {
     "accesstoken",
     "privatetoken",
 }
+_MAX_AUDIT_EVENTS = 2000
 
 
 def _canonical_secret_key(key: Any) -> str:
@@ -99,8 +100,25 @@ class StatusWriter:
             "started_at": time.time(),
             "updated_at": time.time(),
             "progress": {},       # 各阶段进度细节
+            "audit_events": [],   # 按发生顺序保留，可完整回放一次运行
+            "audit_event_count": 0,
         }
+        self._append_event("queued", {}, self._state["started_at"])
         self._write()
+
+    def _append_event(self, stage: str, info: dict[str, Any], at: float) -> None:
+        safe_info = _redact_status_value(info)
+        sequence = int(self._state.get("audit_event_count") or 0) + 1
+        self._state["audit_event_count"] = sequence
+        events = self._state.setdefault("audit_events", [])
+        events.append({
+            "sequence": sequence,
+            "stage": str(stage),
+            "at": at,
+            "info": safe_info,
+        })
+        if len(events) > _MAX_AUDIT_EVENTS:
+            del events[:len(events) - _MAX_AUDIT_EVENTS]
 
     def update(self, *, stage: str | None = None, ok: bool | None = None,
                error: str | None = None, **fields: Any) -> None:
@@ -122,6 +140,16 @@ class StatusWriter:
                 continue
             else:
                 self._state[k] = _redact_status_value(v)
+        event_stage = stage
+        if event_stage is None and "cost_estimate" in fields:
+            event_stage = "cost_estimated"
+        if event_stage is not None:
+            event_info = dict(fields)
+            if ok is not None:
+                event_info["ok"] = ok
+            if error is not None:
+                event_info["error"] = error
+            self._append_event(event_stage, event_info, now)
         self._state["updated_at"] = now
         self._write()
 
@@ -134,6 +162,7 @@ class StatusWriter:
             **safe_info,
             "at": now,
         }
+        self._append_event(sub_stage, safe_info, now)
         self._state.setdefault("progress", {})[sub_stage] = progress_item
         part_index = safe_info.get("part_index") if isinstance(safe_info, dict) else None
         if part_index is not None:

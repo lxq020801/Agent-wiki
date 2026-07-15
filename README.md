@@ -13,6 +13,7 @@ Agent-wiki 是一个本地优先的个人知识资产系统。它把抖音视频
 - 调用火山方舟 Ark 视频理解能力，把内容拆成结构化 Obsidian Markdown。
 - 通过 Chrome 扩展同步 Cookie、模型配置、任务状态和 Obsidian vault 路径。
 - 对高置信的 GitHub 项目线索生成派生候选，方便继续沉淀项目资料。
+- 通过 GitHub Device Flow 登录，搜索公开仓库、选择性导入 Stars，并手动确认项目资料刷新。
 
 ## 项目结构
 
@@ -72,6 +73,12 @@ cd Agent-wiki
 python3.11 install/bootstrap.py
 ```
 
+隔离验收或临时运行必须显式指定 vault；该路径会在检查前写入临时配置，且无效时直接报错，不会回退到 Obsidian 自动发现：
+
+```bash
+AGENT_WIKI_HOME=/tmp/agent-wiki-runtime python3.11 install/bootstrap.py --vault /tmp/agent-wiki-vault --skip-install-deps --skip-websocket-check
+```
+
 启动托管的本地控制服务：
 
 ```bash
@@ -105,6 +112,15 @@ python3.11 server/launcher.py cache clean --dry-run
 - 选择或识别 Obsidian vault
 - 在抖音页面提交“知识入库”任务
 
+GitHub 联动需要部署者先创建启用 Device Flow 的 GitHub App，并在启动服务前设置公开的 client ID：
+
+```bash
+export AGENT_WIKI_GITHUB_CLIENT_ID="<your-github-app-client-id>"
+python3.11 server/launcher.py restart
+```
+
+GitHub App 只授予 `Starring: Read and write` 与 `Metadata: Read-only`，不需要 client secret。完整配置和安全边界见 [GitHub 联动](docs/github-integration.md)。
+
 也可以用命令行提交链接：
 
 ```bash
@@ -114,6 +130,7 @@ python3 scripts/ingest_url.py "https://v.douyin.com/..."
 ## 隐私和安全
 
 - API Key、Cookie、任务状态和缓存只应该保存在 `~/.agent-wiki/`。
+- GitHub OAuth token 只保存在 macOS Keychain，不写 `~/.agent-wiki/`、扩展存储、日志或审计产物。
 - 不要把 `~/.agent-wiki/`、Obsidian 私人 vault、真实 Cookie 或真实 API Key 提交到仓库。
 - 项目里有脱敏逻辑，但开源前仍建议运行 secret scan（密钥扫描）。
 - 解析公开视频内容时，请遵守平台规则、版权要求和你所在地区的法律。
@@ -131,8 +148,11 @@ python3.11 tests/test_douyin_image_post_static.py
 python3.11 tests/test_runtime_version_protocol.py
 python3.11 tests/test_ci_integration.py
 python3.11 tests/test_release_audit.py
+python3.11 tests/test_github_service.py
+python3.11 tests/test_github_protocol.py
 node tests/test_extension_runtime_version.js
 node tests/test_extension_contract.js
+node tests/test_github_extension_contract.js
 node --check chrome-extension/background.js
 node --check chrome-extension/runtime-version.js
 node --check chrome-extension/popup/popup.js
@@ -152,6 +172,7 @@ python3.11 scripts/release_audit.py --history
 - [技术总览](docs/technical-overview.md)
 - [本地运行与诊断](docs/runtime-operations.md)
 - [WebSocket 协议](docs/websocket-protocol.md)
+- [GitHub 联动](docs/github-integration.md)
 - [Ark 视频理解链路](docs/ark-video-understanding.md)
 - [抖音工具说明](deps/douyin/SKILL.md)
 - [知识库结构约束](SCHEMA.md)

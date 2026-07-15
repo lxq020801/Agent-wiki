@@ -46,6 +46,10 @@ BOOTSTRAP_CONFIG_TEMPLATE = """\
 # 固定使用普通豆包 / 火山方舟 API
 active = "doubao"
 
+[github]
+# GitHub App Device Flow client ID（非 secret）；也可用 AGENT_WIKI_GITHUB_CLIENT_ID
+client_id = ""
+
 [ark]
 # 普通方舟 API Key（provider.active = "doubao" 时使用）
 api_key = ""
@@ -57,10 +61,11 @@ strategy = "doubao-seed-2-0-mini-260428"
 analyzer_fallback = "doubao-seed-2-0-mini-260428"
 
 [analysis]
+video_fps_mode = "auto"
 default_quality = "quality"
 balanced_target_frames = 240
 quality_target_frames = 1250
-fps_min = 0.2
+fps_min = 2.0
 fps_max = 5.0
 file_active_timeout_sec = 120
 
@@ -173,6 +178,7 @@ def ensure_runtime_dirs(result: CheckResult) -> None:
         "cache/videos",
         "handshake",
         "logs",
+        "github",
     ]:
         path = RUNTIME_ROOT / rel
         path.mkdir(parents=True, exist_ok=True)
@@ -193,6 +199,9 @@ def ensure_config_template(result: CheckResult) -> None:
     result.actions.append(f"config template created: {CONFIG_PATH}")
     result.missing_user_actions.append(
         "Open the extension and fill the selected provider API Key plus Obsidian vault path."
+    )
+    result.missing_user_actions.append(
+        "Configure AGENT_WIKI_GITHUB_CLIENT_ID before using GitHub Device Flow."
     )
 
 
@@ -413,12 +422,31 @@ def _active_key_label() -> str:
     return "Ark API Key"
 
 
+def _safe_explicit_vault(value: str) -> Path | None:
+    if not str(value or "").strip():
+        return None
+    path = Path(value).expanduser()
+    if not path.exists() or not path.is_dir():
+        return None
+    resolved = path.resolve()
+    if any(part.casefold() == ".obsidian" for part in resolved.parts):
+        return None
+    return resolved
+
+
+def _explicit_vault_arg(value: str) -> Path:
+    if not str(value or "").strip():
+        raise argparse.ArgumentTypeError("vault path must not be empty")
+    return Path(value)
+
+
 def check_vault(result: CheckResult) -> None:
     if not CONFIG_PATH.exists():
         return
 
     api_key = _active_api_key()
     vault_raw = _simple_config_value("vault", "path")
+    explicit_vault = bool(vault_raw)
     if not vault_raw:
         discovery = discover_vault(
             config_path=CONFIG_PATH,
@@ -447,10 +475,21 @@ def check_vault(result: CheckResult) -> None:
         )
 
     vault = Path(vault_raw).expanduser()
-    candidate = score_vault(vault, source="config.toml") if vault.exists() and vault.is_dir() else None
-    if not candidate and vault.exists() and vault.is_dir() and (vault / ".obsidian").is_dir():
-        candidate = True
-        result.actions.append(f"vault selected by user config: {vault}")
+    if explicit_vault:
+        selected = _safe_explicit_vault(vault_raw)
+        if selected is None:
+            result.missing_user_actions.append(
+                "The configured vault path is missing, not a directory, or points inside .obsidian. "
+                "Fix [vault].path; automatic discovery was not used."
+            )
+            return
+        vault = selected
+        candidate = score_vault(vault, source="config.toml")
+        if not candidate:
+            candidate = True
+            result.actions.append(f"vault selected by explicit config: {vault}")
+    else:
+        candidate = score_vault(vault, source="config.toml") if vault.exists() and vault.is_dir() else None
     if not candidate:
         discovery = discover_vault(
             config_path=CONFIG_PATH,
@@ -480,24 +519,57 @@ def check_vault(result: CheckResult) -> None:
     result.actions.append(f"vault structure ready: {vault}")
 
 
-def bootstrap(*, install_deps: bool = True) -> CheckResult:
+def bootstrap(
+    *,
+    install_deps: bool = True,
+    vault_path: Optional[Path] = None,
+    verify_websocket: bool = True,
+) -> CheckResult:
     result = CheckResult()
     ensure_runtime_dirs(result)
     ensure_douyin_venv(result, install_deps=install_deps)
     check_ffmpeg(result)
     ensure_config_template(result)
+    if vault_path is not None:
+        selected = _safe_explicit_vault(str(vault_path))
+        if selected is None:
+            result.add_warning(
+                "explicit vault must be an existing directory outside .obsidian",
+                fatal=True,
+            )
+        else:
+            write_vault_path_to_config(CONFIG_PATH, selected)
+            result.actions.append(f"explicit vault configured: {selected}")
     ensure_extension_copy(result)
-    check_websocket(result)
-    check_vault(result)
+    if verify_websocket:
+        check_websocket(result)
+    else:
+        result.actions.append("WebSocket health check skipped by explicit isolation option")
+    if result.ok:
+        check_vault(result)
     return result
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Prepare Agent-wiki runtime")
     parser.add_argument("--skip-install-deps", action="store_true", help="skip Python dependency installation")
+    parser.add_argument(
+        "--vault",
+        type=_explicit_vault_arg,
+        help="use this explicit vault and never fall back to automatic discovery",
+    )
+    parser.add_argument(
+        "--skip-websocket-check",
+        action="store_true",
+        help="do not inspect the default control-plane port",
+    )
     args = parser.parse_args(argv)
 
-    result = bootstrap(install_deps=not args.skip_install_deps)
+    result = bootstrap(
+        install_deps=not args.skip_install_deps,
+        vault_path=args.vault,
+        verify_websocket=not args.skip_websocket_check,
+    )
     print("Agent-wiki bootstrap")
     print(f"project: {PROJECT_ROOT}")
     print(f"runtime: {RUNTIME_ROOT}")

@@ -16,7 +16,7 @@ Flow:
   2. 创建 StatusWriter
   3. download（vendor + cookie 注入）
   4. analyze（Ark Files + Responses）
-  5. 写 SCHEMA Markdown + 更新 index.md + git commit
+  5. 写 SCHEMA Markdown + 更新 index.md
   6. task-file 模式归档到 archive/ 或 failed/
   7. 终态 status.json
 """
@@ -28,7 +28,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import time
 import traceback
@@ -41,6 +40,9 @@ from typing import Any
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
+_PROJECT_ROOT = _SCRIPTS_DIR.parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from analyzer import (  # noqa: E402
     AnalyzerError, FileNotActiveError, FileTooLargeError, FFprobeError,
@@ -58,8 +60,7 @@ from downloader import (  # noqa: E402
     download_video, fetch_metadata,
 )
 from status_writer import StatusWriter, write_terminal  # noqa: E402
-
-_PROJECT_ROOT = _SCRIPTS_DIR.parents[2]
+from server.vault_writer import vault_write_transaction  # noqa: E402
 
 DEFAULT_INGEST_INTENT = "knowledge_ingest"
 INGEST_PROFILE = {
@@ -67,8 +68,22 @@ INGEST_PROFILE = {
     "relative_root": "知识资产/知识入库",
     "section": "知识入库",
     "id_kind": "knowledge",
-    "tags": ("douyin", "knowledge-asset", "case-study"),
+    "tags": ("knowledge-asset",),
 }
+
+CONTENT_TAG_RULES = (
+    ("ai-agent", r"\b(?:ai[- ]?agent|agentic|agent)\b|智能体"),
+    ("knowledge-management", r"知识库|知识管理|知识资产|obsidian|笔记"),
+    ("prompt-engineering", r"\bprompt\b|提示词"),
+    ("code-generation", r"代码生成|编程|coding|codex|claude code"),
+    ("browser-automation", r"浏览器自动化|browser automation|playwright|selenium"),
+    ("web-scraping", r"爬虫|抓取|web scraping|crawler"),
+    ("api-design", r"\bapi\b|接口设计|endpoint"),
+    ("rag", r"\brag\b|检索增强"),
+    ("mcp", r"\bmcp\b|model context protocol"),
+    ("llm", r"\bllm\b|大语言模型|大模型"),
+    ("tool-use", r"工具调用|tool use|function calling"),
+)
 
 
 def normalize_ingest_intent(value: Any) -> str:
@@ -94,11 +109,25 @@ def _source_tag(source_media: str) -> str:
     return "image-analysis" if source_media == "douyin_image_post" else "video-analysis"
 
 
-def _tags_for_asset(ingest_intent: str, source_media: str) -> tuple[str, ...]:
-    tags = list(_intent_profile(ingest_intent)["tags"])
-    tag = _source_tag(source_media)
-    if tag not in tags:
-        tags.append(tag)
+def _content_tags(text: Any) -> list[str]:
+    source = str(text or "")
+    return [tag for tag, pattern in CONTENT_TAG_RULES if re.search(pattern, source, re.I)]
+
+
+def _tags_for_asset(
+    ingest_intent: str,
+    source_media: str,
+    content: Any = "",
+) -> tuple[str, ...]:
+    tags = _content_tags(content)
+    for tag in _intent_profile(ingest_intent)["tags"]:
+        if tag not in tags:
+            tags.append(tag)
+    media_tag = _source_tag(source_media)
+    if media_tag not in tags:
+        tags.append(media_tag)
+    if "douyin" not in tags:
+        tags.append("douyin")
     return tuple(tags)
 
 
@@ -115,28 +144,16 @@ def _visible_derived_items(decision: dict[str, Any] | None) -> list[dict[str, An
     ]
 
 
-def _format_derived_candidate_ids(items: list[dict[str, Any]]) -> str:
-    visible = [
-        item for item in items
-        if isinstance(item, dict) and item.get("decision") != "reject"
-    ]
-    if not visible:
-        return "[]"
-    ids = [str(item.get("id") or "") for item in visible if item.get("id")]
-    return json.dumps(ids, ensure_ascii=False)
-
-
 def _format_derived_tasks_section(
     decision: dict[str, Any] | None,
-    record_rel_path: str = "",
 ) -> str:
     if not decision or not decision.get("items"):
-        return "- 暂无派生候选。"
+        return "- 当前没有待执行或已完成的派生。"
     items = _visible_derived_items(decision)
     if not items:
         return "- 暂无达到候选阈值的派生任务。"
     lines = [
-        "> 高置信、低风险、可解析的候选会自动进入派生队列；其余候选需要确认或补充目标。",
+        "> 这里只展示结构化策略的真实状态；正式父子关系只在子资产成功生成后建立。",
         "",
         "| 决策 | 类型 | 名称 | 分数 | 状态 | 原因 |",
         "|---|---|---|---:|---|---|",
@@ -166,54 +183,208 @@ def _format_derived_tasks_section(
     if rejected or suppressed:
         lines.extend([
             "",
-            f"- 已过滤低分/重复/超限线索：{rejected + suppressed} 个。完整记录见系统记录。",
-        ])
-    if record_rel_path:
-        lines.extend([
-            "",
-            f"- 完整评分、证据和去重记录：`{record_rel_path}`",
+            f"- 已过滤低分、重复或非主要对象线索：{rejected + suppressed} 个。完整记录见运行审计。",
         ])
     return "\n".join(lines)
 
 
-def _strip_derived_decision_json_section(text: str) -> str:
-    """Keep machine-readable derivation JSON out of the durable asset body."""
-    source = str(text or "")
-    pattern = re.compile(r"\n?##\s*[九9][、.．]\s*派生决策 JSON\b.*?(?=\n##\s+|\Z)", re.S | re.I)
-    cleaned = pattern.sub("", source).strip()
-    return cleaned or source.strip()
+def _markdown_h2_sections(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Parse level-two Markdown sections without rewriting arbitrary text."""
+    preamble: list[str] = []
+    sections: list[tuple[str, list[str]]] = []
+    current: list[str] | None = None
+    for line in str(text or "").splitlines():
+        match = re.match(r"^##\s+(.+?)\s*$", line)
+        if match:
+            current = []
+            sections.append((match.group(1).strip(), current))
+        elif current is None:
+            preamble.append(line)
+        else:
+            current.append(line)
+    return "\n".join(preamble).strip(), [
+        (heading, "\n".join(body).strip()) for heading, body in sections
+    ]
 
 
-def _derived_decision_record_path(
-    vault_path: Path,
-    slug: str,
-    decision: dict[str, Any] | None,
+def _plain_heading(heading: str) -> str:
+    text = re.sub(r"^[^\w\u4e00-\u9fff]+", "", str(heading or ""))
+    text = re.sub(r"^[一二三四五六七八九十0-9]+[、.．]\s*", "", text)
+    return re.sub(r"\s+", "", text).lower()
+
+
+def _first_content_line(text: str) -> str:
+    for raw in str(text or "").splitlines():
+        line = raw.strip().strip("-*# >")
+        if line and not line.startswith("|") and not line.startswith("```"):
+            return line
+    return ""
+
+
+def _source_sections_from_analysis(text: str, fallback_title: str = "") -> dict[str, str]:
+    """Map model Markdown into the three durable source-note sections."""
+    preamble, parsed = _markdown_h2_sections(text)
+    concise: list[str] = []
+    complete: list[str] = []
+    ai_analysis: list[str] = []
+    for heading, body in parsed:
+        plain = _plain_heading(heading)
+        if "派生决策" in plain:
+            continue
+        if plain in {"简洁概括", "一句话资产摘要", "一句话总结", "摘要"}:
+            if body:
+                concise.append(body)
+        elif plain == "完整内容整理":
+            if body:
+                complete.append(body)
+        elif plain in {"ai分析", "人工智能分析"}:
+            if body:
+                ai_analysis.append(body)
+        elif any(marker in plain for marker in ("风险与待验证", "反幻觉自检", "可沉淀资产建议")):
+            if body:
+                ai_analysis.append(f"### {heading}\n\n{body}")
+        elif body:
+            complete.append(f"### {heading}\n\n{body}")
+    if preamble:
+        complete.insert(0, preamble)
+    concise_text = "\n\n".join(concise).strip()
+    complete_text = "\n\n".join(complete).strip()
+    ai_text = "\n\n".join(ai_analysis).strip()
+    if not concise_text:
+        concise_text = _first_content_line(complete_text) or fallback_title
+    if not complete_text:
+        complete_text = "来源未提供可进一步整理的正文。"
+    if not ai_text:
+        ai_text = "当前来源没有提供足够证据支持额外推断。"
+    return {
+        "concise": concise_text,
+        "complete": complete_text,
+        "ai_analysis": ai_text,
+    }
+
+
+def _replace_h2_section(text: str, headings: set[str], new_heading: str, body: str) -> str:
+    lines = str(text or "").splitlines()
+    start: int | None = None
+    end = len(lines)
+    for index, line in enumerate(lines):
+        match = re.match(r"^##\s+(.+?)\s*$", line)
+        if not match:
+            continue
+        plain = _plain_heading(match.group(1))
+        if start is None and plain in headings:
+            start = index
+        elif start is not None:
+            end = index
+            break
+    replacement = [f"## {new_heading}", "", body.strip()]
+    if start is None:
+        return str(text or "").rstrip() + "\n\n" + "\n".join(replacement) + "\n"
+    return "\n".join(lines[:start] + replacement + lines[end:]).rstrip() + "\n"
+
+
+def mark_derived_candidate_executed(
+    parent_path: Path | None,
     *,
-    task_id: str = "",
-    asset_id: str = "",
-) -> Path | None:
-    if not decision or not decision.get("items"):
-        return None
-    out_dir = vault_path / "系统记录" / "派生任务候选"
-    stable = task_id or asset_id or slug
-    stable = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff._-]+", "-", stable).strip("-")
-    if not stable:
-        stable = slug
-    return out_dir / f"{time.strftime('%Y%m%d')}-{stable}-{slug}.json"
-
-
-def _write_derived_decision_record(
-    path: Path | None,
-    decision: dict[str, Any] | None,
-) -> Path | None:
-    if not path or not decision or not decision.get("items"):
-        return None
-    out_dir = path.parent
-    out_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
-    return path
+    candidate_name: str,
+    child_link: str,
+    candidate_type: str = "",
+    candidate_url: str = "",
+) -> list[Path]:
+    """Update the parent status only after the child and both links exist."""
+    if parent_path is None or not parent_path.exists() or not child_link:
+        return []
+    parent_text = parent_path.read_text(encoding="utf-8")
+    _preamble, sections = _markdown_h2_sections(parent_text)
+    status_body = ""
+    ai_body = ""
+    status_span: tuple[int, int] | None = None
+    for heading, body in sections:
+        plain = _plain_heading(heading)
+        if plain in {"派生状态", "派生任务候选", "派生候选"}:
+            status_body = body
+            break
+        if plain == "ai分析":
+            ai_body = body
+            match = re.search(r"(?m)^###\s+派生状态(?:（系统）)?\s*$", body)
+            if match:
+                next_h3 = re.search(r"(?m)^###\s+", body[match.end():])
+                end = match.end() + next_h3.start() if next_h3 else len(body)
+                status_span = (match.start(), end)
+                status_body = body[match.end():end].strip()
+    lines = [
+        line for line in status_body.splitlines()
+        if "当前没有待执行或已完成的派生" not in line
+    ]
+    matched = False
+    for index, line in enumerate(lines):
+        if not line.strip().startswith("|"):
+            continue
+        columns = [
+            column.strip()
+            for column in re.split(r"(?<!\\)\|", line.strip().strip("|"))
+        ]
+        if len(columns) < 6:
+            continue
+        display_name = columns[2].replace("\\|", "|")
+        if columns[0] == "completed" and display_name == child_link:
+            matched = True
+            break
+        row_url = ""
+        link_match = re.fullmatch(r"\[([^]]+)]\((https?://.+)\)", display_name)
+        if link_match:
+            display_name, row_url = link_match.groups()
+        if display_name != candidate_name:
+            continue
+        if candidate_type and columns[1] != candidate_type:
+            continue
+        if candidate_url and row_url and row_url.rstrip("/") != candidate_url.rstrip("/"):
+            continue
+        columns[0] = "completed"
+        columns[2] = child_link.replace("|", "\\|")
+        columns[4] = "completed"
+        lines[index] = "| " + " | ".join(columns) + " |"
+        matched = True
+        break
+    if not matched and any(line.strip() == f"- 已完成：{child_link}" for line in lines):
+        matched = True
+    if not matched:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(f"- 已完成：{child_link}")
+    status_body = "\n".join(lines).strip()
+    if status_span is not None:
+        start, end = status_span
+        new_ai_body = (
+            ai_body[:start].rstrip()
+            + "\n\n### 派生状态（系统）\n\n"
+            + status_body
+            + ("\n\n" + ai_body[end:].lstrip() if ai_body[end:].strip() else "")
+        )
+        updated_parent = _replace_h2_section(
+            parent_text,
+            {"ai分析"},
+            "AI 分析",
+            new_ai_body,
+        )
+    elif ai_body:
+        updated_parent = _replace_h2_section(
+            parent_text,
+            {"ai分析"},
+            "AI 分析",
+            ai_body.rstrip() + "\n\n### 派生状态（系统）\n\n" + status_body,
+        )
+    else:
+        updated_parent = _replace_h2_section(
+            parent_text,
+            {"派生状态", "派生任务候选", "派生候选"},
+            "派生状态",
+            status_body,
+        )
+    if updated_parent != parent_text:
+        parent_path.write_text(updated_parent, encoding="utf-8")
+        return [parent_path]
+    return []
 
 
 def _derived_audit_artifacts(decision: dict[str, Any] | None) -> dict[str, Any]:
@@ -273,6 +444,7 @@ source_media: {source_media}
 ingest_intent: {ingest_intent}
 title: "{title_escaped}"
 source_url: "{url}"
+source_id: "{source_id}"
 ingested: {date_iso}
 updated: {date_iso}
 tags: {tags}
@@ -281,66 +453,39 @@ confidence: medium
 weight: 100
 status: active
 related: []
-derived_candidate_record: "{derived_candidate_record}"
-derived_candidate_ids: {derived_candidate_ids}
 platform: douyin
 author: "{author_escaped}"
 duration: "{duration_sec_fmt}"
 aweme_id: "{aweme_id}"
-video_path: "{video_path}"
-analyzed_at: "{analyzed_at}"
-file_id: "{file_id}"
-fps_used: {fps_used}
-chunked: {chunked}
-chunk_count: {chunk_count}
-audit_artifacts_dir: "{audit_artifacts_dir}"
-quality: "{quality}"
-model: "{model}"
-target_frames: {target_frames}
-actual_frames_estimate: {actual_frames_estimate}
-truncated: {truncated}
-input_tokens: {input_tokens}
-output_tokens: {output_tokens}
-total_tokens: {total_tokens}
-cost_rmb_estimate: {cost_rmb_estimate}
 ---
 
 # {title}
 
-## 基本信息
-- 平台：douyin
-- 作者：{author}
-- 时长：{duration_sec_fmt}
-- 原始链接：{url}
-- 收录时间：{analyzed_at}
-- 本地视频：![[{video_path}]]
+> 来源：douyin · {author} · {duration_sec_fmt} · [原始链接]({url})
+>
+{source_title_quote}
 
-## 一句话总结
-{summary}
+## 简洁概括
 
-## 资产化拆解
-- 资产用途：{asset_family}
-- 来源形态：{source_media}
-- 入库意图：{ingest_intent}
+{concise}
 
-## 派生任务候选
+## 完整内容整理
+
+### 原始媒体
+
+![[{video_path}]]
+
+{complete}
+
+## AI 分析
+
+> 以下内容由 AI 仅依据当前来源生成，不代表外部事实核验。
+
+{ai_analysis}
+
+### 派生状态（系统）
+
 {derived_tasks_section}
-
-## 拆解正文
-{body}
-
-## 分析元数据
-- 模型：{model}
-- 质量档：{quality}
-- 最高精拆 fps：{fps_used}
-- 分片：{chunked_text}
-- 分片策略：{chunk_strategy_summary}
-- 估算帧数：{actual_frames_estimate}
-- 审计产物目录：`{audit_artifacts_dir}`
-- 成本估算：{cost_rmb_estimate} RMB
-
-## 不确定/待验证
-- 模型输出未人工复核，标记为 medium confidence。
 """
 
 
@@ -352,6 +497,7 @@ source_media: {source_media}
 ingest_intent: {ingest_intent}
 title: "{title_escaped}"
 source_url: "{url}"
+source_id: "{source_id}"
 ingested: {date_iso}
 updated: {date_iso}
 tags: {tags}
@@ -360,57 +506,39 @@ confidence: medium
 weight: 100
 status: active
 related: []
-derived_candidate_record: "{derived_candidate_record}"
-derived_candidate_ids: {derived_candidate_ids}
 platform: douyin
 author: "{author_escaped}"
 image_count: {image_count}
 aweme_id: "{aweme_id}"
-analyzed_at: "{analyzed_at}"
-file_id: "{file_id}"
-quality: "{quality}"
-model: "{model}"
-truncated: {truncated}
-input_tokens: {input_tokens}
-output_tokens: {output_tokens}
-total_tokens: {total_tokens}
-cost_rmb_estimate: {cost_rmb_estimate}
 ---
 
 # {title}
 
-## 基本信息
-- 平台：douyin
-- 作者：{author}
-- 图片数量：{image_count}
-- 原始链接：{url}
-- 收录时间：{analyzed_at}
+> 来源：douyin · {author} · {image_count} 张图片 · [原始链接]({url})
+>
+{source_title_quote}
 
-## 原始图片
+## 简洁概括
+
+{concise}
+
+## 完整内容整理
+
+### 原始媒体
+
 {image_embeds}
 
-## 一句话总结
-{summary}
+{complete}
 
-## 资产化拆解
-- 资产用途：{asset_family}
-- 来源形态：{source_media}
-- 入库意图：{ingest_intent}
+## AI 分析
 
-## 派生任务候选
+> 以下内容由 AI 仅依据当前来源生成，不代表外部事实核验。
+
+{ai_analysis}
+
+### 派生状态（系统）
+
 {derived_tasks_section}
-
-## 拆解正文
-{body}
-
-## 分析元数据
-- 模型：{model}
-- 质量档：{quality}
-- 图片输入：{image_count}
-- 成本估算：{cost_rmb_estimate} RMB
-
-## 不确定/待验证
-- 模型输出未人工复核，标记为 medium confidence。
 """
 
 
@@ -423,6 +551,27 @@ def _asset_title(title: str, max_len: int = 60) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 1].rstrip() + "…"
+
+
+def _source_asset_title(title: str, max_len: int = 42) -> str:
+    raw = str(title or "")
+    first_line = next((line.strip() for line in raw.splitlines() if line.strip()), "")
+    cleaned = re.sub(r"https?://\S+", "", first_line)
+    cleaned = re.sub(r"(?:\s*#[^#\s]+)+\s*$", "", cleaned).strip(" -—:：|，,")
+    if len(cleaned) > max_len:
+        sentence = re.split(r"(?<=[。！？!?])", cleaned, maxsplit=1)[0].strip()
+        if 8 <= len(sentence) <= max_len:
+            cleaned = sentence
+    return _asset_title(cleaned or first_line or "未命名来源", max_len=max_len)
+
+
+def _source_title_quote(title: str) -> str:
+    lines = [line.strip() for line in str(title or "").splitlines() if line.strip()]
+    if not lines:
+        return "> 原始标题/文案：未提供"
+    return "\n".join(
+        [f"> 原始标题/文案：{lines[0]}"] + [f"> {line}" for line in lines[1:]]
+    )
 
 
 def _slug_for_vault(title: str, aweme_id: str, max_len: int = 50) -> str:
@@ -459,6 +608,38 @@ def _schema_asset_id(vault_path: Path, date: str, kind: str = "video") -> str:
     return f"{date}-{kind}-{max_seq + 1:03d}"
 
 
+def _frontmatter_scalar_values(text: str) -> dict[str, str]:
+    if not text.startswith("---\n"):
+        return {}
+    end = text.find("\n---", 4)
+    if end < 0:
+        return {}
+    values: dict[str, str] = {}
+    for line in text[4:end].splitlines():
+        if ":" not in line or line[:1].isspace():
+            continue
+        key, value = line.split(":", 1)
+        values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def _existing_source_asset(vault_path: Path, source_id: str, source_url: str) -> Path | None:
+    root = vault_path / "知识资产" / "知识入库"
+    if not root.exists():
+        return None
+    for path in root.glob("*.md"):
+        try:
+            values = _frontmatter_scalar_values(path.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            continue
+        stored_id = values.get("source_id") or values.get("aweme_id")
+        if source_id and stored_id == source_id:
+            return path
+        if source_url and values.get("source_url") == source_url:
+            return path
+    return None
+
+
 def _vault_relative_dir(config: Config) -> Path:
     rel = str(config.vault_relative_root or "知识资产/知识入库").strip().strip("/")
     rel_path = Path(rel)
@@ -493,60 +674,9 @@ def _summary_from_text(text: str, title: str) -> str:
     return (title[:77] + "...") if len(title) > 80 else title
 
 
-def _audit_artifacts_dir(result: Any) -> str:
-    artifacts = getattr(result, "audit_artifacts", {}) or {}
-    if isinstance(artifacts, dict):
-        return str(artifacts.get("dir") or "")
-    return ""
-
-
-def _chunk_strategy_summary(result: Any) -> str:
-    chunks = getattr(result, "chunks", []) or []
-    if not chunks:
-        fps = getattr(result, "fps_used", "")
-        return f"单文件分析，fps={fps}" if fps != "" else "单文件分析"
-    pieces: list[str] = []
-    for item in chunks:
-        if not isinstance(item, dict):
-            continue
-        part = item.get("part_index")
-        fps = item.get("fps")
-        start = item.get("start_sec")
-        end = item.get("end_sec")
-        adjusted = item.get("strategy_fps_adjusted")
-        validation = item.get("strategy_validation_fallback")
-        flags = []
-        if validation:
-            flags.append("结构兜底")
-        elif adjusted:
-            flags.append("fps调整")
-        suffix = f"（{'，'.join(flags)}）" if flags else ""
-        try:
-            time_range = f"{float(start):.0f}-{float(end):.0f}s"
-        except (TypeError, ValueError):
-            time_range = "?s"
-        pieces.append(f"part {part}: {time_range}, {fps}fps{suffix}")
-    return "；".join(pieces)
-
-
-def _ensure_vault_structure(vault_path: Path) -> list[Path]:
-    """Create the minimal SCHEMA.md directory structure required for writes."""
-    touched: list[Path] = []
-    for rel in [
-        "templates",
-        "raw/videos",
-        "raw/images",
-        "raw/web",
-        "raw/github",
-        "知识资产/知识入库",
-        "知识资产/GitHub项目",
-        "知识资产/网页剪藏",
-        "知识资产/代码模块",
-        "系统记录/维护报告",
-        "系统记录/变更日志",
-        "系统记录/回收站",
-    ]:
-        (vault_path / rel).mkdir(parents=True, exist_ok=True)
+def _ensure_vault_structure(vault_path: Path) -> None:
+    """Create write targets without copying project rules into the user vault."""
+    (vault_path / "知识资产" / "知识入库").mkdir(parents=True, exist_ok=True)
 
     index = vault_path / "index.md"
     if not index.exists():
@@ -555,37 +685,26 @@ def _ensure_vault_structure(vault_path: Path) -> list[Path]:
             f"# 知识库索引\n> 最后更新：{today} | 资产总数：0\n\n## 知识入库\n",
             encoding="utf-8",
         )
-        touched.append(index)
 
-    gitignore = vault_path / ".gitignore"
-    if not gitignore.exists():
-        gitignore.write_text(
-            ".obsidian/workspace.json\n"
-            ".obsidian/workspace-mobile.json\n"
-            ".trash/\n"
-            ".DS_Store\n",
-            encoding="utf-8",
-        )
-        touched.append(gitignore)
 
-    for name in ["SCHEMA.md"]:
-        src = _PROJECT_ROOT / name
-        dest = vault_path / name
-        if src.exists() and not dest.exists():
-            shutil.copy2(src, dest)
-            touched.append(dest)
-
-    for folder in ["templates", "rules"]:
-        src_dir = _PROJECT_ROOT / folder
-        dest_dir = vault_path / folder
-        if src_dir.exists():
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            for src in src_dir.glob("*.md"):
-                dest = dest_dir / src.name
-                if not dest.exists():
-                    shutil.copy2(src, dest)
-                    touched.append(dest)
-    return touched
+def _indexed_asset_count(vault_path: Path, lines: list[str]) -> int:
+    asset_root = vault_path / "知识资产"
+    existing: dict[str, Path] = {}
+    if asset_root.exists():
+        for path in asset_root.glob("**/*.md"):
+            try:
+                values = _frontmatter_scalar_values(path.read_text(encoding="utf-8", errors="ignore"))
+            except OSError:
+                continue
+            if values.get("id") and values.get("status", "active") != "archived":
+                existing[path.stem] = path
+    indexed: set[str] = set()
+    for line in lines:
+        for target in re.findall(r"\[\[([^|\]#]+)", line):
+            stem = Path(target.strip()).stem
+            if stem in existing:
+                indexed.add(stem)
+    return len(indexed)
 
 
 def _update_index(
@@ -595,7 +714,7 @@ def _update_index(
     summary: str,
     *,
     section: str = "知识入库",
-    tags: tuple[str, ...] = ("douyin", "knowledge-asset", "case-study"),
+    tags: tuple[str, ...] = ("knowledge-asset",),
 ) -> None:
     index = vault_path / "index.md"
     today = datetime.now().strftime("%Y-%m-%d")
@@ -614,14 +733,6 @@ def _update_index(
     if not lines or not lines[0].startswith("# 知识库索引"):
         lines.insert(0, "# 知识库索引")
 
-    # Refresh or insert metadata line.
-    asset_count = sum(1 for _ in (vault_path / "知识资产").glob("**/*.md"))
-    meta = f"> 最后更新：{today} | 资产总数：{asset_count}"
-    if len(lines) > 1 and lines[1].startswith("> 最后更新："):
-        lines[1] = meta
-    else:
-        lines.insert(1, meta)
-
     try:
         section_idx = lines.index(f"## {section}")
     except ValueError:
@@ -632,94 +743,17 @@ def _update_index(
     while insert_at < len(lines) and lines[insert_at].strip() == "":
         insert_at += 1
     lines.insert(insert_at, entry)
+
+    asset_count = _indexed_asset_count(vault_path, lines)
+    meta = f"> 最后更新：{today} | 资产总数：{asset_count}"
+    if len(lines) > 1 and lines[1].startswith("> 最后更新："):
+        lines[1] = meta
+    else:
+        lines.insert(1, meta)
     index.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
-def _git_commit(
-    vault_path: Path,
-    title: str,
-    paths: list[Path],
-    *,
-    asset_type: str = "video_analysis",
-) -> str:
-    """Commit only the files touched by this ingest. Raises on failure."""
-    if not (vault_path / ".git").exists():
-        init = subprocess.run(
-            ["git", "init"],
-            cwd=vault_path,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if init.returncode != 0:
-            raise RuntimeError("git init failed")
-
-    for key, value in [
-        ("user.name", "Agent-wiki"),
-        ("user.email", "agent-wiki@local"),
-    ]:
-        current = subprocess.run(
-            ["git", "config", "--local", "--get", key],
-            cwd=vault_path,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if current.returncode != 0 or not current.stdout.strip():
-            set_config = subprocess.run(
-                ["git", "config", "--local", key, value],
-                cwd=vault_path,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if set_config.returncode != 0:
-                raise RuntimeError(f"git config {key} failed")
-
-    rel_paths: list[str] = []
-    for path in paths:
-        try:
-            rel = path.resolve().relative_to(vault_path.resolve())
-        except ValueError:
-            continue
-        rel_paths.append(str(rel))
-    if not rel_paths:
-        raise RuntimeError("no vault files to commit")
-
-    add = subprocess.run(
-        ["git", "add", "--", *rel_paths],
-        cwd=vault_path,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if add.returncode != 0:
-        raise RuntimeError("git add failed")
-
-    diff = subprocess.run(
-        ["git", "diff", "--cached", "--quiet"],
-        cwd=vault_path,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if diff.returncode == 0:
-        return "no changes to commit"
-
-    safe_title = re.sub(r"\s+", " ", title).strip()[:60] or "douyin video"
-    commit = subprocess.run(
-        ["git", "commit", "-m", f"ingest({asset_type}): {safe_title}"],
-        cwd=vault_path,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if commit.returncode != 0:
-        raise RuntimeError("git commit failed")
-    return "committed"
-
-
-def write_to_vault(
+def _write_to_vault_locked(
     config: Config,
     meta: VideoMeta,
     video_path: Path,
@@ -729,12 +763,16 @@ def write_to_vault(
     derived_decision: dict[str, Any] | None = None,
     task_id: str = "",
 ) -> tuple[Path, str]:
-    """把拆解结果写到 vault。返回 Markdown 路径和 git 状态。"""
+    """把拆解结果写到 vault；Git 由用户或外部备份工具管理。"""
     ingest_intent = normalize_ingest_intent(ingest_intent)
     profile = _intent_profile(ingest_intent)
     source_media = "douyin_video"
-    tags = _tags_for_asset(ingest_intent, source_media)
-    touched = _ensure_vault_structure(config.vault_path)
+    existing = _existing_source_asset(config.vault_path, meta.aweme_id, meta.source_url)
+    if existing is not None:
+        return existing, "existing_source"
+    sections = _source_sections_from_analysis(result.text, meta.title)
+    tags = _tags_for_asset(ingest_intent, source_media, f"{meta.title}\n{result.text}")
+    _ensure_vault_structure(config.vault_path)
 
     # 视频文件搬进 vault（如果不在 vault 内）
     raw_dir = config.vault_path / "raw" / "videos"
@@ -744,7 +782,6 @@ def write_to_vault(
         target_video = raw_dir / video_path.name
         if not target_video.exists():
             shutil.copy2(video_path, target_video)
-            touched.append(target_video)
         vault_video_path = target_video
     else:
         vault_video_path = video_path
@@ -757,11 +794,11 @@ def write_to_vault(
     md_dir.mkdir(parents=True, exist_ok=True)
     date = time.strftime("%Y%m%d")
     date_iso = datetime.now().strftime("%Y-%m-%d")
-    slug = _slug_for_vault(meta.title, meta.aweme_id)
+    asset_title = _source_asset_title(meta.title)
+    slug = _slug_for_vault(asset_title, meta.aweme_id)
     md_path = md_dir / f"{date}-{slug}.md"
     asset_id = _schema_asset_id(config.vault_path, date, profile["id_kind"])
-    asset_title = _asset_title(meta.title)
-    summary = _summary_from_text(result.text, asset_title)
+    summary = _summary_from_text(sections["concise"], asset_title)
     if derived_decision and isinstance(derived_decision.get("items"), list):
         rel_parent = str(md_path.relative_to(config.vault_path))
         for item in derived_decision["items"]:
@@ -772,25 +809,12 @@ def write_to_vault(
             item["parent_asset_path"] = rel_parent
             item["parent_source_url"] = meta.source_url
             item["parent_aweme_id"] = meta.aweme_id
-    derived_items = _visible_derived_items(derived_decision)
-    decision_path = _derived_decision_record_path(
-        config.vault_path,
-        slug,
-        derived_decision,
-        task_id=task_id,
-        asset_id=asset_id,
-    )
-    decision_rel_path = (
-        str(decision_path.relative_to(config.vault_path))
-        if decision_path is not None
-        else ""
-    )
-
     content = _FM_TPL.format(
         asset_id=asset_id,
         asset_family=profile["asset_family"],
         source_media=source_media,
         ingest_intent=ingest_intent,
+        source_id=meta.aweme_id,
         aweme_id=meta.aweme_id,
         url=meta.source_url,
         title=asset_title,
@@ -800,44 +824,17 @@ def write_to_vault(
         summary_escaped=_yaml_escape(summary),
         author=meta.author or "[未知]",
         author_escaped=_yaml_escape(meta.author or ""),
-        author_sec_uid=meta.author_sec_uid,
         date_iso=date_iso,
-        duration_sec=round(meta.duration_sec, 2),
         duration_sec_fmt=_format_duration(meta.duration_sec),
-        cover_url=meta.cover_url,
         video_path=str(rel_video),
-        analyzed_at=datetime.now().isoformat(timespec="seconds"),
-        file_id=result.file_id,
-        fps_used=result.fps_used,
-        chunked="true" if getattr(result, "chunked", False) else "false",
-        chunk_count=getattr(result, "chunk_count", 1) or 1,
-        chunked_text=(
-            f"是，{getattr(result, 'chunk_count', 1) or 1} 段"
-            if getattr(result, "chunked", False)
-            else "否"
-        ),
-        chunk_strategy_summary=_chunk_strategy_summary(result),
-        audit_artifacts_dir=_yaml_escape(_audit_artifacts_dir(result)),
-        quality=result.quality,
-        model=result.model,
-        target_frames=result.target_frames,
-        actual_frames_estimate=result.actual_frames_estimate,
-        truncated="true" if result.truncated else "false",
-        input_tokens=cost.get("input_tokens", 0),
-        output_tokens=cost.get("output_tokens", 0),
-        total_tokens=cost.get("total_tokens", 0),
-        cost_rmb_estimate=cost.get("cost_rmb_estimate", 0),
-        derived_candidate_record=_yaml_escape(decision_rel_path),
-        derived_candidate_ids=_format_derived_candidate_ids(derived_items),
-        derived_tasks_section=_format_derived_tasks_section(derived_decision, decision_rel_path),
-        body=_strip_derived_decision_json_section(result.text),
+        source_title_quote=_source_title_quote(meta.title),
+        concise=sections["concise"],
+        complete=sections["complete"],
+        ai_analysis=sections["ai_analysis"],
+        derived_tasks_section=_format_derived_tasks_section(derived_decision),
     )
 
     md_path.write_text(content, encoding="utf-8")
-    touched.append(md_path)
-    decision_path = _write_derived_decision_record(decision_path, derived_decision)
-    if decision_path:
-        touched.append(decision_path)
     _update_index(
         config.vault_path,
         md_path,
@@ -846,17 +843,33 @@ def write_to_vault(
         section=profile["section"],
         tags=tags,
     )
-    touched.append(config.vault_path / "index.md")
-    git_status = _git_commit(
-        config.vault_path,
-        asset_title,
-        touched,
-        asset_type=profile["asset_family"],
-    )
-    return md_path, git_status
+    return md_path, "not_managed"
 
 
-def write_image_post_to_vault(
+def write_to_vault(
+    config: Config,
+    meta: VideoMeta,
+    video_path: Path,
+    result,
+    cost: dict[str, Any],
+    ingest_intent: str = DEFAULT_INGEST_INTENT,
+    derived_decision: dict[str, Any] | None = None,
+    task_id: str = "",
+) -> tuple[Path, str]:
+    with vault_write_transaction(config.vault_path):
+        return _write_to_vault_locked(
+            config,
+            meta,
+            video_path,
+            result,
+            cost,
+            ingest_intent,
+            derived_decision,
+            task_id,
+        )
+
+
+def _write_image_post_to_vault_locked(
     config: Config,
     meta: VideoMeta,
     image_paths: list[Path],
@@ -870,12 +883,17 @@ def write_image_post_to_vault(
     ingest_intent = normalize_ingest_intent(ingest_intent)
     profile = _intent_profile(ingest_intent)
     source_media = "douyin_image_post"
-    tags = _tags_for_asset(ingest_intent, source_media)
-    touched = _ensure_vault_structure(config.vault_path)
+    existing = _existing_source_asset(config.vault_path, meta.aweme_id, meta.source_url)
+    if existing is not None:
+        return existing, "existing_source"
+    sections = _source_sections_from_analysis(result.text, meta.title)
+    tags = _tags_for_asset(ingest_intent, source_media, f"{meta.title}\n{result.text}")
+    _ensure_vault_structure(config.vault_path)
 
     date = time.strftime("%Y%m%d")
     date_iso = datetime.now().strftime("%Y-%m-%d")
-    slug = _slug_for_vault(meta.title, meta.aweme_id)
+    asset_title = _source_asset_title(meta.title)
+    slug = _slug_for_vault(asset_title, meta.aweme_id)
     raw_dir = config.vault_path / "raw" / "images" / f"{date}-{slug}"
     raw_dir.mkdir(parents=True, exist_ok=True)
 
@@ -886,7 +904,6 @@ def write_image_post_to_vault(
         target = raw_dir / f"{index:02d}{suffix}"
         if not target.exists():
             shutil.copy2(image_path, target)
-            touched.append(target)
         vault_images.append(target)
 
     rel_images = [path.relative_to(config.vault_path) for path in vault_images]
@@ -896,9 +913,7 @@ def write_image_post_to_vault(
     md_dir.mkdir(parents=True, exist_ok=True)
     md_path = md_dir / f"{date}-{slug}.md"
     asset_id = _schema_asset_id(config.vault_path, date, profile["id_kind"])
-    asset_title = _asset_title(meta.title)
-    summary = _summary_from_text(result.text, asset_title)
-    analyzed_at = datetime.now().isoformat(timespec="seconds")
+    summary = _summary_from_text(sections["concise"], asset_title)
     if derived_decision and isinstance(derived_decision.get("items"), list):
         rel_parent = str(md_path.relative_to(config.vault_path))
         for item in derived_decision["items"]:
@@ -909,25 +924,12 @@ def write_image_post_to_vault(
             item["parent_asset_path"] = rel_parent
             item["parent_source_url"] = meta.source_url
             item["parent_aweme_id"] = meta.aweme_id
-    derived_items = _visible_derived_items(derived_decision)
-    decision_path = _derived_decision_record_path(
-        config.vault_path,
-        slug,
-        derived_decision,
-        task_id=task_id,
-        asset_id=asset_id,
-    )
-    decision_rel_path = (
-        str(decision_path.relative_to(config.vault_path))
-        if decision_path is not None
-        else ""
-    )
-
     content = _IMAGE_FM_TPL.format(
         asset_id=asset_id,
         asset_family=profile["asset_family"],
         source_media=source_media,
         ingest_intent=ingest_intent,
+        source_id=meta.aweme_id,
         aweme_id=meta.aweme_id,
         url=meta.source_url,
         title=asset_title,
@@ -938,28 +940,16 @@ def write_image_post_to_vault(
         author=meta.author or "[未知]",
         author_escaped=_yaml_escape(meta.author or ""),
         date_iso=date_iso,
-        analyzed_at=analyzed_at,
         image_count=len(vault_images),
         image_embeds=image_embeds,
-        file_id=result.file_id,
-        quality=result.quality,
-        model=result.model,
-        truncated="true" if result.truncated else "false",
-        input_tokens=cost.get("input_tokens", 0),
-        output_tokens=cost.get("output_tokens", 0),
-        total_tokens=cost.get("total_tokens", 0),
-        cost_rmb_estimate=cost.get("cost_rmb_estimate", 0),
-        derived_candidate_record=_yaml_escape(decision_rel_path),
-        derived_candidate_ids=_format_derived_candidate_ids(derived_items),
-        derived_tasks_section=_format_derived_tasks_section(derived_decision, decision_rel_path),
-        body=_strip_derived_decision_json_section(result.text),
+        source_title_quote=_source_title_quote(meta.title),
+        concise=sections["concise"],
+        complete=sections["complete"],
+        ai_analysis=sections["ai_analysis"],
+        derived_tasks_section=_format_derived_tasks_section(derived_decision),
     )
 
     md_path.write_text(content, encoding="utf-8")
-    touched.append(md_path)
-    decision_path = _write_derived_decision_record(decision_path, derived_decision)
-    if decision_path:
-        touched.append(decision_path)
     _update_index(
         config.vault_path,
         md_path,
@@ -968,14 +958,30 @@ def write_image_post_to_vault(
         section=profile["section"],
         tags=tags,
     )
-    touched.append(config.vault_path / "index.md")
-    git_status = _git_commit(
-        config.vault_path,
-        asset_title,
-        touched,
-        asset_type=profile["asset_family"],
-    )
-    return md_path, git_status
+    return md_path, "not_managed"
+
+
+def write_image_post_to_vault(
+    config: Config,
+    meta: VideoMeta,
+    image_paths: list[Path],
+    result,
+    cost: dict[str, Any],
+    ingest_intent: str = DEFAULT_INGEST_INTENT,
+    derived_decision: dict[str, Any] | None = None,
+    task_id: str = "",
+) -> tuple[Path, str]:
+    with vault_write_transaction(config.vault_path):
+        return _write_image_post_to_vault_locked(
+            config,
+            meta,
+            image_paths,
+            result,
+            cost,
+            ingest_intent,
+            derived_decision,
+            task_id,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1113,6 +1119,7 @@ async def run_task(
             file_endpoint=config.files_endpoint,
             quality=quality,
             quality_params={
+                "fps_mode": config.video_fps_mode,
                 "fps_min": config.fps_min,
                 "fps_max": config.fps_max,
                 "target_frames": (

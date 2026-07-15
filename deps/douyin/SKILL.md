@@ -9,19 +9,19 @@ python3 scripts/ingest_url.py "<douyin-url>"
 
 The Chrome extension may submit a Douyin ingest task as an auxiliary entry.
 It must not run the ingest itself; the Agent/local execution layer owns
-download, analysis, vault writes, status, and git commits.
+download, analysis, vault writes, index updates, and status.
 
 ## Modules
 
 | Module | Responsibility |
 |---|---|
-| `scripts/ingest.py` | Orchestrate download, analysis, vault write, index update, git commit |
+| `scripts/ingest.py` | Orchestrate download, analysis, source-note/raw-media write, and index update |
 | `scripts/downloader.py` | Resolve Douyin URL, inject Cookie in memory, download mp4 |
 | `scripts/analyzer.py` | Choose Ark video input path, call Responses API, return analysis text |
 | `scripts/config_loader.py` | Load `~/.agent-wiki/config.toml` |
 | `scripts/status_writer.py` | Write diagnostic status JSON for Agent/debugging |
 | `scripts/cost_estimator.py` | Estimate RMB cost from model usage |
-| `scripts/derive_strategy.py` | Score, dedupe, and record bounded derivation candidates |
+| `scripts/derive_strategy.py` | Score, dedupe, and record all qualifying primary-subject candidates |
 | `scripts/derive_executor.py` | Resolve approved derived targets, generate child assets, and link parent/child notes |
 | `vendor/` | Embedded Douyin crawler code; treat as read-only |
 
@@ -42,19 +42,19 @@ The WebSocket control server writes:
    Cookie path. The current runtime always uses the `quality` analysis profile.
 3. `downloader.py` converts the extension's Netscape Cookie file into a header
    string and monkey-patches the vendor crawler in memory.
-4. `analyzer.py` uses the ordinary Ark API path only: upload the local video
-   through Files API with `preprocess_configs.video.fps` and
+4. `analyzer.py` runs a local change-only prescan for automatic mode, then uses
+   the ordinary Ark API path only: upload the local video through Files API
+   with `preprocess_configs.video.fps` and
    `preprocess_configs.video.model`, wait for the file to become `active`, then
    call Responses API with `input_video.file_id` and `store=true`.
 5. `ingest.py` chooses the media-specific knowledge prompt and writes one
    SCHEMA-compliant source note to `知识资产/知识入库/` with
    `asset_family: knowledge_asset` and `ingest_intent: knowledge_ingest`. It then
-   updates `index.md` and commits only the files touched by this ingest.
-6. For `knowledge_ingest`, `derive_strategy.py` turns model-discovered follow-up
-   leads into bounded candidates. It writes full candidate records under
-   `系统记录/派生任务候选/`; the parent Markdown only stores
-   `derived_candidate_record` and `derived_candidate_ids` plus a readable
-   summary table. High-confidence, low-risk, resolvable candidates may be queued
+   updates `index.md` without initializing, staging, or committing Git.
+6. For `knowledge_ingest`, `derive_strategy.py` turns model-discovered primary
+   introduced objects into candidates without a fixed count limit. Full records
+   stay in runtime `run-artifacts/`; the parent Markdown only stores a readable
+   status table. High-confidence, low-risk, resolvable candidates may be queued
    as `derived_ingest` tasks by the WebSocket service after the parent asset is
    written. Ambiguous or missing-target candidates remain pending for extension
    confirmation. Debuggable process nodes live under
@@ -80,17 +80,21 @@ The WebSocket control server writes:
   error.
 - Ordinary Ark Responses content uses `{"type": "input_video", "file_id": ...}`
   plus an `input_text` prompt.
-- The current runtime fixes analysis to `quality` (1250 target frames). The Chrome extension must
-  not expose quality, fps, or target-frame settings.
+- The current runtime fixes analysis to `quality` and supports
+  `analysis.video_fps_mode = "auto" | "fixed_2" | "fixed_3" | "fixed_5"`.
+  Automatic mode uses a local 1fps grayscale prescan only to measure visual
+  change, then requests 2-5fps for model analysis. Model video uploads reject
+  values below 2fps. The Chrome extension does not expose the legacy quality
+  or target-frame settings.
 - Re-upload when fps/model preprocessing changes; do not cache `file_id`.
 - Responses memory is short-term only. Store returned `response_id` under
   `~/.agent-wiki/responses-memory/` for 3 days; never write it into
   vault Markdown, task status, or strategy logs.
-- Videos longer than 10 minutes first run a full-video overview at `1fps` when
-  duration is `<= 1230s` (20m30s), leaving about 20 frames of margin below the
-  1250-frame safety target, with the strategy model (`models.strategy`, default
-  mini). If duration is `> 1230s`, treat it as an ultra-long video: split the
-  overview phase too, analyze each 240s chunk at `1fps`, synthesize those rough
+- Videos longer than 10 minutes first run a full-video overview at `2fps` when
+  duration is `<= 615s`, leaving 20 frames of margin below the 1250-frame
+  safety target, with the strategy model (`models.strategy`, default mini). If
+  duration is `> 615s`, split the overview phase too, analyze each 240s chunk
+  at `2fps`, synthesize those rough
   overviews into the same global strategy JSON, then continue through the normal
   long-video precision pass. This means duration scales by chunk count; the
   practical limits are still file size, download time, task timeout, and model
@@ -104,10 +108,24 @@ The WebSocket control server writes:
   repaired once by the same strategy model via `previous_response_id`; structural
   fallback and fps adjustment are tracked separately. Text-only Responses then
   synthesizes the final asset body from the overview and chunk results.
+- A shorter high-change video is also split when its selected upload FPS would
+  exceed the 1250-frame safety budget; this preserves the requested density
+  instead of silently relying on server-side uniform resampling.
 - Video ingest writes inspectable intermediate artifacts under
   `~/.agent-wiki/run-artifacts/{task_id}/`: mini chunk overview
   prompts/outputs, strategy synthesis and repair artifacts, Lite chunk
   prompts/outputs, and final synthesis prompt/output.
+- `01-sampling/evidence.json` separates local reproduction frames and
+  thumbnails, requested upload FPS/planned frame counts, and provider-returned
+  facts. Ark does not return the exact frames consumed by the model, so that
+  field remains explicitly unavailable instead of being inferred.
+- Status JSON keeps an ordered, redacted `audit_events` timeline in addition
+  to the latest progress snapshot.
+- Cost estimation uses provider-returned usage only. It splits audio from
+  non-audio input, preserves reasoning-token facts without double charging,
+  applies the official input-length tier per model, and sums Mini/Lite stages
+  separately. Unknown pricing returns unavailable instead of using a fallback
+  rate; the amount remains an estimate rather than the final invoice.
 - Strategy fallbacks and JSON repair results are logged to
   `~/.agent-wiki/logs/video-strategy-events.jsonl` without API keys,
   Cookies, Bearer tokens, or `response_id`.
@@ -123,42 +141,39 @@ asset_family: knowledge_asset
 source_media: douyin_video
 ingest_intent: knowledge_ingest
 source_url: "https://v.douyin.com/..."
-tags: [douyin, knowledge-asset, case-study, video-analysis]
+tags: [ai-agent, knowledge-asset, video-analysis, douyin]
 confidence: medium
 status: active
 ```
 
-The note body should include source metadata, one-sentence summary, model output,
-and analysis metadata. API keys and Cookies must never be written to Markdown,
-logs, or final Agent replies.
+The note body uses `简洁概括`, `完整内容整理`, and clearly marked `AI 分析`.
+Model names, token counts, costs, and analysis parameters stay in status/audit
+records. API keys and Cookies must never be written to Markdown, logs, or final
+Agent replies.
 
 Derivation candidate contract:
 
 - Only `knowledge_ingest` generates derivation candidates.
 - Allowed target types: `github_project`, `official_doc`, `web_research`.
 - Full candidate fields, scores, evidence, dedupe status, parent lineage, and
-  acceptance criteria live in `系统记录/派生任务候选/*.json`.
+  acceptance criteria live in runtime `run-artifacts/`.
 - Raw candidate extraction, normalization, target resolution, source material,
   prompt/output, write result, and linkback records live in runtime
   `run-artifacts/`.
 - Candidate-stage Markdown must not contain future `[[wikilink]]` targets. The
   derived executor writes child assets first, then updates parent/child links.
+- Candidate count has no fixed maximum. A candidate survives when the object is
+  a primary introduced subject with sufficient evidence and a real asset use;
+  incidental mentions stay in the source note or audit trail.
 - GitHub candidates may omit URL when the project name and context are strong;
   `derive_executor.py` resolves them through GitHub API search plus README
   comparison before writing the child asset.
-- Only high-confidence GitHub candidates are eligible for automatic enqueue in
+- All qualifying high-confidence GitHub candidates are eligible for automatic enqueue in
   the current runtime. `official_doc` and `web_research` remain candidates that
   require manual confirmation or a supplied URL until official-domain and
   multi-source verification are implemented.
-- Frontmatter only stores lightweight references:
-
-```yaml
-derived_candidate_record: "系统记录/派生任务候选/20260705-example.json"
-derived_candidate_ids: ["dt-..."]
-```
-
-- Do not write full candidate objects, `scores`, `evidence`, `dedupe`, or
-  execution status objects into asset frontmatter.
+- Do not write candidate references, full candidate objects, `scores`,
+  `evidence`, `dedupe`, or execution status objects into asset frontmatter.
 
 ## Verification
 
