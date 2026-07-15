@@ -4764,14 +4764,31 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
 
     original_resolve = derive_executor.resolve_target
     original_model = derive_executor._call_lite_model
+    original_register = derive_executor.register_derived_repository
+    register_calls = []
+
+    def fake_register(repository, asset_path, vault_path, **_kwargs):
+        asset_path = Path(asset_path)
+        vault_path = Path(vault_path)
+        parent_text = parent.read_text(encoding="utf-8")
+        index_text = (vault_path / "index.md").read_text(encoding="utf-8")
+        assert asset_path.exists()
+        assert f"[[{asset_path.stem}|" in index_text
+        assert "| completed | github_project |" in parent_text
+        assert not (vault_path / ".git").exists()
+        register_calls.append(repository)
+        return {"ok": True, "autoStar": {"attempted": False, "ok": True}}
+
     try:
         derive_executor.resolve_target = fake_resolve
         derive_executor._call_lite_model = fake_model
+        derive_executor.register_derived_repository = fake_register
         sw = FakeStatusWriter()
         summary = derive_executor.execute_derived_task(task, cfg, sw)
     finally:
         derive_executor.resolve_target = original_resolve
         derive_executor._call_lite_model = original_model
+        derive_executor.register_derived_repository = original_register
 
     child = Path(summary["vault_path"])
     assert child.exists()
@@ -4831,7 +4848,64 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
             assert target_stem in all_stems, target_stem
     assert any(update.get("stage") == "resolving_target" for update in sw.updates)
     assert summary["git_status"] == "not_managed"
+    assert len(register_calls) == 1
+    assert summary["github_integration"]["autoStar"]["attempted"] is False
     assert not (vault / ".git").exists()
+
+
+def test_derived_completion_matches_exact_candidate_identity(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from ingest import mark_derived_candidate_executed
+
+    parent = tmp / "candidate-identity-parent.md"
+    parent.write_text(
+        "# Parent\n\n## AI 分析\n\n### 派生状态（系统）\n\n"
+        "| 决策 | 类型 | 名称 | 分数 | 状态 | 原因 |\n"
+        "|---|---|---|---:|---|---|\n"
+        "| candidate | github_project | [Lang](https://github.com/example/lang) | 90 | auto_ready | A |\n"
+        "| candidate | github_project | [LangGraph](https://github.com/example/langgraph) | 95 | auto_ready | B |\n",
+        encoding="utf-8",
+    )
+
+    mark_derived_candidate_executed(
+        parent,
+        candidate_name="LangGraph",
+        candidate_type="github_project",
+        candidate_url="https://github.com/example/langgraph",
+        child_link="[[langgraph|LangGraph]]",
+    )
+
+    text = parent.read_text(encoding="utf-8")
+    assert "| candidate | github_project | [Lang](https://github.com/example/lang) | 90 | auto_ready |" in text
+    assert "| completed | github_project | [[langgraph\\|LangGraph]] | 95 | completed |" in text
+
+    mark_derived_candidate_executed(
+        parent,
+        candidate_name="LangGraph",
+        candidate_type="github_project",
+        candidate_url="https://github.com/example/langgraph",
+        child_link="[[langgraph|LangGraph]]",
+    )
+    rerun_text = parent.read_text(encoding="utf-8")
+    assert rerun_text == text
+    assert "- 已完成：" not in rerun_text
+
+    legacy = tmp / "candidate-identity-legacy-parent.md"
+    legacy.write_text(
+        "# Parent\n\n## AI 分析\n\n### 派生状态（系统）\n\n"
+        "- 已完成：[[legacy-child|Legacy Child]]\n",
+        encoding="utf-8",
+    )
+    mark_derived_candidate_executed(
+        legacy,
+        candidate_name="Legacy Child",
+        candidate_type="github_project",
+        child_link="[[legacy-child|Legacy Child]]",
+    )
+    legacy_text = legacy.read_text(encoding="utf-8")
+    assert legacy_text.count("- 已完成：[[legacy-child|Legacy Child]]") == 1
 
 
 def test_derive_executor_main_preserves_derived_ingest_status(tmp: Path) -> None:
@@ -5011,6 +5085,7 @@ def main() -> int:
         test_derive_executor_existing_child_backlink_is_cleaned(tmp)
         test_derive_executor_sanitizes_leading_h1()
         test_derive_executor_execute_task_writes_child_and_backlinks(tmp)
+        test_derived_completion_matches_exact_candidate_identity(tmp)
         test_derive_executor_main_preserves_derived_ingest_status(tmp)
         test_websocket_auto_enqueue_respects_ignored_candidate(tmp)
         test_websocket_rejects_removed_viral_intent(tmp)

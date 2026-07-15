@@ -7,6 +7,7 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'chrome-extension/popup/popup.html'), 'utf8');
 const js = fs.readFileSync(path.join(root, 'chrome-extension/popup/popup.js'), 'utf8');
+const css = fs.readFileSync(path.join(root, 'chrome-extension/popup/popup.css'), 'utf8');
 
 for (const id of [
   'github-settings',
@@ -46,5 +47,7 @@ assert.doesNotMatch(html + js, /github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{20,
 assert.match(js, /function applyGithubStatus[\s\S]*status\.state === 'unchecked'/);
 assert.doesNotMatch(js, /function applyModelStatus[\s\S]*?status\.state === 'unchecked'[\s\S]*?function applyVideoStatus/);
 assert.match(js, /githubIntegration\?\.autoStar/);
+assert.match(js, /if \(page <= 1\) githubSelected\.clear\(\)/);
+assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important;/);
 
 console.log('GitHub extension contract checks passed');

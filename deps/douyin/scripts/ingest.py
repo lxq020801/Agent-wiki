@@ -40,6 +40,9 @@ from typing import Any
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
+_PROJECT_ROOT = _SCRIPTS_DIR.parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from analyzer import (  # noqa: E402
     AnalyzerError, FileNotActiveError, FileTooLargeError, FFprobeError,
@@ -57,6 +60,7 @@ from downloader import (  # noqa: E402
     download_video, fetch_metadata,
 )
 from status_writer import StatusWriter, write_terminal  # noqa: E402
+from server.vault_writer import vault_write_transaction  # noqa: E402
 
 DEFAULT_INGEST_INTENT = "knowledge_ingest"
 INGEST_PROFILE = {
@@ -284,6 +288,8 @@ def mark_derived_candidate_executed(
     *,
     candidate_name: str,
     child_link: str,
+    candidate_type: str = "",
+    candidate_url: str = "",
 ) -> list[Path]:
     """Update the parent status only after the child and both links exist."""
     if parent_path is None or not parent_path.exists() or not child_link:
@@ -312,10 +318,27 @@ def mark_derived_candidate_executed(
     ]
     matched = False
     for index, line in enumerate(lines):
-        if not line.strip().startswith("|") or candidate_name not in line:
+        if not line.strip().startswith("|"):
             continue
-        columns = [column.strip() for column in line.strip().strip("|").split("|")]
+        columns = [
+            column.strip()
+            for column in re.split(r"(?<!\\)\|", line.strip().strip("|"))
+        ]
         if len(columns) < 6:
+            continue
+        display_name = columns[2].replace("\\|", "|")
+        if columns[0] == "completed" and display_name == child_link:
+            matched = True
+            break
+        row_url = ""
+        link_match = re.fullmatch(r"\[([^]]+)]\((https?://.+)\)", display_name)
+        if link_match:
+            display_name, row_url = link_match.groups()
+        if display_name != candidate_name:
+            continue
+        if candidate_type and columns[1] != candidate_type:
+            continue
+        if candidate_url and row_url and row_url.rstrip("/") != candidate_url.rstrip("/"):
             continue
         columns[0] = "completed"
         columns[2] = child_link.replace("|", "\\|")
@@ -323,6 +346,8 @@ def mark_derived_candidate_executed(
         lines[index] = "| " + " | ".join(columns) + " |"
         matched = True
         break
+    if not matched and any(line.strip() == f"- 已完成：{child_link}" for line in lines):
+        matched = True
     if not matched:
         if lines and lines[-1].strip():
             lines.append("")
@@ -728,7 +753,7 @@ def _update_index(
     index.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
-def write_to_vault(
+def _write_to_vault_locked(
     config: Config,
     meta: VideoMeta,
     video_path: Path,
@@ -821,7 +846,30 @@ def write_to_vault(
     return md_path, "not_managed"
 
 
-def write_image_post_to_vault(
+def write_to_vault(
+    config: Config,
+    meta: VideoMeta,
+    video_path: Path,
+    result,
+    cost: dict[str, Any],
+    ingest_intent: str = DEFAULT_INGEST_INTENT,
+    derived_decision: dict[str, Any] | None = None,
+    task_id: str = "",
+) -> tuple[Path, str]:
+    with vault_write_transaction(config.vault_path):
+        return _write_to_vault_locked(
+            config,
+            meta,
+            video_path,
+            result,
+            cost,
+            ingest_intent,
+            derived_decision,
+            task_id,
+        )
+
+
+def _write_image_post_to_vault_locked(
     config: Config,
     meta: VideoMeta,
     image_paths: list[Path],
@@ -911,6 +959,29 @@ def write_image_post_to_vault(
         tags=tags,
     )
     return md_path, "not_managed"
+
+
+def write_image_post_to_vault(
+    config: Config,
+    meta: VideoMeta,
+    image_paths: list[Path],
+    result,
+    cost: dict[str, Any],
+    ingest_intent: str = DEFAULT_INGEST_INTENT,
+    derived_decision: dict[str, Any] | None = None,
+    task_id: str = "",
+) -> tuple[Path, str]:
+    with vault_write_transaction(config.vault_path):
+        return _write_image_post_to_vault_locked(
+            config,
+            meta,
+            image_paths,
+            result,
+            cost,
+            ingest_intent,
+            derived_decision,
+            task_id,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────

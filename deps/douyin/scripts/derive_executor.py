@@ -41,9 +41,11 @@ from status_writer import StatusWriter, write_terminal
 
 try:
     from server.github_service import register_derived_repository
+    from server.vault_writer import vault_write_transaction
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
     from server.github_service import register_derived_repository
+    from server.vault_writer import vault_write_transaction
 
 
 DEFAULT_BRIDGE_ROOT = Path.home() / ".agent-wiki"
@@ -1397,6 +1399,125 @@ def _link_parent_child(parent_path: Path | None, child_path: Path, child_title: 
     return []
 
 
+def _register_github_target(target: ResolvedTarget, asset_path: Path, vault_path: Path) -> dict[str, Any]:
+    if target.kind != "github_project" or not isinstance(target.raw.get("repo"), dict):
+        return {}
+    try:
+        return register_derived_repository(
+            target.raw["repo"],
+            asset_path,
+            vault_path,
+            readme=str(target.raw.get("readme") or ""),
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "code": "github_post_write_hook_failed",
+            "message": type(exc).__name__,
+        }
+
+
+def _link_existing_target_locked(
+    *,
+    config: Config,
+    task: dict[str, Any],
+    candidate: dict[str, Any],
+    target: ResolvedTarget,
+    parent_link: str,
+    parent_path: Path | None,
+) -> dict[str, Any] | None:
+    existing_path, existing_title = _existing_asset_for_target(config.vault_path, target)
+    if not existing_path:
+        return None
+    title = existing_title or existing_path.stem
+    relation = str(candidate.get("relationType") or "派生资产")
+    text = existing_path.read_text(encoding="utf-8", errors="ignore")
+    summary = _summary_from_text(text, title)
+    section = "GitHub项目" if target.kind == "github_project" else "网页剪藏"
+    tags = _tag_list(target.kind, text)
+    _ensure_vault_structure(config.vault_path)
+    _update_index(config.vault_path, existing_path, title, summary, section=section, tags=tags)
+    touched = [config.vault_path / "index.md"]
+    touched.extend(_link_parent_child(parent_path, existing_path, title, relation))
+    touched.extend(_link_child_back_to_parent(parent_path, existing_path, parent_link, relation))
+    child_link = _asset_link(existing_path, title)
+    touched.extend(mark_derived_candidate_executed(
+        parent_path,
+        candidate_name=str(candidate.get("name") or target.title),
+        child_link=child_link,
+        candidate_type=str(candidate.get("targetType") or candidate.get("target_type") or target.kind),
+        candidate_url=str(candidate.get("targetUrl") or candidate.get("target_url") or target.url),
+    ))
+    return {
+        "path": existing_path,
+        "title": title,
+        "relation": relation,
+        "child_link": child_link,
+        "touched": list(dict.fromkeys(touched)),
+    }
+
+
+def _finish_existing_target(
+    *,
+    task: dict[str, Any],
+    candidate: dict[str, Any],
+    target: ResolvedTarget,
+    config: Config,
+    parent_link: str,
+    parent_path: Path | None,
+    existing: dict[str, Any],
+    audit_root: Path | None,
+    audit_files: dict[str, Any],
+) -> dict[str, Any]:
+    existing_path = existing["path"]
+    github_integration = _register_github_target(target, existing_path, config.vault_path)
+    resolved_summary = {
+        "url": target.url,
+        "title": target.title,
+        "kind": target.kind,
+        "confidence": target.confidence,
+        "evidence": target.evidence + ["vault 中已存在同一目标资产，已避免重复写入"],
+    }
+    git_status = "not_managed"
+    touched = existing["touched"]
+    _add_artifact(audit_files, "derive_write_result", _write_audit_json(
+        audit_root,
+        "06-write-result.json",
+        {
+            "mode": "existing_asset",
+            "vault_path": str(existing_path),
+            "git_status": git_status,
+            "touched": [str(path) for path in touched],
+            "github_integration": github_integration,
+        },
+    ))
+    _add_artifact(audit_files, "derive_linkback", _write_audit_json(
+        audit_root,
+        "07-linkback.json",
+        {
+            "parent_path": str(parent_path) if parent_path else "",
+            "parent_link": parent_link,
+            "child_path": str(existing_path),
+            "child_link": existing["child_link"],
+            "relation": existing["relation"],
+            "updated_files": [str(path) for path in touched],
+        },
+    ))
+    return {
+        "vault_path": str(existing_path),
+        "git_status": git_status,
+        "candidate_id": candidate.get("id"),
+        "target_type": candidate.get("targetType") or candidate.get("target_type"),
+        "resolved_target": resolved_summary,
+        "parent_asset_path": str(parent_path) if parent_path else "",
+        "asset_link": existing["child_link"],
+        "cost": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost_rmb_estimate": 0.0},
+        "dedupe_status": "existing_asset_linked",
+        "github_integration": github_integration,
+        "audit_artifacts": _artifact_index(audit_root, audit_files),
+    }
+
+
 def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter) -> dict[str, Any]:
     candidate = task.get("candidate") if isinstance(task.get("candidate"), dict) else {}
     if not candidate:
@@ -1448,59 +1569,27 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
     ))
 
     parent_link, parent_path = _parent_link(task, config.vault_path)
-    existing_path, existing_title = _existing_asset_for_target(config.vault_path, target)
-    if existing_path:
-        relation = str(candidate.get("relationType") or "派生资产")
-        touched = _link_parent_child(parent_path, existing_path, existing_title or existing_path.stem, relation)
-        touched.extend(_link_child_back_to_parent(parent_path, existing_path, parent_link, relation))
-        child_link = _asset_link(existing_path, existing_title or existing_path.stem)
-        resolved_summary = {
-            "url": target.url,
-            "title": target.title,
-            "kind": target.kind,
-            "confidence": target.confidence,
-            "evidence": target.evidence + ["vault 中已存在同一目标资产，已避免重复写入"],
-        }
-        touched.extend(mark_derived_candidate_executed(
-            parent_path,
-            candidate_name=str(candidate.get("name") or target.title),
-            child_link=child_link,
-        ))
-        git_status = "not_managed"
-        _add_artifact(audit_files, "derive_write_result", _write_audit_json(
-            audit_root,
-            "06-write-result.json",
-            {
-                "mode": "existing_asset",
-                "vault_path": str(existing_path),
-                "git_status": git_status,
-                "touched": [str(path) for path in touched],
-            },
-        ))
-        _add_artifact(audit_files, "derive_linkback", _write_audit_json(
-            audit_root,
-            "07-linkback.json",
-            {
-                "parent_path": str(parent_path) if parent_path else "",
-                "parent_link": parent_link,
-                "child_path": str(existing_path),
-                "child_link": child_link,
-                "relation": relation,
-                "updated_files": [str(path) for path in touched],
-            },
-        ))
-        return {
-            "vault_path": str(existing_path),
-            "git_status": git_status,
-            "candidate_id": candidate.get("id"),
-            "target_type": candidate.get("targetType") or candidate.get("target_type"),
-            "resolved_target": resolved_summary,
-            "parent_asset_path": str(parent_path) if parent_path else "",
-            "asset_link": child_link,
-            "cost": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost_rmb_estimate": 0.0},
-            "dedupe_status": "existing_asset_linked",
-            "audit_artifacts": _artifact_index(audit_root, audit_files),
-        }
+    with vault_write_transaction(config.vault_path):
+        existing = _link_existing_target_locked(
+            config=config,
+            task=task,
+            candidate=candidate,
+            target=target,
+            parent_link=parent_link,
+            parent_path=parent_path,
+        )
+    if existing:
+        return _finish_existing_target(
+            task=task,
+            candidate=candidate,
+            target=target,
+            config=config,
+            parent_link=parent_link,
+            parent_path=parent_path,
+            existing=existing,
+            audit_root=audit_root,
+            audit_files=audit_files,
+        )
     prompt = _build_prompt(task, candidate, target, parent_link)
     _add_artifact(audit_files, "derive_model_prompt", _write_audit_text(
         audit_root,
@@ -1559,34 +1648,63 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
     cost = estimate_cost_rmb(config.analyzer_model, usage)
 
     sw.update(stage="writing_vault", audit_artifacts=_artifact_index(audit_root, audit_files))
-    _ensure_vault_structure(config.vault_path)
-    frontmatter, md_path, tags = _child_frontmatter(
-        config=config,
-        task=task,
-        candidate=candidate,
-        target=target,
-        title=title,
-        summary=summary,
-        parent_link=parent_link,
-        body_text=body,
-    )
-    md_path.parent.mkdir(parents=True, exist_ok=True)
-    if md_path.exists():
-        raise DeriveError("asset_exists", f"派生资产已存在：{md_path}", recoverable=True)
-    child_body = "# " + title + "\n\n" + body.strip() + "\n"
-    child_body = _append_backlink_section(
-        child_body,
-        parent_link,
-        str(candidate.get("relationType") or "派生资产"),
-    )
-    md_path.write_text(frontmatter + "\n" + child_body, encoding="utf-8")
-    section = "GitHub项目" if target.kind == "github_project" else "网页剪藏"
-    _update_index(config.vault_path, md_path, title, summary, section=section, tags=tags)
-    touched = [md_path, config.vault_path / "index.md"]
-    relation = str(candidate.get("relationType") or "派生资产")
-    parent_touched = _link_parent_child(parent_path, md_path, title, relation)
-    touched.extend(parent_touched)
-    child_link = _asset_link(md_path, title)
+    with vault_write_transaction(config.vault_path):
+        raced_existing = _link_existing_target_locked(
+            config=config,
+            task=task,
+            candidate=candidate,
+            target=target,
+            parent_link=parent_link,
+            parent_path=parent_path,
+        )
+        if raced_existing is None:
+            _ensure_vault_structure(config.vault_path)
+            frontmatter, md_path, tags = _child_frontmatter(
+                config=config,
+                task=task,
+                candidate=candidate,
+                target=target,
+                title=title,
+                summary=summary,
+                parent_link=parent_link,
+                body_text=body,
+            )
+            md_path.parent.mkdir(parents=True, exist_ok=True)
+            if md_path.exists():
+                raise DeriveError("asset_exists", f"派生资产已存在：{md_path}", recoverable=True)
+            child_body = "# " + title + "\n\n" + body.strip() + "\n"
+            child_body = _append_backlink_section(
+                child_body,
+                parent_link,
+                str(candidate.get("relationType") or "派生资产"),
+            )
+            md_path.write_text(frontmatter + "\n" + child_body, encoding="utf-8")
+            section = "GitHub项目" if target.kind == "github_project" else "网页剪藏"
+            _update_index(config.vault_path, md_path, title, summary, section=section, tags=tags)
+            touched = [md_path, config.vault_path / "index.md"]
+            relation = str(candidate.get("relationType") or "派生资产")
+            parent_touched = _link_parent_child(parent_path, md_path, title, relation)
+            touched.extend(parent_touched)
+            child_link = _asset_link(md_path, title)
+            touched.extend(mark_derived_candidate_executed(
+                parent_path,
+                candidate_name=str(candidate.get("name") or target.title),
+                child_link=child_link,
+                candidate_type=str(candidate.get("targetType") or candidate.get("target_type") or target.kind),
+                candidate_url=str(candidate.get("targetUrl") or candidate.get("target_url") or target.url),
+            ))
+    if raced_existing:
+        return _finish_existing_target(
+            task=task,
+            candidate=candidate,
+            target=target,
+            config=config,
+            parent_link=parent_link,
+            parent_path=parent_path,
+            existing=raced_existing,
+            audit_root=audit_root,
+            audit_files=audit_files,
+        )
     resolved_summary = {
         "url": target.url,
         "title": target.title,
@@ -1594,28 +1712,8 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
         "confidence": target.confidence,
         "evidence": target.evidence,
     }
-    touched.extend(mark_derived_candidate_executed(
-        parent_path,
-        candidate_name=str(candidate.get("name") or target.title),
-        child_link=child_link,
-    ))
     git_status = "not_managed"
-    github_integration: dict[str, Any] = {}
-    if target.kind == "github_project" and isinstance(target.raw.get("repo"), dict):
-        try:
-            github_integration = register_derived_repository(
-                target.raw["repo"],
-                md_path,
-                config.vault_path,
-                readme=str(target.raw.get("readme") or ""),
-            )
-        except Exception as exc:
-            # Registry or Star failures remain advisory after the asset is written.
-            github_integration = {
-                "ok": False,
-                "code": "github_post_write_hook_failed",
-                "message": type(exc).__name__,
-            }
+    github_integration = _register_github_target(target, md_path, config.vault_path)
     _add_artifact(audit_files, "derive_write_result", _write_audit_json(
         audit_root,
         "06-write-result.json",

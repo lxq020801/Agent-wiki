@@ -73,6 +73,12 @@ cd Agent-wiki
 python3.11 install/bootstrap.py
 ```
 
+隔离验收或临时运行必须显式指定 vault；该路径会在检查前写入临时配置，且无效时直接报错，不会回退到 Obsidian 自动发现：
+
+```bash
+AGENT_WIKI_HOME=/tmp/agent-wiki-runtime python3.11 install/bootstrap.py --vault /tmp/agent-wiki-vault --skip-install-deps --skip-websocket-check
+```
+
 启动托管的本地控制服务：
 
 ```bash

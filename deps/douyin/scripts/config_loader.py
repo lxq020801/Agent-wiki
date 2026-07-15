@@ -372,6 +372,10 @@ active = "doubao"
 api_key = ""
 endpoint = "https://ark.cn-beijing.volces.com/api/v3"
 
+[github]
+# GitHub App Device Flow client ID（非 secret）；也可用 AGENT_WIKI_GITHUB_CLIENT_ID
+client_id = ""
+
 [models]
 # 拆解模型（Seed 2.0 Lite，信息提取能力更强）
 analyzer = "doubao-seed-2-0-lite-260428"

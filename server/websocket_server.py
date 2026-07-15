@@ -30,6 +30,7 @@ from install.vault_discovery import (
     write_vault_path_to_config,
 )
 from server.github_service import GitHubService, GitHubServiceError
+from video_sampling import normalize_fps_mode
 
 
 PRODUCT_ID = "agent-wiki"
@@ -270,6 +271,19 @@ def _normalize_chunk_concurrency(value, default=2):
     except (TypeError, ValueError):
         parsed = default
     return max(1, min(4, parsed))
+
+
+def _safe_explicit_vault_path(value):
+    raw = str(value or '').strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.exists() or not path.is_dir():
+        return None
+    resolved = path.resolve()
+    if any(part.casefold() == '.obsidian' for part in resolved.parts):
+        return None
+    return resolved
 
 
 def default_task_concurrency(runtime_root=None):
@@ -1923,22 +1937,20 @@ class LibrarianServer:
             'chunk_concurrency',
             '2',
         )
+        existing_video_fps_mode = _simple_config_value(
+            config_path,
+            'analysis',
+            'video_fps_mode',
+            'auto',
+        )
 
         incoming_vault = config_data.get('vaultPath') or config_data.get('vault_path') or ''
         vault_path = existing_vault_path or ''
         if incoming_vault:
-            candidate = score_vault(Path(incoming_vault).expanduser(), source='config_update')
-            if candidate:
-                vault_path = candidate.path
-            else:
-                discovery = discover_vault(
-                    config_path=config_path,
-                    user_hint=incoming_vault,
-                    cwd=PROJECT_ROOT,
-                    runtime_root=self.runtime_root,
-                )
-                if discovery.selected:
-                    vault_path = discovery.selected.path
+            selected_vault = _safe_explicit_vault_path(incoming_vault)
+            if selected_vault is None:
+                raise ValueError('vaultPath must be an existing directory outside .obsidian')
+            vault_path = str(selected_vault)
         if not vault_path:
             discovery = discover_vault(
                 config_path=config_path,
@@ -1981,6 +1993,16 @@ class LibrarianServer:
             incoming_chunk_concurrency if incoming_chunk_concurrency is not None else existing_chunk_concurrency,
             default=_normalize_chunk_concurrency(existing_chunk_concurrency),
         )
+        video_fps_mode_raw = (
+            _first_config_value(video_config, ('fpsMode', 'videoFpsMode', 'video_fps_mode'))
+            or _first_config_value(config_data, ('videoFpsMode', 'video_fps_mode'))
+            or existing_video_fps_mode
+            or 'auto'
+        )
+        try:
+            video_fps_mode = normalize_fps_mode(video_fps_mode_raw)
+        except ValueError as exc:
+            raise ValueError('video fps mode must be auto, fixed_2, fixed_3, or fixed_5') from exc
 
         previous_active_key = _provider_api_key(config_path, previous_provider)
         if legacy_agent_plan_payload:
@@ -2022,9 +2044,10 @@ analyzer_fallback = "{_toml_escape(fallback_model)}"
 
 [analysis]
 default_quality = "{_toml_escape(quality)}"
+video_fps_mode = "{_toml_escape(video_fps_mode)}"
 balanced_target_frames = 240
 quality_target_frames = 1250
-fps_min = 0.2
+fps_min = 2.0
 fps_max = 5.0
 file_active_timeout_sec = 120
 response_timeout_sec = 900
@@ -2068,16 +2091,26 @@ task_concurrency = {int(task_concurrency)}
         config_path = self.config_path()
         configured = _simple_config_value(config_path, 'vault', 'path')
         if configured:
-            candidate = score_vault(Path(configured).expanduser(), source='config.toml')
-            if candidate:
+            selected = _safe_explicit_vault_path(configured)
+            if selected is None:
                 return {
-                    'ok': True,
-                    'state': 'ready',
-                    'path': candidate.path,
-                    'source': candidate.source,
-                    'score': candidate.score,
-                    'reasons': candidate.reasons,
+                    'ok': False,
+                    'state': 'invalid',
+                    'path': configured,
+                    'source': 'config.toml',
+                    'score': 0,
+                    'reasons': ['explicit_config_invalid'],
+                    'message': '已配置的 vault 路径无效；不会自动改用其他 Obsidian vault。',
                 }
+            candidate = score_vault(selected, source='config.toml')
+            return {
+                'ok': True,
+                'state': 'ready',
+                'path': str(selected),
+                'source': 'config.toml',
+                'score': candidate.score if candidate else 0,
+                'reasons': candidate.reasons if candidate else ['explicit_config'],
+            }
 
         discovery = discover_vault(
             config_path=config_path,
@@ -2301,30 +2334,24 @@ task_concurrency = {int(task_concurrency)}
                 'path': '',
                 'message': '用户取消选择',
             }
-        selected = Path(proc.stdout.strip()).expanduser()
-        candidate = score_vault(selected, source='user_selected')
-        if candidate:
-            write_vault_path_to_config(self.config_path(), candidate.path_obj)
+        selected = _safe_explicit_vault_path(proc.stdout.strip())
+        if selected is not None:
+            candidate = score_vault(selected, source='user_selected')
+            write_vault_path_to_config(self.config_path(), selected)
             return {
                 'ok': True,
                 'state': 'ready',
-                'path': candidate.path,
-                'source': candidate.source,
-                'score': candidate.score,
-                'reasons': candidate.reasons,
-            }
-        if selected.exists() and selected.is_dir() and (selected / '.obsidian').is_dir():
-            resolved = selected.resolve()
-            write_vault_path_to_config(self.config_path(), resolved)
-            return {
-                'ok': True,
-                'state': 'ready',
-                'path': str(resolved),
+                'path': str(selected),
                 'source': 'user_selected',
-                'score': 35,
-                'reasons': ['.obsidian', 'user_selected'],
+                'score': candidate.score if candidate else 0,
+                'reasons': candidate.reasons if candidate else ['user_selected'],
             }
-        return self.discover_and_persist_vault(str(selected))
+        return {
+            'ok': False,
+            'state': 'invalid',
+            'path': '',
+            'message': '所选路径无效或位于 .obsidian 内部',
+        }
 
     async def check_model_health(self, config_data):
         status = await asyncio.to_thread(self._check_model_health_sync, config_data)

@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -287,6 +288,36 @@ class GitHubServiceTests(unittest.TestCase):
             cancelled = service.cancel_import_batch(batch["id"])
             self.assertEqual(cancelled["state"], "cancelled")
 
+    def test_import_batch_accepts_all_loaded_stars_over_one_hundred(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _store, _vault = self.make_service(Path(tmp))
+            repositories = [
+                {"id": index, "fullName": f"owner/repo-{index}"}
+                for index in range(1, 122)
+            ]
+
+            batch = service.create_import_batch(repositories)
+
+            self.assertEqual(batch["total"], 121)
+
+    def test_slug_collision_does_not_overwrite_another_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            api = FakeAPI(repository(repository_id=101, full_name="foo/a.b"))
+            service, _store, vault = self.make_service(root, api=api)
+            first = service.ingest_repository({"id": 101, "fullName": "foo/a.b"})
+            first_path = vault / first["assetPath"]
+            first_text = first_path.read_text(encoding="utf-8")
+
+            api.repo = repository(repository_id=202, full_name="foo/a-b")
+            second = service.ingest_repository({"id": 202, "fullName": "foo/a-b"})
+            second_path = vault / second["assetPath"]
+
+            self.assertNotEqual(first_path, second_path)
+            self.assertEqual(first_path.read_text(encoding="utf-8"), first_text)
+            self.assertIn('repository_id: 202', second_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(list((vault / "知识资产" / "GitHub项目").glob("*.md"))), 2)
+
     def test_concurrent_ingest_creates_one_asset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service, _store, vault = self.make_service(Path(tmp))
@@ -297,6 +328,56 @@ class GitHubServiceTests(unittest.TestCase):
                 ))
             self.assertEqual({item["state"] for item in results}, {"created", "existing"})
             self.assertEqual(len(list((vault / "知识资产" / "GitHub项目").glob("*.md"))), 1)
+            self.assertFalse((vault / ".git").exists())
+
+    def test_core_and_github_concurrent_writes_keep_both_index_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service, _store, vault = self.make_service(root)
+            scripts = ROOT / "deps" / "douyin" / "scripts"
+            sys.path.insert(0, str(scripts))
+            from ingest import write_to_vault
+
+            video = root / "source.mp4"
+            video.write_bytes(b"video")
+            config = SimpleNamespace(
+                vault_path=vault,
+                vault_relative_root="知识资产/知识入库",
+            )
+            meta = SimpleNamespace(
+                aweme_id="concurrent-source-1",
+                source_url="https://www.douyin.com/video/concurrent-source-1",
+                title="并发来源入库",
+                author="测试",
+                duration_sec=12.0,
+            )
+            result = SimpleNamespace(text=(
+                "## 简洁概括\n并发写入验证。\n\n"
+                "## 完整内容整理\n验证来源资产与 GitHub 资产并发写入。\n\n"
+                "## AI 分析\n> 以下内容由 AI 生成。\n并发索引不能丢失。"
+            ))
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                core_future = pool.submit(
+                    write_to_vault,
+                    config,
+                    meta,
+                    video,
+                    result,
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+                github_future = pool.submit(
+                    service.ingest_repository,
+                    {"id": 101, "fullName": "openai/example"},
+                )
+                core_path, core_status = core_future.result()
+                github_result = github_future.result()
+
+            index = (vault / "index.md").read_text(encoding="utf-8")
+            github_path = vault / github_result["assetPath"]
+            self.assertIn(f"[[{core_path.stem}|", index)
+            self.assertIn(f"[[{github_path.stem}|", index)
+            self.assertEqual(core_status, "not_managed")
             self.assertFalse((vault / ".git").exists())
 
     def test_existing_vault_asset_is_migrated_without_duplicate(self) -> None:

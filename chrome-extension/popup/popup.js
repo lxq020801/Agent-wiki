@@ -833,6 +833,7 @@ function loadGithubStars({ append = false } = {}) {
 function applyGithubStarsResults(result) {
   const page = Number(result.page || 1);
   const incoming = Array.isArray(result.repositories) ? result.repositories : [];
+  if (page <= 1) githubSelected.clear();
   githubStars = page > 1 ? githubStars.concat(incoming) : incoming;
   githubStarsPage = page;
   githubStarsHasNext = Boolean(result.hasNext);

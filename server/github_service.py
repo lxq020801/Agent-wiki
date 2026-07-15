@@ -24,6 +24,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from server.vault_writer import vault_write_transaction
+
 
 GITHUB_API = "https://api.github.com"
 GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code"
@@ -31,7 +33,7 @@ GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
 KEYCHAIN_SERVICE = "com.agent-wiki.github"
 KEYCHAIN_ACCOUNT = "github-oauth-token"
 CLIENT_ID_ENV = "AGENT_WIKI_GITHUB_CLIENT_ID"
-USER_AGENT = "Agent-wiki/0.2"
+USER_AGENT = "Agent-wiki/0.2.0"
 MAX_README_CHARS = 500_000
 CLIENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 OWNER_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -733,7 +735,8 @@ class GitHubService:
         full_name = normalize_owner_repo(material["public"]["fullName"])
         slug = re.sub(r"[^a-z0-9]+", "-", full_name).strip("-")[:58] or f"github-{material['public']['id']}"
         date = datetime.now().strftime("%Y%m%d")
-        return vault_path / "知识资产" / "GitHub项目" / f"{date}-{slug}.md"
+        repository_id = _safe_int(material["public"].get("id"))
+        return vault_path / "知识资产" / "GitHub项目" / f"{date}-{slug}-{repository_id}.md"
 
     def _frontmatter_value(self, text: str, key: str) -> str:
         if not text.startswith("---\n"):
@@ -1001,8 +1004,24 @@ related: []
         ingest_intent: str,
         derived_from: list[str] | None,
     ) -> dict[str, Any]:
-        repo = material["public"]
         vault_path = self._vault_path()
+        with vault_write_transaction(vault_path):
+            return self._ingest_material_locked(
+                material,
+                ingest_intent=ingest_intent,
+                derived_from=derived_from,
+                vault_path=vault_path,
+            )
+
+    def _ingest_material_locked(
+        self,
+        material: dict[str, Any],
+        *,
+        ingest_intent: str,
+        derived_from: list[str] | None,
+        vault_path: Path,
+    ) -> dict[str, Any]:
+        repo = material["public"]
         existing = self._registry_match(repo["id"], repo["fullName"])
         if existing is None:
             migrated_path = self._find_vault_asset(vault_path, material["repository"])
@@ -1117,8 +1136,17 @@ related: []
             return self._confirm_refresh_material(material)
 
     def _confirm_refresh_material(self, material: dict[str, Any]) -> dict[str, Any]:
-        repo = material["public"]
         vault_path = self._vault_path()
+        with vault_write_transaction(vault_path):
+            return self._confirm_refresh_material_locked(material, vault_path=vault_path)
+
+    def _confirm_refresh_material_locked(
+        self,
+        material: dict[str, Any],
+        *,
+        vault_path: Path,
+    ) -> dict[str, Any]:
+        repo = material["public"]
         existing = self._registry_match(repo["id"], repo["fullName"])
         if not existing:
             raise GitHubServiceError("asset_missing", "该 GitHub 项目尚未入库。")
@@ -1166,8 +1194,6 @@ related: []
     def create_import_batch(self, repositories: Any) -> dict[str, Any]:
         if not isinstance(repositories, list) or not repositories:
             raise GitHubServiceError("selection_empty", "请至少选择一个 GitHub Star。")
-        if len(repositories) > 100:
-            raise GitHubServiceError("selection_too_large", "单次最多导入 100 个 GitHub Star。")
         clean: list[dict[str, Any]] = []
         seen_ids: set[int] = set()
         seen_names: set[str] = set()

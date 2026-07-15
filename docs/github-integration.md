@@ -11,7 +11,7 @@ GitHub 联动运行在现有本地控制服务中。Chrome 扩展只展示授权
 3. Account permissions 只授予 `Starring: Read and write`。
 4. Repository permissions 只保留 `Metadata: Read-only`，不申请 Contents 或私有仓库权限。
    公开仓库 README 与 Release 通过匿名 GitHub 官方 API 读取，因此不扩大 App 的 Contents 权限。
-5. 取得 GitHub App client ID。client ID 不是 secret；不要创建或配置 client secret。
+5. 取得 GitHub App client ID。Device Flow 的设备码申请和 token 轮询只发送 client ID，不需要 client secret；本项目不读取、保存或配置 client secret。
 6. 启动本地服务前设置环境变量：
 
 ```bash
