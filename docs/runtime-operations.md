@@ -35,6 +35,22 @@ python3.11 server/launcher.py foreground
 
 状态文件、PID 文件和日志权限为 `0600`，`run/` 与 `logs/` 目录权限为 `0700`。服务状态还保存当前源码 commit、`git describe` 版本、dirty 标记、源码根目录、监听地址和启动时间。`status --json` 可输出不含配置秘密的结构化状态。服务停止时返回码为 `3`，不代表诊断执行失败。
 
+## 统一操作诊断
+
+框架级结构化操作时间线位于：
+
+```text
+~/.agent-wiki/operations/
+├── index.jsonl                         # 所有事件的轻量索引
+└── by-id/<operationId>/
+    ├── summary.json                    # 当前状态、关联和诊断路径
+    └── timeline.jsonl                  # 按 sequence 排序的完整事件时间线
+```
+
+任务状态、GitHub 批次/子项、知识库生命周期响应和控制面回复会公开 `operationId` 或 `diagnostics`。也可以通过 WebSocket `operation_diagnostics_request.targetOperationId` 查询。弹窗关闭不会删除时间线；服务重启时未结束 operation 会记录恢复节点。
+
+统一时间线只保存严格脱敏后的排错摘要和 artifact 路径。视频/派生的大 prompt、完整模型响应与详细中间产物继续位于 `run-artifacts/`；不要把两类目录混为一套，也不要将 `operations/`、`run-artifacts/` 或其他 runtime 文件提交到仓库。
+
 ## Doctor
 
 ```bash

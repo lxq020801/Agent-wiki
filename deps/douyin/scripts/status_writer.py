@@ -13,6 +13,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from server.operation_audit import OperationAuditStore, artifact_references
+except ImportError:  # pragma: no cover - standalone compatibility
+    OperationAuditStore = None  # type: ignore[assignment,misc]
+    artifact_references = lambda _value: []  # type: ignore[assignment]
+
 
 _REDACTED_KEYS = {
     "authorization",
@@ -88,13 +94,59 @@ class StatusWriter:
     扩展任务状态面板留到后续版本。
     """
 
-    def __init__(self, task_id: str, status_dir: Path):
+    def __init__(
+        self,
+        task_id: str,
+        status_dir: Path,
+        *,
+        operation_id: str | None = None,
+        parent_id: str | None = None,
+        operation_type: str | None = None,
+    ):
         self.task_id = task_id
         self.status_dir = Path(status_dir).expanduser()
         self.status_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.status_dir / f"{task_id}.json"
+        self.operation_id = str(
+            operation_id
+            or os.environ.get("AGENT_WIKI_OPERATION_ID")
+            or f"task-{task_id}"
+        )
+        self.parent_id = str(parent_id or os.environ.get("AGENT_WIKI_PARENT_OPERATION_ID") or "")
+        self.operation_type = str(
+            operation_type
+            or os.environ.get("AGENT_WIKI_OPERATION_TYPE")
+            or "task.ingest"
+        )
+        self.audit_store = None
+        if OperationAuditStore is not None:
+            try:
+                self.audit_store = OperationAuditStore(self.status_dir.parent)
+                self.audit_store.ensure_operation(
+                    self.operation_id,
+                    operation_type=self.operation_type,
+                    task_id=task_id,
+                    parent_id=self.parent_id,
+                    params={"source": "status_writer"},
+                    stage="task_process_started",
+                )
+                self.audit_store.record_event(
+                    self.operation_id,
+                    stage="task_process_started",
+                    state="started",
+                    result={"statusPath": str(self.path)},
+                    related={"tasks": [task_id]},
+                )
+            except Exception:
+                self.audit_store = None
         self._state: dict[str, Any] = {
             "id": task_id,
+            "operation_id": self.operation_id,
+            "parent_id": self.parent_id,
+            "diagnostics": (
+                self.audit_store.diagnostics_ref(self.operation_id)
+                if self.audit_store is not None else {}
+            ),
             "ok": None,           # None=进行中, True=完成, False=失败
             "stage": "queued",
             "started_at": time.time(),
@@ -152,6 +204,33 @@ class StatusWriter:
             self._append_event(event_stage, event_info, now)
         self._state["updated_at"] = now
         self._write()
+        if self.audit_store is not None and event_stage is not None:
+            event_state = "succeeded" if ok is True else "failed" if ok is False else "started"
+            audit_error = error if event_state == "failed" else None
+            artifact_input = fields.get("audit_artifacts") or fields.get("derived_audit_artifacts")
+            related_assets = fields.get("assets") if isinstance(fields.get("assets"), list) else []
+            direct_asset = fields.get("vault_path") or fields.get("assetPath")
+            try:
+                self.audit_store.record_event(
+                    self.operation_id,
+                    stage=str(event_stage),
+                    state=event_state,
+                    result={key: value for key, value in fields.items() if key not in {"audit_artifacts", "derived_audit_artifacts"}},
+                    error=audit_error,
+                    error_code=str(fields.get("error_kind") or "task_failed"),
+                    retryable=bool(fields.get("recoverable")),
+                    related={
+                        "tasks": [self.task_id],
+                        "assets": [
+                            item.get("vault_path") or item.get("assetPath")
+                            for item in related_assets
+                            if isinstance(item, dict) and (item.get("vault_path") or item.get("assetPath"))
+                        ] + ([direct_asset] if direct_asset else []),
+                    },
+                    artifacts=artifact_references(artifact_input),
+                )
+            except Exception:
+                pass
 
     def progress(self, sub_stage: str, info: dict[str, Any]) -> None:
         """记录细粒度进度（嵌进 progress dict 里）。"""
@@ -173,6 +252,19 @@ class StatusWriter:
             chunk_item["updated_at"] = now
         self._state["updated_at"] = now
         self._write()
+        if self.audit_store is not None:
+            artifact_input = safe_info.get("audit_artifacts") if isinstance(safe_info, dict) else None
+            try:
+                self.audit_store.record_event(
+                    self.operation_id,
+                    stage=str(sub_stage),
+                    state="started",
+                    result=safe_info,
+                    related={"tasks": [self.task_id]},
+                    artifacts=artifact_references(artifact_input),
+                )
+            except Exception:
+                pass
 
     def _write(self) -> None:
         """原子写：tmp 文件 + rename。"""

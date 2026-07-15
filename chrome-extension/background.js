@@ -249,7 +249,9 @@ function connectWebSocket() {
       clearTimeout(reconnectTimer);
       runtimeCompatibility = null;
 
-      socket.send(JSON.stringify(RuntimeVersion.buildHandshake('agent-wiki-background')));
+      socket.send(JSON.stringify(withOperationContext(
+        RuntimeVersion.buildHandshake('agent-wiki-background')
+      )));
     };
 
     socket.onmessage = (event) => {
@@ -280,13 +282,14 @@ function connectWebSocket() {
 }
 
 function sendToAgent(data) {
-  if (!RuntimeVersion.canSendMessage(data?.type, runtimeCompatibility)) {
+  const payload = withOperationContext(data);
+  if (!RuntimeVersion.canSendMessage(payload?.type, runtimeCompatibility)) {
     return false;
   }
   const socket = ws;
   if (socket && socket.readyState === WebSocket.OPEN) {
     try {
-      socket.send(JSON.stringify(data));
+      socket.send(JSON.stringify(payload));
       return true;
     } catch (err) {
       debugLog('[Librarian BG] WebSocket 发送失败:', err);
@@ -301,6 +304,21 @@ function sendToAgent(data) {
 
 function makeRequestId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function makeOperationId(type = 'operation') {
+  const prefix = String(type || 'operation').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+  const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${prefix}-${suffix}`;
+}
+
+function withOperationContext(data) {
+  const payload = { ...(data || {}) };
+  payload.operationId = payload.operationId || makeOperationId(payload.type);
+  payload.taskId = payload.taskId || payload.batchId || payload.flowId || '';
+  payload.parentId = payload.parentId || payload.parentTaskId || '';
+  payload.requestId = payload.requestId || makeRequestId();
+  return payload;
 }
 
 function waitForTaskAck(requestId, timeoutMs = 10000) {

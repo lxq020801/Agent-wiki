@@ -34,6 +34,12 @@ from install.vault_lifecycle import (
     dispatch_vault_lifecycle,
 )
 from server.github_service import GitHubService, GitHubServiceError
+from server.operation_audit import (
+    OperationAuditStore,
+    OperationWebSocket,
+    new_operation_id,
+    normalize_identifier,
+)
 from video_sampling import normalize_fps_mode
 
 
@@ -50,6 +56,8 @@ CONTROL_MUTATION_TYPES = {
     "vault_pick",
     "model_check",
     "task_request",
+    "task_cancel",
+    "task_retry",
     "derived_task_action",
     "github_status_request",
     "github_auth_start",
@@ -72,6 +80,37 @@ GITHUB_AUTH_RETRYABLE_ERRORS = {
     "github_api_error",
     "invalid_response",
 }
+
+OPERATION_TYPE_BY_MESSAGE = {
+    "handshake": "extension.handshake",
+    "status_request": "control.status_refresh",
+    "task_status_request": "task.status_refresh",
+    "config_update": "control.settings_save",
+    "cookie_update": "control.cookie_sync",
+    "model_check": "control.model_check",
+    "task_request": "task.ingest",
+    "task_cancel": "task.cancel",
+    "task_retry": "task.retry",
+    "derived_task_action": "derivation.user_action",
+    "operation_diagnostics_request": "diagnostics.query",
+}
+GITHUB_COMPLETION_STAGES = {
+    "github_auth_start": "github_auth_start_completed",
+    "github_stars_request": "github_stars_request_completed",
+    "github_repository_search": "github_repository_search_completed",
+    "github_refresh_confirm": "github_refresh_confirm_completed",
+}
+VAULT_COMPLETION_STAGES = {
+    "vault_scan": "vault_scan_completed",
+    "vault_create": "vault_create_completed",
+    "vault_switch": "vault_switch_completed",
+    "vault_candidate_confirm": "vault_candidate_confirmed",
+    "vault_migration_preview": "vault_migration_preview_completed",
+    "vault_migration_execute": "vault_migration_execute_completed",
+    "vault_migration_rollback": "vault_migration_rollback_completed",
+}
+for _vault_message_type in VAULT_LIFECYCLE_REQUEST_TYPES:
+    OPERATION_TYPE_BY_MESSAGE[_vault_message_type] = f"vault.{_vault_message_type.removeprefix('vault_')}"
 
 
 def _read_product_version(project_root=None):
@@ -110,6 +149,7 @@ def _source_build_id(server_source):
         source.with_name("github_service.py"),
         source.with_name("github_asset_pipeline.py"),
         source.with_name("github_tasks.py"),
+        source.with_name("operation_audit.py"),
     ]
     loaded = False
     for source in sources:
@@ -274,6 +314,18 @@ def _redact_runtime_value(value):
     return value
 
 
+def _operation_request_summary(message):
+    """Remove transport secrets before the generic audit redactor sees them."""
+    summary = dict(message or {})
+    if summary.get('type') == 'cookie_update':
+        raw = summary.get('data')
+        summary['data'] = {
+            'present': isinstance(raw, str) and bool(raw.strip()),
+            'characters': len(raw) if isinstance(raw, str) else 0,
+        }
+    return summary
+
+
 def _normalize_task_concurrency(value, default=DEFAULT_TASK_CONCURRENCY):
     try:
         parsed = int(value)
@@ -346,6 +398,11 @@ TASK_STAGES = {
     "downloaded": "下载完成",
     "downloading_images": "下载图片",
     "downloaded_images": "图片下载完成",
+    "source_identified": "识别来源",
+    "cookie_availability_checked": "检查 Cookie",
+    "source_metadata_read": "读取来源信息",
+    "download_file_validated": "校验下载文件",
+    "download_files_validated": "校验下载文件",
     "probed_duration": "读取视频信息",
     "fps_decided": "计算抽帧",
     "chunking_plan": "规划切片",
@@ -379,7 +436,24 @@ TASK_STAGES = {
     "target_resolved": "派生目标已解析",
     "analyzing_derived_target": "分析派生目标",
     "writing_vault": "写入知识库",
+    "concise_summary_generated": "生成简洁概括",
+    "complete_content_generated": "整理完整内容",
+    "ai_analysis_generated": "生成 AI 分析",
+    "asset_structure_parsed": "解析资产结构",
+    "asset_fields_validated": "校验资产字段",
+    "asset_title_selected": "确定标题",
+    "asset_tags_selected": "确定标签",
+    "asset_filename_selected": "确定文件名",
+    "asset_file_written": "写入资产",
+    "asset_index_updated": "更新索引",
+    "derived_output_validated": "校验派生内容",
+    "derived_asset_fields_selected": "确定派生字段",
+    "derived_asset_file_written": "写入派生资产",
+    "derived_index_updated": "更新派生索引",
+    "derived_parent_child_linked": "建立父子关系",
     "done": "成功",
+    "cancelled": "已取消",
+    "retry_queued": "重试已入队",
     "failed": "失败",
     "config_error": "配置错误",
     "task_invalid": "任务无效",
@@ -626,11 +700,14 @@ class LibrarianServer:
         self.queued_task_files = set()
         self.running_task_ids = set()
         self.current_task_id = None
+        self.task_processes = {}
+        self.audit_store = OperationAuditStore(self.runtime_root)
         self.github_service = github_service or GitHubService(
             runtime_root=self.runtime_root,
             config_path=self.runtime_root / "config.toml",
         )
         self.github_auth_tasks = {}
+        self.github_flow_operations = {}
         self.github_import_tasks = set()
         
     async def handle_client(self, websocket):
@@ -640,6 +717,13 @@ class LibrarianServer:
             await websocket.close(code=1008, reason="origin_not_allowed")
             return
 
+        connection_operation_id = new_operation_id("connection")
+        self.audit_store.ensure_operation(
+            connection_operation_id,
+            operation_type="extension.connection",
+            params={"transport": "websocket", "originAllowed": True},
+            stage="extension_connected",
+        )
         self.clients.add(websocket)
         self.client_compatibility[websocket] = {
             "state": "handshake_required",
@@ -653,6 +737,10 @@ class LibrarianServer:
             # 发送就绪消息
             await websocket.send(json.dumps({
                 'type': 'agent_ready',
+                'operationId': connection_operation_id,
+                'taskId': '',
+                'parentId': '',
+                'diagnostics': self.audit_store.diagnostics_ref(connection_operation_id),
                 'version': self.runtime_identity['productVersion'],
                 'protocolVersion': self.runtime_identity['protocolVersion'],
                 'runtime': self.runtime_identity,
@@ -664,6 +752,9 @@ class LibrarianServer:
                     'model_health_check',
                     'extension_task_ingest',
                     'task_status',
+                    'task_control',
+                    'operation_audit_v1',
+                    'operation_diagnostics',
                     'derived_task_action',
                     'github_device_flow',
                     'github_repository_search',
@@ -674,6 +765,9 @@ class LibrarianServer:
             }))
             await websocket.send(json.dumps({
                 'type': 'status_snapshot',
+                'operationId': connection_operation_id,
+                'taskId': '',
+                'parentId': '',
                 'status': await asyncio.to_thread(
                     self._status_snapshot_for_client,
                     False,
@@ -709,17 +803,121 @@ class LibrarianServer:
             log(f"[Server] 客户端断开: {client_info}")
             self.clients.discard(websocket)
             self.client_compatibility.pop(websocket, None)
+            try:
+                self.audit_store.finish(
+                    connection_operation_id,
+                    stage="extension_disconnected",
+                    state="succeeded",
+                    result={"connected": False},
+                )
+            except Exception:
+                pass
             
     async def handle_message(self, websocket, msg):
+        """Audit one control-plane request and preserve correlation in replies."""
+        msg_type = str(msg.get('type') or 'unknown')
+        operation_id = normalize_identifier(
+            msg.get('operationId') or msg.get('operation_id'),
+            prefix=msg_type,
+            generate=True,
+        )
+        task_id = normalize_identifier(
+            msg.get('taskId') or msg.get('task_id') or msg.get('batchId') or msg.get('flowId')
+        )
+        parent_id = normalize_identifier(
+            msg.get('parentId') or msg.get('parent_id') or msg.get('parentTaskId')
+        )
+        if not parent_id and msg_type in {'task_retry', 'derived_task_action'} and task_id:
+            parent_status = _json_file(self._task_dirs()['status'] / f'{task_id}.json') or {}
+            parent_id = normalize_identifier(parent_status.get('operation_id') or parent_status.get('operationId'))
+        msg['operationId'] = operation_id
+        msg.setdefault('taskId', task_id)
+        msg.setdefault('parentId', parent_id)
+        operation_type = OPERATION_TYPE_BY_MESSAGE.get(
+            msg_type,
+            f"github.{msg_type.removeprefix('github_')}" if msg_type.startswith('github_') else f"control.{msg_type}",
+        )
+        self.audit_store.ensure_operation(
+            operation_id,
+            operation_type=operation_type,
+            task_id=task_id,
+            parent_id=parent_id,
+            params={"messageType": msg_type, "request": _operation_request_summary(msg)},
+            stage="extension_request_received",
+        )
+        audited_websocket = OperationWebSocket(
+            websocket,
+            operation_id=operation_id,
+            task_id=task_id,
+            parent_id=parent_id,
+        )
+        try:
+            await self._handle_message_impl(audited_websocket, msg)
+        except Exception as exc:
+            self.audit_store.finish(
+                operation_id,
+                stage="service_reply_failed",
+                state="failed",
+                error=exc,
+                error_code="control_message_failed",
+                retryable=False,
+            )
+            raise
+        last_reply = audited_websocket.sent_payloads[-1] if audited_websocket.sent_payloads else {}
+        reply_type = str(last_reply.get('type') or '')
+        failed = reply_type.endswith(('_error', '_rejected')) or reply_type in {'error', 'protocol_rejected'}
+        cancelled = msg_type.endswith('_cancel') and not failed
+        reply_result = last_reply.get('result') if isinstance(last_reply.get('result'), dict) else {}
+        continues = (
+            msg_type in {'task_request', 'task_retry'}
+            or (
+                msg_type == 'github_import_stars'
+                and not reply_result.get('idempotent')
+                and reply_result.get('operationId') == operation_id
+            )
+            or (
+                msg_type == 'github_auth_start'
+                and reply_result.get('state') in {'waiting_for_user', 'authorization_pending'}
+            )
+        ) and not failed
+        state = 'cancelled' if cancelled else 'failed' if failed else 'started' if continues else 'succeeded'
+        event_kwargs = {
+            'stage': 'service_reply_sent',
+            'state': state,
+            'result': {
+                'replyType': reply_type,
+                'accepted': not failed,
+                'diagnostics': self.audit_store.diagnostics_ref(operation_id),
+            },
+            'related': {
+                'tasks': [
+                    (last_reply.get('task') or {}).get('id')
+                    or last_reply.get('taskId')
+                    or task_id
+                ] if ((last_reply.get('task') or {}).get('id') or last_reply.get('taskId') or task_id) else [],
+                'batches': [
+                    (last_reply.get('result') or {}).get('id')
+                ] if isinstance(last_reply.get('result'), dict) and (last_reply.get('result') or {}).get('id') else [],
+            },
+        }
+        if failed:
+            event_kwargs.update({
+                'error': last_reply.get('result') or last_reply,
+                'error_code': str(last_reply.get('reason') or (last_reply.get('result') or {}).get('code') or 'request_rejected'),
+            })
+        self.audit_store.record_event(operation_id, **event_kwargs)
+
+    async def _handle_message_impl(self, websocket, msg):
         """处理客户端消息"""
         msg_type = msg.get('type')
+        client_websocket = getattr(websocket, '_websocket', websocket)
 
         if (
             msg_type in CONTROL_MUTATION_TYPES
-            and websocket in self.clients
-            and not self.client_compatibility.get(websocket, {}).get("canOperate")
+            and client_websocket in self.clients
+            and not self.client_compatibility.get(client_websocket, {}).get("canOperate")
         ):
-            compatibility = self.client_compatibility.get(websocket, {})
+            compatibility = self.client_compatibility.get(client_websocket, {})
             await websocket.send(json.dumps({
                 'type': 'protocol_rejected',
                 'reason': compatibility.get('state') or 'handshake_required',
@@ -735,12 +933,23 @@ class LibrarianServer:
                 self.runtime_identity.get("productVersion") or "",
                 self.runtime_identity.get("protocolVersion") or PROTOCOL_VERSION,
             )
-            if websocket in self.clients:
-                self.client_compatibility[websocket] = compatibility
+            if client_websocket in self.clients:
+                self.client_compatibility[client_websocket] = compatibility
             log(
                 f"[Server] 握手: {msg.get('client')} "
                 f"v{compatibility.get('clientVersion') or 'unknown'} "
                 f"({compatibility['state']})"
+            )
+            self.audit_store.record_event(
+                str(msg.get('operationId') or ''),
+                stage='handshake_compatibility_checked',
+                state='started',
+                result={
+                    'state': compatibility.get('state'),
+                    'canOperate': compatibility.get('canOperate'),
+                    'clientVersion': compatibility.get('clientVersion'),
+                    'clientProtocolVersion': compatibility.get('clientProtocolVersion'),
+                },
             )
             await websocket.send(json.dumps({
                 'type': 'handshake_ack',
@@ -760,6 +969,13 @@ class LibrarianServer:
                     'timestamp': datetime.now().isoformat()
                 }, ensure_ascii=False))
             else:
+                self.audit_store.record_event(
+                    str(msg.get('operationId') or ''),
+                    stage='config_file_written',
+                    state='started',
+                    result={'path': str(self.config_path()), 'saved': True},
+                    artifacts=[{'kind': 'runtime_config', 'ref': str(self.config_path())}],
+                )
                 await websocket.send(json.dumps({
                     'type': 'config_synced',
                     'timestamp': datetime.now().isoformat()
@@ -767,6 +983,17 @@ class LibrarianServer:
             
         elif msg_type == 'cookie_update':
             status = await self.handle_cookie_update(msg.get('platform'), msg.get('data'))
+            self.audit_store.record_event(
+                str(msg.get('operationId') or ''),
+                stage='cookie_file_written',
+                state='started',
+                result={
+                    'platform': msg.get('platform'),
+                    'available': bool(status.get('ok')),
+                    'state': status.get('state'),
+                },
+                artifacts=[{'kind': 'cookie_file', 'ref': str(self.runtime_root / 'cookie' / 'douyin.txt')}],
+            )
             await websocket.send(json.dumps({
                 'type': 'cookie_synced',
                 'platform': msg.get('platform'),
@@ -778,7 +1005,7 @@ class LibrarianServer:
             status = await asyncio.to_thread(
                 self._status_snapshot_for_client,
                 bool(
-                    self.client_compatibility.get(websocket, {}).get("canOperate")
+                    self.client_compatibility.get(client_websocket, {}).get("canOperate")
                 ),
             )
             await websocket.send(json.dumps({
@@ -793,6 +1020,29 @@ class LibrarianServer:
                 self.vault_lifecycle_manager(),
                 msg_type,
                 msg.get('data') or {},
+            )
+            result['operationId'] = str(msg.get('operationId') or '')
+            result['parentId'] = str(msg.get('parentId') or '')
+            result['diagnostics'] = self.audit_store.diagnostics_ref(msg.get('operationId'))
+            self.audit_store.record_event(
+                str(msg.get('operationId') or ''),
+                stage=VAULT_COMPLETION_STAGES.get(msg_type, 'vault_lifecycle_completed'),
+                state='started',
+                result={
+                    'operation': result.get('operation'),
+                    'state': result.get('state'),
+                    'ok': result.get('ok'),
+                    'requiresUserAction': result.get('requiresUserAction'),
+                    'migrationId': (
+                        (result.get('migration') or {}).get('migrationId')
+                        if isinstance(result.get('migration'), dict) else ''
+                    ),
+                },
+                related={
+                    'assets': [
+                        (result.get('activeVault') or {}).get('vaultPath')
+                    ] if isinstance(result.get('activeVault'), dict) and (result.get('activeVault') or {}).get('vaultPath') else [],
+                },
             )
             await websocket.send(json.dumps({
                 'type': VAULT_LIFECYCLE_RESPONSE_TYPE,
@@ -827,6 +1077,17 @@ class LibrarianServer:
                     'checkedAt': datetime.now().isoformat(),
                     'message': str(exc),
                 }
+            self.audit_store.record_event(
+                str(msg.get('operationId') or ''),
+                stage='model_health_checked',
+                state='started',
+                result={
+                    'ok': status.get('ok'),
+                    'state': status.get('state'),
+                    'provider': status.get('provider'),
+                    'model': status.get('model'),
+                },
+            )
             await websocket.send(json.dumps({
                 'type': 'model_status',
                 'status': status,
@@ -847,6 +1108,31 @@ class LibrarianServer:
             await websocket.send(json.dumps({
                 'type': 'task_status_snapshot',
                 'tasks': await asyncio.to_thread(self.task_status_snapshot),
+                'timestamp': datetime.now().isoformat(),
+            }, ensure_ascii=False))
+
+        elif msg_type in {'task_cancel', 'task_retry'}:
+            reply = await self.handle_task_control(msg)
+            await websocket.send(json.dumps(reply, ensure_ascii=False))
+            await self.broadcast({
+                'type': 'task_status_snapshot',
+                'tasks': await asyncio.to_thread(self.task_status_snapshot),
+                'operationId': str(msg.get('operationId') or ''),
+                'taskId': str(reply.get('taskId') or msg.get('taskId') or ''),
+                'parentId': str(reply.get('parentId') or msg.get('parentId') or ''),
+                'timestamp': datetime.now().isoformat(),
+            })
+
+        elif msg_type == 'operation_diagnostics_request':
+            target_id = str(msg.get('targetOperationId') or msg.get('operation') or msg.get('operationId') or '')
+            result = await asyncio.to_thread(self.audit_store.get, target_id, include_events=True)
+            await websocket.send(json.dumps({
+                'type': 'operation_diagnostics',
+                'requestId': msg.get('requestId'),
+                'result': result or {
+                    'error': {'code': 'operation_not_found', 'message': '没有找到对应操作日志。'},
+                    'diagnostics': self.audit_store.diagnostics_ref(target_id),
+                },
                 'timestamp': datetime.now().isoformat(),
             }, ensure_ascii=False))
 
@@ -920,6 +1206,11 @@ class LibrarianServer:
                     self.github_service.create_import_batch,
                     msg.get('repositories'),
                     request_key=str(msg.get('requestId') or ''),
+                    operation_id=str(msg.get('operationId') or ''),
+                    parent_id=str(msg.get('parentId') or ''),
+                )
+                result['diagnostics'] = self.audit_store.diagnostics_ref(
+                    result.get('operationId') or msg.get('operationId')
                 )
                 reply_type = 'github_import_accepted'
                 if result.get('state') in {'queued', 'running'}:
@@ -964,6 +1255,43 @@ class LibrarianServer:
             result['requestType'] = msg_type
             if msg_type in {'github_auth_poll', 'github_auth_cancel', 'github_logout'}:
                 self._cancel_github_auth_task(str(msg.get('flowId') or ''))
+        if isinstance(result, dict) and msg_type in {'github_auth_start', 'github_auth_poll'}:
+            flow_id = str(result.get('flowId') or msg.get('flowId') or '')
+            if flow_id:
+                flow_operation_id = str(
+                    self.github_flow_operations.get(flow_id)
+                    or msg.get('operationId')
+                    or ''
+                )
+                self.github_flow_operations[flow_id] = flow_operation_id
+                self.audit_store.ensure_operation(
+                    flow_operation_id,
+                    operation_type='github.auth',
+                    task_id=flow_id,
+                    parent_id=str(msg.get('parentId') or ''),
+                    stage='github_auth_requested',
+                )
+        if reply_type != 'github_error' and msg_type == 'github_auth_cancel':
+            flow_id = str(msg.get('flowId') or result.get('flowId') or '')
+            flow_operation_id = self.github_flow_operations.pop(flow_id, '')
+            if flow_operation_id:
+                self.audit_store.finish(
+                    flow_operation_id,
+                    stage='github_auth_cancelled',
+                    state='cancelled',
+                    result={'flowId': flow_id},
+                    related={'tasks': [flow_id]},
+                )
+        if reply_type != 'github_error' and msg_type == 'github_logout':
+            for flow_id, flow_operation_id in list(self.github_flow_operations.items()):
+                self.audit_store.finish(
+                    flow_operation_id,
+                    stage='github_logout_cancelled_authorization',
+                    state='cancelled',
+                    result={'flowId': flow_id},
+                    related={'tasks': [flow_id]},
+                )
+            self.github_flow_operations.clear()
         if reply_type != 'github_error':
             if msg_type == 'github_status_request':
                 self._ensure_github_auth_polling(result.get('activeAuthorization'))
@@ -972,10 +1300,35 @@ class LibrarianServer:
                     self._ensure_github_auth_polling(result)
                 else:
                     self._cancel_github_auth_task(str(result.get('flowId') or msg.get('flowId') or ''))
+        if isinstance(result, dict):
+            result_operation_id = str(result.get('operationId') or msg.get('operationId') or '')
+            result.setdefault('operationId', result_operation_id)
+            result.setdefault('parentId', str(msg.get('parentId') or ''))
+            result.setdefault('diagnostics', self.audit_store.diagnostics_ref(result_operation_id))
+            if reply_type != 'github_error':
+                self.audit_store.record_event(
+                    str(msg.get('operationId') or ''),
+                    stage=GITHUB_COMPLETION_STAGES.get(msg_type, f"{msg_type}_completed"),
+                    state='started',
+                    result=result,
+                    related={
+                        'tasks': [result.get('taskId')] if result.get('taskId') else [],
+                        'batches': [result.get('id')] if result.get('kind') == 'stars_import' and result.get('id') else [],
+                        'assets': [result.get('assetPath')] if result.get('assetPath') else [],
+                    },
+                )
         await websocket.send(json.dumps({
             'type': reply_type,
             'result': result,
             'requestId': msg.get('requestId'),
+            'taskId': (
+                result.get('taskId') or result.get('id') or result.get('flowId') or msg.get('taskId') or ''
+                if isinstance(result, dict) else msg.get('taskId') or ''
+            ),
+            'parentId': (
+                result.get('parentId') or msg.get('parentId') or ''
+                if isinstance(result, dict) else msg.get('parentId') or ''
+            ),
             'timestamp': datetime.now().isoformat(),
         }, ensure_ascii=False))
 
@@ -1007,6 +1360,7 @@ class LibrarianServer:
             self._cancel_github_auth_task(flow_id)
 
     async def _run_github_authorization(self, flow_id, delay):
+        operation_id = str(self.github_flow_operations.get(flow_id) or '')
         while True:
             await asyncio.sleep(max(1, int(delay or 5)))
             try:
@@ -1017,25 +1371,75 @@ class LibrarianServer:
                 error['flowId'] = flow_id
                 if exc.code in GITHUB_AUTH_RETRYABLE_ERRORS:
                     error['transient'] = True
+                    if operation_id:
+                        self.audit_store.record_event(
+                            operation_id,
+                            stage='github_auth_poll_retrying',
+                            state='started',
+                            error={
+                                'code': exc.code,
+                                'type': type(exc).__name__,
+                                'stage': 'github_auth_poll',
+                                'message': exc.message,
+                                'retryable': True,
+                            },
+                            error_code=exc.code,
+                            retryable=True,
+                            related={'tasks': [flow_id]},
+                        )
                     await self.broadcast({
                         'type': 'github_error',
                         'result': error,
+                        'operationId': operation_id,
+                        'taskId': flow_id,
+                        'parentId': '',
                         'timestamp': datetime.now().isoformat(),
                     })
                     delay = min(60, max(5, int(exc.retry_after or (delay * 2))))
                     continue
+                if operation_id:
+                    self.audit_store.finish(
+                        operation_id,
+                        stage='github_auth_failed',
+                        state='failed',
+                        error={
+                            'code': exc.code,
+                            'type': type(exc).__name__,
+                            'stage': 'github_auth_poll',
+                            'message': exc.message,
+                            'retryable': False,
+                        },
+                        error_code=exc.code,
+                        related={'tasks': [flow_id]},
+                    )
+                    self.github_flow_operations.pop(flow_id, None)
                 await self.broadcast({
                     'type': 'github_error',
                     'result': error,
+                    'operationId': operation_id,
+                    'taskId': flow_id,
+                    'parentId': '',
                     'timestamp': datetime.now().isoformat(),
                 })
                 return
+            if operation_id:
+                self.audit_store.record_event(
+                    operation_id,
+                    stage='github_auth_poll_completed',
+                    state='started' if result.get('state') != 'ready' else 'succeeded',
+                    result=result,
+                    related={'tasks': [flow_id]},
+                )
             await self.broadcast({
                 'type': 'github_auth_state',
                 'result': result,
+                'operationId': operation_id,
+                'taskId': flow_id,
+                'parentId': '',
                 'timestamp': datetime.now().isoformat(),
             })
             if result.get('state') == 'ready':
+                self.github_flow_operations.pop(flow_id, None)
                 return
             delay = result.get('retryAfter') or delay
 
@@ -1044,6 +1448,22 @@ class LibrarianServer:
             batch = await asyncio.to_thread(self.github_service.begin_import_batch, batch_id)
         except GitHubServiceError:
             return
+        batch_operation_id = str(batch.get('operationId') or f'github-import-{batch_id}')
+        self.audit_store.ensure_operation(
+            batch_operation_id,
+            operation_type='github.stars_import',
+            task_id=batch_id,
+            parent_id=str(batch.get('parentId') or ''),
+            params={'batchId': batch_id, 'total': batch.get('total')},
+            stage='batch_started',
+        )
+        self.audit_store.record_event(
+            batch_operation_id,
+            stage='batch_started',
+            state='started',
+            result={'total': batch.get('total')},
+            related={'batches': [batch_id]},
+        )
         await self.broadcast({
             'type': 'github_import_progress',
             'result': batch,
@@ -1053,6 +1473,15 @@ class LibrarianServer:
         for queued_item in queued:
             task_id = str(queued_item.get('taskId') or '')
             identity = queued_item.get('repository') or {}
+            item_operation_id = str(queued_item.get('operationId') or f'github-item-{task_id}')
+            self.audit_store.ensure_operation(
+                item_operation_id,
+                operation_type='github.asset_ingest',
+                task_id=task_id,
+                parent_id=batch_operation_id,
+                params={'repository': identity},
+                stage='batch_item_started',
+            )
             started = await asyncio.to_thread(
                 self.github_service.begin_import_item,
                 batch_id,
@@ -1061,12 +1490,34 @@ class LibrarianServer:
             if not started:
                 continue
             try:
+                self.audit_store.record_event(
+                    item_operation_id,
+                    stage='github_source_fetch_started',
+                    state='started',
+                    result={'repository': identity},
+                    related={'tasks': [task_id], 'batches': [batch_id]},
+                )
                 result = await asyncio.to_thread(
                     self.github_service.ingest_repository,
                     identity,
                     ingest_intent='manual',
                 )
             except GitHubServiceError as exc:
+                self.audit_store.finish(
+                    item_operation_id,
+                    stage='batch_item_failed',
+                    state='failed',
+                    error={
+                        'code': exc.code,
+                        'type': type(exc).__name__,
+                        'stage': 'github_ingest',
+                        'message': exc.message,
+                        'retryable': exc.code in GITHUB_AUTH_RETRYABLE_ERRORS,
+                    },
+                    error_code=exc.code,
+                    retryable=exc.code in GITHUB_AUTH_RETRYABLE_ERRORS,
+                    related={'tasks': [task_id], 'batches': [batch_id]},
+                )
                 batch = await asyncio.to_thread(
                     self.github_service.fail_import_item,
                     batch_id,
@@ -1076,6 +1527,15 @@ class LibrarianServer:
                     repository=identity,
                 )
             except Exception as exc:
+                self.audit_store.finish(
+                    item_operation_id,
+                    stage='batch_item_failed',
+                    state='failed',
+                    error=exc,
+                    error_code='import_failed',
+                    retryable=False,
+                    related={'tasks': [task_id], 'batches': [batch_id]},
+                )
                 batch = await asyncio.to_thread(
                     self.github_service.fail_import_item,
                     batch_id,
@@ -1085,6 +1545,42 @@ class LibrarianServer:
                     repository=identity,
                 )
             else:
+                self.audit_store.record_event(
+                    item_operation_id,
+                    stage='github_source_processed',
+                    state='started',
+                    result={'repository': result.get('repository'), 'state': result.get('state')},
+                    related={'tasks': [task_id], 'batches': [batch_id]},
+                )
+                self.audit_store.record_event(
+                    item_operation_id,
+                    stage='github_asset_written',
+                    state='started',
+                    result={
+                        'assetPath': result.get('assetPath'),
+                        'autoStar': result.get('autoStar'),
+                    },
+                    related={
+                        'tasks': [task_id],
+                        'batches': [batch_id],
+                        'assets': [result.get('assetPath')] if result.get('assetPath') else [],
+                    },
+                )
+                self.audit_store.finish(
+                    item_operation_id,
+                    stage='batch_item_completed',
+                    state='succeeded',
+                    result={
+                        'state': result.get('state'),
+                        'assetPath': result.get('assetPath'),
+                        'autoStar': result.get('autoStar'),
+                    },
+                    related={
+                        'tasks': [task_id],
+                        'batches': [batch_id],
+                        'assets': [result.get('assetPath')] if result.get('assetPath') else [],
+                    },
+                )
                 batch = await asyncio.to_thread(
                     self.github_service.complete_import_item,
                     batch_id,
@@ -1097,6 +1593,29 @@ class LibrarianServer:
                 'timestamp': datetime.now().isoformat(),
             })
         batch = await asyncio.to_thread(self.github_service.finish_import_batch, batch_id)
+        final_state = (
+            'cancelled' if batch.get('state') == 'cancelled'
+            else 'failed' if batch.get('failed') and not batch.get('succeeded')
+            else 'succeeded'
+        )
+        self.audit_store.finish(
+            batch_operation_id,
+            stage='batch_finished',
+            state=final_state,
+            result={
+                'state': batch.get('state'),
+                'total': batch.get('total'),
+                'succeeded': batch.get('succeeded'),
+                'failed': batch.get('failed'),
+                'cancelled': batch.get('cancelled'),
+            },
+            error=(
+                {'code': 'batch_failed', 'message': 'GitHub 批次全部失败。'}
+                if final_state == 'failed' else None
+            ),
+            error_code='batch_failed',
+            related={'batches': [batch_id]},
+        )
         await self.broadcast({
             'type': 'github_import_progress',
             'result': batch,
@@ -1128,6 +1647,8 @@ class LibrarianServer:
             'status': self.runtime_root / 'status',
             'logs': self.runtime_root / 'logs' / 'tasks',
             'derived_actions': self.runtime_root / 'derived-actions',
+            'archive': self.runtime_root / 'archive',
+            'failed': self.runtime_root / 'failed',
         }
 
     def _extract_task_url(self, msg):
@@ -1488,6 +2009,8 @@ class LibrarianServer:
         dirs['inbox'].mkdir(parents=True, exist_ok=True)
         child_file = dirs['inbox'] / f'{child_id}.json'
         parent_title = parent_status.get('title') or ''
+        parent_operation_id = str(parent_status.get('operation_id') or parent_status.get('operationId') or '')
+        child_operation_id = new_operation_id('derive')
         parent_asset_path = self._parent_asset_path(parent_status, candidate_id)
         parent_title = parent_title or str((parent_status.get('meta') or {}).get('title') or parent_status.get('page_title') or '')
         task = {
@@ -1496,6 +2019,8 @@ class LibrarianServer:
             'source': source,
             'created_at': datetime.now().isoformat(),
             'parent_task_id': parent_task_id,
+            'operation_id': child_operation_id,
+            'parent_id': parent_operation_id,
             'parent_asset_path': parent_asset_path,
             'parent_title': parent_title,
             'parent_source_url': parent_status.get('source_url') or parent_status.get('url') or '',
@@ -1512,6 +2037,9 @@ class LibrarianServer:
             _write_json_atomic(child_file, task)
         self._write_task_status(child_id, {
             'id': child_id,
+            'operation_id': child_operation_id,
+            'parent_id': parent_operation_id,
+            'diagnostics': self.audit_store.diagnostics_ref(child_operation_id),
             'ok': None,
             'type': 'derived_ingest',
             'stage': 'queued',
@@ -1528,6 +2056,25 @@ class LibrarianServer:
             'derived_task': candidate,
             'audit_artifacts': self._task_audit_artifacts(child_id),
         })
+        self.audit_store.ensure_operation(
+            child_operation_id,
+            operation_type='derivation.execute',
+            task_id=child_id,
+            parent_id=parent_operation_id,
+            params={
+                'source': source,
+                'candidateId': candidate_id,
+                'targetType': candidate.get('targetType') or candidate.get('target_type'),
+            },
+            stage='derived_task_created',
+        )
+        self.audit_store.record_event(
+            parent_operation_id,
+            stage='derived_child_created',
+            state='started',
+            result={'childOperationId': child_operation_id, 'childTaskId': child_id},
+            related={'tasks': [parent_task_id, child_id]},
+        ) if parent_operation_id else None
         if self.enable_task_runner:
             self.ensure_task_worker()
             await self.enqueue_task_file(child_file)
@@ -1604,12 +2151,24 @@ class LibrarianServer:
             }
 
         task_id = self._task_id()
+        operation_id = str(msg.get('operationId') or new_operation_id('ingest'))
+        parent_id = str(msg.get('parentId') or '')
+        self.audit_store.ensure_operation(
+            operation_id,
+            operation_type='task.ingest',
+            task_id=task_id,
+            parent_id=parent_id,
+            params={'source': msg.get('source') or 'extension', 'url': url},
+            stage='task_received',
+        )
         created_at = datetime.now().isoformat()
         dirs = self._task_dirs()
         dirs['inbox'].mkdir(parents=True, exist_ok=True)
         task_file = dirs['inbox'] / f'{task_id}.json'
         task = {
             'id': task_id,
+            'operation_id': operation_id,
+            'parent_id': parent_id,
             'url': url,
             'type': 'douyin_ingest',
             'ingest_intent': ingest_intent,
@@ -1620,9 +2179,12 @@ class LibrarianServer:
             'detected_by': msg.get('detectedBy') or '',
             'created_at': created_at,
         }
-        task_file.write_text(json.dumps(task, ensure_ascii=False, indent=2), encoding='utf-8')
+        _write_json_atomic(task_file, task)
         self._write_task_status(task_id, {
             'id': task_id,
+            'operation_id': operation_id,
+            'parent_id': parent_id,
+            'diagnostics': self.audit_store.diagnostics_ref(operation_id),
             'ok': None,
             'stage': 'queued',
             'stage_label': TASK_STAGES['queued'],
@@ -1639,6 +2201,14 @@ class LibrarianServer:
             'created_at': created_at,
         })
 
+        self.audit_store.record_event(
+            operation_id,
+            stage='task_queued',
+            state='started',
+            result={'queueEnabled': self.enable_task_runner, 'taskConcurrency': self.task_concurrency},
+            related={'tasks': [task_id]},
+        )
+
         if self.enable_task_runner:
             self.ensure_task_worker()
             await self.enqueue_task_file(task_file)
@@ -1647,8 +2217,14 @@ class LibrarianServer:
         return {
             'type': 'task_accepted',
             'requestId': request_id,
+            'operationId': operation_id,
+            'taskId': task_id,
+            'parentId': parent_id,
             'task': {
                 'id': task_id,
+                'operationId': operation_id,
+                'parentId': parent_id,
+                'diagnostics': self.audit_store.diagnostics_ref(operation_id),
                 'url': url,
                 'stage': 'queued',
                 'source': task['source'],
@@ -1656,6 +2232,150 @@ class LibrarianServer:
                 'createdAt': created_at,
             },
             'message': '任务已进入队列',
+            'timestamp': datetime.now().isoformat(),
+        }
+
+    def _task_source_file(self, task_id):
+        dirs = self._task_dirs()
+        for root in (dirs['inbox'], dirs['failed'], dirs['archive']):
+            direct = root / f'{task_id}.json'
+            if direct.exists():
+                return direct
+            matches = sorted(root.glob(f'{task_id}.*.json')) if root.exists() else []
+            if matches:
+                return matches[-1]
+        return None
+
+    async def handle_task_control(self, msg):
+        action = str(msg.get('type') or '')
+        task_id = str(msg.get('taskId') or '').strip()
+        request_id = msg.get('requestId') or ''
+        status_path = self._task_dirs()['status'] / f'{task_id}.json'
+        status = _json_file(status_path) or {}
+        if not task_id or not status:
+            return {
+                'type': 'task_control_rejected',
+                'requestId': request_id,
+                'reason': 'task_not_found',
+                'message': '没有找到对应任务。',
+                'timestamp': datetime.now().isoformat(),
+            }
+        source_operation_id = str(status.get('operation_id') or status.get('operationId') or '')
+        if action == 'task_cancel':
+            if status.get('ok') is not None or status.get('stage') == 'cancelled':
+                return {
+                    'type': 'task_control_rejected',
+                    'requestId': request_id,
+                    'reason': 'task_terminal',
+                    'message': '任务已经结束，不能取消。',
+                    'taskId': task_id,
+                    'timestamp': datetime.now().isoformat(),
+                }
+            status.update({
+                'ok': False,
+                'state': 'cancelled',
+                'stage': 'cancelled',
+                'cancel_requested': True,
+                'cancelled_at': time.time(),
+                'error': '',
+            })
+            self._write_task_status(task_id, self._finish_status_fields(status))
+            task_file = self._task_dirs()['inbox'] / f'{task_id}.json'
+            if task_file.exists():
+                task = self._read_task_file(task_file)
+                task['cancel_requested'] = True
+                _write_json_atomic(task_file, task)
+            proc = self.task_processes.get(task_id)
+            if proc is not None and proc.returncode is None:
+                proc.terminate()
+            if source_operation_id:
+                self.audit_store.finish(
+                    source_operation_id,
+                    stage='task_cancelled',
+                    state='cancelled',
+                    result={'requestedByOperationId': msg.get('operationId')},
+                    related={'tasks': [task_id]},
+                )
+            return {
+                'type': 'task_control_done',
+                'requestId': request_id,
+                'action': 'cancel',
+                'taskId': task_id,
+                'operationId': msg.get('operationId'),
+                'parentId': source_operation_id,
+                'diagnostics': self.audit_store.diagnostics_ref(source_operation_id),
+                'timestamp': datetime.now().isoformat(),
+            }
+
+        if status.get('ok') is None and status.get('stage') != 'cancelled':
+            return {
+                'type': 'task_control_rejected',
+                'requestId': request_id,
+                'reason': 'task_active',
+                'message': '任务仍在运行，不能重试。',
+                'taskId': task_id,
+                'timestamp': datetime.now().isoformat(),
+            }
+        source_file = self._task_source_file(task_id)
+        task = self._read_task_file(source_file) if source_file else {}
+        if not task:
+            return {
+                'type': 'task_control_rejected',
+                'requestId': request_id,
+                'reason': 'task_source_missing',
+                'message': '原任务文件不存在，不能重试。',
+                'taskId': task_id,
+                'timestamp': datetime.now().isoformat(),
+            }
+        retry_task_id = self._task_id()
+        retry_operation_id = str(msg.get('operationId') or new_operation_id('retry'))
+        task.update({
+            'id': retry_task_id,
+            'operation_id': retry_operation_id,
+            'parent_id': source_operation_id,
+            'retry_of_task_id': task_id,
+            'created_at': datetime.now().isoformat(),
+            'cancel_requested': False,
+        })
+        inbox = self._task_dirs()['inbox']
+        inbox.mkdir(parents=True, exist_ok=True)
+        retry_file = inbox / f'{retry_task_id}.json'
+        _write_json_atomic(retry_file, task)
+        self.audit_store.ensure_operation(
+            retry_operation_id,
+            operation_type='task.retry_execution',
+            task_id=retry_task_id,
+            parent_id=source_operation_id,
+            params={'retryOfTaskId': task_id},
+            stage='retry_queued',
+        )
+        self._write_task_status(retry_task_id, {
+            'id': retry_task_id,
+            'operation_id': retry_operation_id,
+            'parent_id': source_operation_id,
+            'diagnostics': self.audit_store.diagnostics_ref(retry_operation_id),
+            'ok': None,
+            'stage': 'retry_queued',
+            'stage_label': TASK_STAGES['retry_queued'],
+            'started_at': time.time(),
+            'updated_at': time.time(),
+            'progress': {},
+            'source': task.get('source') or 'retry',
+            'source_url': task.get('url') or '',
+            'ingest_intent': task.get('ingest_intent') or DEFAULT_INGEST_INTENT,
+            'retry_of_task_id': task_id,
+        })
+        if self.enable_task_runner:
+            self.ensure_task_worker()
+            await self.enqueue_task_file(retry_file)
+        return {
+            'type': 'task_control_done',
+            'requestId': request_id,
+            'action': 'retry',
+            'taskId': retry_task_id,
+            'operationId': retry_operation_id,
+            'parentId': source_operation_id,
+            'diagnostics': self.audit_store.diagnostics_ref(retry_operation_id),
             'timestamp': datetime.now().isoformat(),
         }
 
@@ -1682,6 +2402,16 @@ class LibrarianServer:
             return
         self.queued_task_files.add(key)
         await self.task_queue.put(task_file)
+        task = self._read_task_file(task_file)
+        operation_id = str(task.get('operation_id') or '')
+        if operation_id:
+            self.audit_store.record_event(
+                operation_id,
+                stage='task_enqueued',
+                state='started',
+                result={'queueDepth': self.task_queue.qsize()},
+                related={'tasks': [task.get('id') or task_file.stem]},
+            )
 
     async def enqueue_pending_tasks(self):
         if not self.enable_task_runner:
@@ -1702,6 +2432,16 @@ class LibrarianServer:
                     self.retire_worker_tokens = max(0, self.retire_worker_tokens - 1)
                     return
                 self.queued_task_files.discard(str(task_file))
+                queued_task = self._read_task_file(task_file)
+                queued_operation_id = str(queued_task.get('operation_id') or '')
+                if queued_operation_id:
+                    self.audit_store.record_event(
+                        queued_operation_id,
+                        stage='worker_started',
+                        state='started',
+                        result={'workerIndex': worker_index},
+                        related={'tasks': [queued_task.get('id') or Path(task_file).stem]},
+                    )
                 await self.run_task_file(task_file)
             except Exception as exc:
                 log(f"[Server] 任务执行器 {worker_index} 异常: {type(exc).__name__}: {exc}")
@@ -1718,6 +2458,19 @@ class LibrarianServer:
         task_file = Path(task_file)
         task = self._read_task_file(task_file)
         task_id = task.get('id') or task_file.stem
+        operation_id = str(task.get('operation_id') or f'task-{task_id}')
+        parent_id = str(task.get('parent_id') or '')
+        if task.get('cancel_requested'):
+            try:
+                failed_dir = self._task_dirs()['failed']
+                failed_dir.mkdir(parents=True, exist_ok=True)
+                destination = failed_dir / task_file.name
+                if destination.exists():
+                    destination = failed_dir / f'{task_file.stem}.cancelled-{int(time.time())}{task_file.suffix}'
+                task_file.replace(destination)
+            except OSError:
+                pass
+            return
         self.running_task_ids.add(task_id)
         self.current_task_id = sorted(self.running_task_ids)[0] if self.running_task_ids else None
         logs_dir = self._task_dirs()['logs']
@@ -1746,6 +2499,25 @@ class LibrarianServer:
                     cwd=str(PROJECT_ROOT / 'deps' / 'douyin'),
                     stdout=log_file,
                     stderr=asyncio.subprocess.STDOUT,
+                    env={
+                        **os.environ,
+                        'AGENT_WIKI_HOME': str(self.runtime_root),
+                        'AGENT_WIKI_OPERATION_ID': operation_id,
+                        'AGENT_WIKI_TASK_ID': task_id,
+                        'AGENT_WIKI_PARENT_OPERATION_ID': parent_id,
+                        'AGENT_WIKI_OPERATION_TYPE': (
+                            'derivation.execute' if task_type == 'derived_ingest' else 'task.ingest'
+                        ),
+                    },
+                )
+                self.task_processes[task_id] = proc
+                self.audit_store.record_event(
+                    operation_id,
+                    stage='subprocess_started',
+                    state='started',
+                    result={'entrypoint': script.name},
+                    related={'tasks': [task_id]},
+                    artifacts=[{'kind': 'task_log', 'ref': str(log_path)}],
                 )
                 timeout_monitor = asyncio.create_task(
                     self._monitor_task_timeout(task_id, proc)
@@ -1769,12 +2541,32 @@ class LibrarianServer:
                 })
                 status = self._finish_status_fields(status)
                 self._write_task_status(task_id, status)
+                self.audit_store.finish(
+                    operation_id,
+                    stage='subprocess_failed',
+                    state='failed',
+                    error={'code': 'subprocess_exit', 'message': status.get('error'), 'stage': status.get('stage')},
+                    error_code='subprocess_exit',
+                    retryable=True,
+                    related={'tasks': [task_id]},
+                    artifacts=[{'kind': 'task_log', 'ref': str(log_path)}],
+                )
             elif code == 0 and task_type != 'derived_ingest':
                 queued = await self.enqueue_auto_derived_tasks(task_id, status)
                 if queued:
                     log(f"[Server] 自动派生已入队: parent={task_id} count={len(queued)}")
+            if code == 0:
+                self.audit_store.record_event(
+                    operation_id,
+                    stage='subprocess_exited',
+                    state='succeeded',
+                    result={'exitCode': code, 'taskType': task_type},
+                    related={'tasks': [task_id]},
+                    artifacts=[{'kind': 'task_log', 'ref': str(log_path)}],
+                )
             log(f"[Server] 任务结束: {task_id} exit={code}")
         finally:
+            self.task_processes.pop(task_id, None)
             self.running_task_ids.discard(task_id)
             self.current_task_id = sorted(self.running_task_ids)[0] if self.running_task_ids else None
 
@@ -1840,6 +2632,25 @@ class LibrarianServer:
                 })
                 status = self._finish_status_fields(status)
                 self._write_task_status(task_id, status)
+            operation_id = str(status.get('operation_id') or f'task-{task_id}')
+            try:
+                self.audit_store.finish(
+                    operation_id,
+                    stage='task_timeout',
+                    state='failed',
+                    error={
+                        'code': 'response_timeout',
+                        'type': 'TimeoutError',
+                        'stage': stage,
+                        'message': f'Responses API analysis timed out after {timeout_sec}s',
+                        'retryable': True,
+                    },
+                    error_code='response_timeout',
+                    retryable=True,
+                    related={'tasks': [task_id]},
+                )
+            except Exception:
+                pass
             return
 
     def _task_progress_percent(self, status):
@@ -1860,8 +2671,13 @@ class LibrarianServer:
             'started': 5,
             'downloading': 10,
             'downloading_images': 10,
+            'source_identified': 2,
+            'cookie_availability_checked': 4,
+            'source_metadata_read': 12,
             'downloaded': 38,
             'downloaded_images': 38,
+            'download_file_validated': 40,
+            'download_files_validated': 40,
             'probed_duration': 42,
             'fps_decided': 45,
             'chunking_plan': 47,
@@ -1887,8 +2703,23 @@ class LibrarianServer:
             'synthesizing_done': 90,
             'analyzing_done': 90,
             'analyzed': 92,
+            'concise_summary_generated': 93,
+            'complete_content_generated': 93,
+            'ai_analysis_generated': 94,
+            'asset_structure_parsed': 94,
+            'asset_fields_validated': 95,
+            'asset_title_selected': 95,
+            'asset_tags_selected': 95,
+            'asset_filename_selected': 96,
             'derived_candidates_ready': 94,
             'writing_vault': 96,
+            'asset_file_written': 98,
+            'asset_index_updated': 99,
+            'derived_output_validated': 88,
+            'derived_asset_fields_selected': 92,
+            'derived_asset_file_written': 97,
+            'derived_index_updated': 98,
+            'derived_parent_child_linked': 99,
         }.get(stage, 10)
 
     def _public_task_status(self, path):
@@ -1955,6 +2786,11 @@ class LibrarianServer:
         } if github_integration else {}
         return {
             'id': status.get('id'),
+            'operationId': status.get('operation_id') or status.get('operationId') or '',
+            'parentId': status.get('parent_id') or status.get('parentId') or '',
+            'diagnostics': status.get('diagnostics') if isinstance(status.get('diagnostics'), dict) else (
+                self.audit_store.diagnostics_ref(status.get('operation_id')) if status.get('operation_id') else {}
+            ),
             'type': status.get('type') or '',
             'ok': status.get('ok'),
             'stage': status.get('stage') or 'queued',
@@ -1978,6 +2814,7 @@ class LibrarianServer:
             'derivedSummary': derived_summary,
             'derivedAuditArtifacts': status.get('derived_audit_artifacts') if isinstance(status.get('derived_audit_artifacts'), dict) else {},
             'parentTaskId': status.get('parent_task_id') or '',
+            'retryOfTaskId': status.get('retry_of_task_id') or '',
             'derivedCandidateId': status.get('derived_candidate_id') or '',
             'derivedTask': status.get('derived_task') if isinstance(status.get('derived_task'), dict) else {},
             'githubIntegration': public_github_integration,
@@ -1997,11 +2834,14 @@ class LibrarianServer:
                 break
         running = [item for item in items if item.get('ok') is None]
         failed = [item for item in items if item.get('ok') is False]
+        cancelled = [item for item in items if item.get('stage') == 'cancelled']
+        failed = [item for item in failed if item.get('stage') != 'cancelled']
         done = [item for item in items if item.get('ok') is True]
         return {
             'items': items,
             'running': len(running),
             'failed': len(failed),
+            'cancelled': len(cancelled),
             'done': len(done),
             'currentTaskId': self.current_task_id,
             'currentTaskIds': sorted(self.running_task_ids),
@@ -2392,6 +3232,7 @@ task_concurrency = {int(task_concurrency)}
             'cookie': self.cookie_status(),
             'tasks': self.task_status_snapshot(),
             'github': self.github_service.status(validate=False),
+            'diagnostics': self.audit_store.diagnostics_ref(''),
         }
 
     def _status_snapshot_for_client(self, include_active_authorization):
@@ -2614,6 +3455,9 @@ task_concurrency = {int(task_concurrency)}
         logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
         log(f"[Server] 启动 WebSocket 服务器: ws://{self.host}:{self.port}")
         log(f"[Server] 任务并发数: {self.task_concurrency}")
+        recovered_operations = await asyncio.to_thread(self.audit_store.recover_incomplete)
+        if recovered_operations:
+            log(f"[Server] 已恢复统一操作时间线: {len(recovered_operations)}")
         self.ensure_task_worker()
         await self.enqueue_pending_tasks()
         await asyncio.to_thread(self.github_service.resume_pending_asset_events)

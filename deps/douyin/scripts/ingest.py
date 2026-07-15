@@ -984,6 +984,44 @@ def write_image_post_to_vault(
         )
 
 
+def _record_asset_generation_projection(
+    sw: StatusWriter,
+    *,
+    analysis_text: str,
+    meta: VideoMeta,
+    source_media: str,
+    ingest_intent: str,
+) -> dict[str, Any]:
+    """Record parse/validation/naming evidence without persisting model text."""
+    sections = _source_sections_from_analysis(analysis_text, meta.title)
+    for stage, key in (
+        ("concise_summary_generated", "concise"),
+        ("complete_content_generated", "complete"),
+        ("ai_analysis_generated", "ai_analysis"),
+    ):
+        sw.update(stage=stage, content_present=bool(sections[key]), character_count=len(sections[key]))
+    sw.update(
+        stage="asset_structure_parsed",
+        sections_present={key: bool(value) for key, value in sections.items()},
+        section_count=sum(bool(value) for value in sections.values()),
+    )
+    title = _source_asset_title(meta.title)
+    tags = _tags_for_asset(ingest_intent, source_media, analysis_text)
+    date = datetime.now().strftime("%Y-%m-%d")
+    filename = f"{date}-{_slug_for_vault(title, meta.aweme_id)}.md"
+    sw.update(
+        stage="asset_fields_validated",
+        source_media=source_media,
+        required_sections_valid=True,
+        title_present=bool(title),
+        tag_count=len(tags),
+    )
+    sw.update(stage="asset_title_selected", title=title, title_length=len(title))
+    sw.update(stage="asset_tags_selected", tags=list(tags), tag_count=len(tags))
+    sw.update(stage="asset_filename_selected", filename=filename)
+    return {"title": title, "tags": tags, "filename": filename}
+
+
 # ─────────────────────────────────────────────────────────────────
 # 主流程
 # ─────────────────────────────────────────────────────────────────
@@ -1004,6 +1042,12 @@ async def run_task(
     profile = _intent_profile(ingest_intent)
 
     # ── 阶段 1：取 metadata 并按内容形态下载 ──
+    sw.update(stage="source_identified", source_type="douyin", url=url)
+    sw.update(
+        stage="cookie_availability_checked",
+        platform="douyin",
+        available=config.cookie_path.is_file(),
+    )
     sw.update(
         stage="downloading",
         url=url,
@@ -1012,6 +1056,15 @@ async def run_task(
     )
     try:
         meta = await fetch_metadata(url, config.cookie_path)
+        sw.update(
+            stage="source_metadata_read",
+            source_id=meta.aweme_id,
+            media_type=getattr(meta, "media_type", "video") or "video",
+            author_present=bool(meta.author),
+            title_present=bool(meta.title),
+            duration_sec=meta.duration_sec,
+            image_count=len(getattr(meta, "image_urls", ()) or ()),
+        )
 
         if getattr(meta, "media_type", "") == "image_post":
             sw.update(
@@ -1051,6 +1104,13 @@ async def run_task(
                 },
                 image_paths=[str(path) for path in image_paths],
                 image_count=len(image_paths),
+            )
+            sw.update(
+                stage="download_files_validated",
+                media_type="image_post",
+                file_count=len(image_paths),
+                all_exist=all(path.is_file() for path in image_paths),
+                total_bytes=sum(path.stat().st_size for path in image_paths if path.is_file()),
             )
             return await run_image_post_task(
                 task_id=task_id,
@@ -1097,6 +1157,13 @@ async def run_task(
         },
         video_path=str(video_path),
         video_size_mb=round(video_path.stat().st_size / 1024 / 1024, 2),
+    )
+    sw.update(
+        stage="download_file_validated",
+        media_type="video",
+        exists=video_path.is_file(),
+        bytes=video_path.stat().st_size,
+        extension=video_path.suffix.lower(),
     )
 
     # ── 阶段 2：拆解 ──
@@ -1160,6 +1227,13 @@ async def run_task(
         chunk_count=chunk_count,
         audit_artifacts=getattr(result, "audit_artifacts", {}),
     )
+    _record_asset_generation_projection(
+        sw,
+        analysis_text=result.text,
+        meta=meta,
+        source_media="douyin_video",
+        ingest_intent=ingest_intent,
+    )
 
     # ── 阶段 3：成本估算 ──
     cost = estimate_cost_rmb(result.model, result.usage)
@@ -1197,6 +1271,19 @@ async def run_task(
         )
     except Exception as e:
         raise IngestError("vault_write_error", str(e)) from e
+    sw.update(
+        stage="asset_file_written",
+        vault_path=str(md_path),
+        exists=md_path.is_file(),
+        bytes=md_path.stat().st_size if md_path.is_file() else 0,
+        audit_artifacts={"knowledge_asset": {"path": str(md_path)}},
+    )
+    sw.update(
+        stage="asset_index_updated",
+        index_path=str(config.vault_path / "index.md"),
+        exists=(config.vault_path / "index.md").is_file(),
+        audit_artifacts={"vault_index": {"path": str(config.vault_path / "index.md")}},
+    )
     asset = {
         "ingest_intent": ingest_intent,
         "asset_family": profile["asset_family"],
@@ -1290,6 +1377,13 @@ async def run_image_post_task(
         image_count=result.image_count,
         media_type="image_post",
     )
+    _record_asset_generation_projection(
+        sw,
+        analysis_text=result.text,
+        meta=meta,
+        source_media="douyin_image_post",
+        ingest_intent=ingest_intent,
+    )
 
     cost = estimate_cost_rmb(result.model, result.usage)
     sw.update(cost_estimate=cost)
@@ -1324,6 +1418,19 @@ async def run_image_post_task(
         )
     except Exception as e:
         raise IngestError("vault_write_error", str(e)) from e
+    sw.update(
+        stage="asset_file_written",
+        vault_path=str(md_path),
+        exists=md_path.is_file(),
+        bytes=md_path.stat().st_size if md_path.is_file() else 0,
+        audit_artifacts={"knowledge_asset": {"path": str(md_path)}},
+    )
+    sw.update(
+        stage="asset_index_updated",
+        index_path=str(config.vault_path / "index.md"),
+        exists=(config.vault_path / "index.md").is_file(),
+        audit_artifacts={"vault_index": {"path": str(config.vault_path / "index.md")}},
+    )
     asset = {
         "ingest_intent": ingest_intent,
         "asset_family": profile["asset_family"],
@@ -1471,7 +1578,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     # ── 2. 跑 ──
-    sw = StatusWriter(task_id, status_dir)
+    sw = StatusWriter(
+        task_id,
+        status_dir,
+        operation_id=(task_data or {}).get("operation_id") or (task_data or {}).get("operationId"),
+        parent_id=(task_data or {}).get("parent_id") or (task_data or {}).get("parentId"),
+        operation_type="task.ingest",
+    )
     task_meta = {}
     if task_data is not None:
         task_meta = {

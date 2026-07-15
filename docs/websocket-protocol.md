@@ -14,6 +14,26 @@
 
 连接建立后可以先读取状态，但配置、Cookie、模型检查、入库和派生操作必须通过版本握手。新服务会拒绝旧扩展的写操作；新扩展连接缺少完整运行身份的旧服务时，只保留状态诊断并暂停同步与入库。
 
+## 统一操作关联信封
+
+当前扩展发出的每个有业务意义的请求都包含以下字段，服务端回复会继承同一组字段：
+
+```json
+{
+  "operationId": "task_request-7b91...",
+  "taskId": "",
+  "parentId": "",
+  "requestId": "task_request-1700000000000-abcd"
+}
+```
+
+- `operationId`：一次用户可见操作的唯一标识。扩展生成；缺失时服务端补齐。
+- `taskId`：已经存在的任务、GitHub 批次子项或授权流标识。新任务由服务端接受后分配，并写回公开状态。
+- `parentId`：重试、派生子任务和 GitHub 批次子项的父 operation；没有父操作时为空字符串。
+- `requestId`：控制面请求/回复匹配键，不替代 `operationId`。
+
+服务端将关联信息写入 `~/.agent-wiki/operations/`。请求中的 API Key、Cookie、Authorization、GitHub token、`device_code`、`user_code`、完整认证响应和模型 response ID 在写审计前严格脱敏；`cookie_update.data` 只记录是否存在和字符数。普通 URL 会删除 token/key/secret/signature/code 等敏感 query。
+
 ## 扩展 -> Agent
 
 ### `handshake`
@@ -192,6 +212,37 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 { "type": "task_status_request" }
 ```
 
+### `task_cancel` / `task_retry`
+
+`task_cancel` 可取消排队或运行中的通用任务；运行中的子进程会收到终止信号，取消终态和错误批次子项都会持久化。`task_retry` 只接受已经结束的任务，复制原任务的非敏感来源线索生成新的 `taskId` 和 operation，并用 `parentId` 指向原 operation。
+
+```json
+{ "type": "task_cancel", "taskId": "20260716-004000-abcd" }
+```
+
+```json
+{
+  "type": "task_retry",
+  "taskId": "20260716-004000-abcd",
+  "parentId": "task_request-original-operation"
+}
+```
+
+成功返回 `task_control_done`；任务不存在、仍在运行而请求重试、或已结束而请求取消时返回 `task_control_rejected`。弹窗任务卡对运行中任务显示取消，对失败/已取消任务显示重试。
+
+### `operation_diagnostics_request`
+
+按 operation 查询持久化摘要与完整结构化时间线。该消息是只读诊断请求，版本不匹配时仍允许发送。
+
+```json
+{
+  "type": "operation_diagnostics_request",
+  "targetOperationId": "task_request-7b91..."
+}
+```
+
+返回 `operation_diagnostics`。`result.summary` 是当前投影，`result.events[]` 按 `sequence` 排序；`result.diagnostics` 给出本机索引、摘要和时间线位置。
+
 ### `derived_task_action`
 
 对某个父任务下的派生候选执行人工操作。扩展只发送候选 ID、动作和可选目标 URL；服务端负责状态机校验、父资产存在性校验、URL 安全清洗、幂等入队和任务状态合并。
@@ -241,6 +292,9 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
     "model_health_check",
     "extension_task_ingest",
     "task_status",
+    "task_control",
+    "operation_audit_v1",
+    "operation_diagnostics",
     "derived_task_action",
     "github_device_flow",
     "github_repository_search",
@@ -297,7 +351,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 }
 ```
 
-只读的 `status_request` 和 `task_status_request` 不受该门禁影响，便于诊断旧部署。
+只读的 `status_request`、`task_status_request` 和 `operation_diagnostics_request` 不受该门禁影响，便于诊断旧部署。
 
 ### `status_snapshot`
 
@@ -325,10 +379,17 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
     "tasks": {
       "running": 1,
       "failed": 0,
+      "cancelled": 0,
       "done": 3,
       "items": [
         {
           "id": "20260702-233000-abcd",
+          "operationId": "task_request-7b91...",
+          "parentId": "",
+          "diagnostics": {
+            "index": "/Users/.../.agent-wiki/operations/index.jsonl",
+            "timeline": "/Users/.../.agent-wiki/operations/by-id/task_request-7b91.../timeline.jsonl"
+          },
           "stageLabel": "分析中",
           "progressPercent": 74,
           "elapsedSec": 92
@@ -358,6 +419,8 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 
 `task_accepted` 表示任务已进入队列；`task_rejected` 表示 URL 或环境不满足；
 `task_status_snapshot` 返回最近任务列表。
+
+每个任务项固定公开 `operationId`、`parentId` 和 `diagnostics`。GitHub 导入批次及 `items[]` 也公开各自的 `operationId`/`parentId`，因此弹窗关闭或服务重启后仍可从一个 operation 还原父批次与子项失败。
 
 任务状态项可包含派生候选公开投影。这里返回的是摘要，不是完整系统记录：
 

@@ -12,7 +12,8 @@
   const READ_ONLY_MESSAGE_TYPES = new Set([
     'handshake',
     'status_request',
-    'task_status_request'
+    'task_status_request',
+    'operation_diagnostics_request'
   ]);
 
   function safeMatch(value, pattern, maxLength = 64) {

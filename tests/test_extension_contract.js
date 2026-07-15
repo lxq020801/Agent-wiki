@@ -98,13 +98,23 @@ async function main() {
   const socket = FakeWebSocket.instances[0];
   assert.equal(socket.url, 'ws://127.0.0.1:8765');
   socket.open();
-  assert.deepEqual(socket.sent[0], {
+  assert.deepEqual({
+    type: socket.sent[0].type,
+    client: socket.sent[0].client,
+    product: socket.sent[0].product,
+    version: socket.sent[0].version,
+    protocolVersion: socket.sent[0].protocolVersion
+  }, {
     type: 'handshake',
     client: 'agent-wiki-background',
     product: 'agent-wiki',
     version: '0.2.1',
     protocolVersion: 1
   });
+  assert.match(socket.sent[0].operationId, /^handshake-/);
+  assert.equal(socket.sent[0].taskId, '');
+  assert.equal(socket.sent[0].parentId, '');
+  assert.ok(socket.sent[0].requestId);
 
   const sentBeforeHandshake = vm.runInContext(
     `sendToAgent({ type: 'task_request', requestId: 'blocked-before-handshake' })`,

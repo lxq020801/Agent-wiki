@@ -1677,9 +1677,25 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
         "05-model-output-sanitized.md",
         body,
     ))
+    sw.update(
+        stage="derived_output_validated",
+        target_type=target.kind,
+        content_present=bool(body),
+        character_count=len(body),
+        source_sections_validated=target.kind == "github_project",
+        usage=usage,
+        audit_artifacts=_artifact_index(audit_root, audit_files),
+    )
     title = _asset_title(target.title or str(candidate.get("name") or "派生资产"))
     summary = _summary_from_text(body, title)
     cost = estimate_cost_rmb(config.analyzer_model, usage)
+    sw.update(
+        stage="derived_asset_fields_selected",
+        title=title,
+        title_length=len(title),
+        summary_length=len(summary),
+        cost_estimate=cost,
+    )
 
     sw.update(stage="writing_vault", audit_artifacts=_artifact_index(audit_root, audit_files))
     with vault_write_transaction(config.vault_path):
@@ -1748,6 +1764,30 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
     }
     git_status = VAULT_GIT_STATUS
     github_integration = _register_github_target(target, md_path, config.vault_path)
+    sw.update(
+        stage="derived_asset_file_written",
+        vault_path=str(md_path),
+        exists=md_path.is_file(),
+        section=section,
+        audit_artifacts={
+            **_artifact_index(audit_root, audit_files),
+            "derived_asset": {"path": str(md_path)},
+        },
+    )
+    sw.update(
+        stage="derived_index_updated",
+        index_path=str(config.vault_path / "index.md"),
+        exists=(config.vault_path / "index.md").is_file(),
+        audit_artifacts={"vault_index": {"path": str(config.vault_path / "index.md")}},
+    )
+    sw.update(
+        stage="derived_parent_child_linked",
+        parent_path=str(parent_path) if parent_path else "",
+        child_path=str(md_path),
+        relation=relation,
+        updated_file_count=len(parent_touched),
+        github_integration=github_integration,
+    )
     _add_artifact(audit_files, "derive_write_result", _write_audit_json(
         audit_root,
         "06-write-result.json",
@@ -1811,7 +1851,13 @@ def main(argv: list[str] | None = None) -> int:
         })
         return 1
 
-    sw = StatusWriter(task_id, status_dir)
+    sw = StatusWriter(
+        task_id,
+        status_dir,
+        operation_id=task.get("operation_id") or task.get("operationId"),
+        parent_id=task.get("parent_id") or task.get("parentId"),
+        operation_type="derivation.execute",
+    )
     try:
         config = load_config()
         sw.update(

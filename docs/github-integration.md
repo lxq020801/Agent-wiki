@@ -42,6 +42,8 @@ python3.11 server/launcher.py restart
 
 授权流程会把非敏感状态写入 `github/authorization.json`。后台轮询即使发生在扩展弹窗关闭后，最终失败也会记录 `state=failed` 和 `lastAuthorizationError`；错误只包含 `code`、面向用户的 `message`、失败 `stage` 和时间，不保存 token、device code、Cookie 或 GitHub 完整响应。新的授权、取消、成功或注销会更新该状态。
 
+登录请求还会生成统一 `operationId`。后台 Device Flow 轮询、可重试错误、最终成功/失败或取消继续写入同一条 `operations/by-id/<operationId>/timeline.jsonl`；`userCode`、`deviceCode` 和完整授权响应会在进入统一时间线前删除。Stars 批次和每个仓库子项分别持有 operation，并通过 `parentId` 关联，因此弹窗关闭或服务重启后仍能定位单项失败。
+
 ### Keychain 持久化故障根因
 
 旧实现向末尾裸 `-w` 的 `security add-generic-password` stdin 只写入一次 token。macOS `security` 实际要求连续输入密码和确认密码；单行输入会先发生确认不匹配，随后可能在 EOF 下写入空密码却返回退出码 `0`。服务当时没有读回验证，仍用内存中的 token 请求 `/user`，所以弹窗会短暂显示正确账号；后续真实状态检查从 Keychain 读到空值后才变成未连接。当前实现以写后读回和 `/user` 验证共同阻断这条假成功路径。

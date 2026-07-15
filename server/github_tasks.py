@@ -159,6 +159,8 @@ class GitHubTaskStore:
                 continue
             item = {
                 "taskId": str(stored.get("taskId") or ""),
+                "operationId": str(stored.get("operationId") or ""),
+                "parentId": str(stored.get("parentId") or ""),
                 "state": str(stored.get("state") or "queued"),
                 "repository": dict(stored.get("repository") or {}),
                 "assetPath": str(stored.get("assetPath") or ""),
@@ -175,6 +177,8 @@ class GitHubTaskStore:
             items.append(item)
         return {
             "id": str(batch.get("id") or ""),
+            "operationId": str(batch.get("operationId") or ""),
+            "parentId": str(batch.get("parentId") or ""),
             "kind": str(batch.get("kind") or "stars_import"),
             "state": str(batch.get("state") or "queued"),
             "total": int(batch.get("total") or 0),
@@ -196,6 +200,8 @@ class GitHubTaskStore:
         repositories: list[dict[str, Any]],
         *,
         request_key: str = "",
+        operation_id: str = "",
+        parent_id: str = "",
     ) -> tuple[dict[str, Any], bool]:
         fingerprint = _selection_fingerprint(repositories)
         clean_request_key = str(request_key or "")[:256]
@@ -210,6 +216,8 @@ class GitHubTaskStore:
             batch = {
                 "schemaVersion": 1,
                 "id": batch_id,
+                "operationId": str(operation_id or f"github-import-{batch_id}"),
+                "parentId": str(parent_id or ""),
                 "kind": "stars_import",
                 "state": "queued",
                 "requestKey": clean_request_key,
@@ -220,6 +228,8 @@ class GitHubTaskStore:
                 "items": [
                     {
                         "taskId": uuid.uuid4().hex,
+                        "operationId": f"github-item-{uuid.uuid4().hex}",
+                        "parentId": str(operation_id or f"github-import-{batch_id}"),
                         "state": "queued",
                         "repository": dict(repository),
                         "assetPath": "",
@@ -275,7 +285,12 @@ class GitHubTaskStore:
             if not batch:
                 return []
             return [
-                {"taskId": str(item.get("taskId") or ""), "repository": dict(item.get("repository") or {})}
+                {
+                    "taskId": str(item.get("taskId") or ""),
+                    "operationId": str(item.get("operationId") or ""),
+                    "parentId": str(item.get("parentId") or batch.get("operationId") or ""),
+                    "repository": dict(item.get("repository") or {}),
+                }
                 for item in batch.get("items") or []
                 if isinstance(item, dict) and item.get("state") == "queued"
             ]
@@ -292,7 +307,12 @@ class GitHubTaskStore:
                     batch["state"] = "running"
                     self._recount(batch)
                     self._write_batch(batch)
-                    return {"taskId": task_id, "repository": dict(item.get("repository") or {})}
+                    return {
+                        "taskId": task_id,
+                        "operationId": str(item.get("operationId") or ""),
+                        "parentId": str(item.get("parentId") or batch.get("operationId") or ""),
+                        "repository": dict(item.get("repository") or {}),
+                    }
             return None
 
     def complete_item(self, batch_id: str, task_id: str, result: dict[str, Any]) -> dict[str, Any] | None:

@@ -63,6 +63,8 @@ frontmatter 必须同时记录 `asset_family`、`source_media`、`ingest_intent`
 ├── run/             --- 托管服务 PID 与进程身份元数据
 ├── status/
 ├── logs/
+├── operations/      --- 跨入口结构化操作时间线、索引与诊断摘要
+├── run-artifacts/   --- 视频/派生的大 prompt、完整响应与详细产物
 └── extension/
 ```
 
@@ -72,6 +74,7 @@ frontmatter 必须同时记录 `asset_family`、`source_media`、`ingest_intent`
 - `cookie/douyin.txt` 保存抖音 Cookie
 - `status/` 保存运行状态
 - `logs/` 保存诊断日志
+- `operations/index.jsonl` 和 `operations/by-id/<operationId>/` 保存严格脱敏的统一操作索引、摘要与事件时间线；大 prompt/完整响应仍只放 `run-artifacts/`
 
 首次使用只自动扫描 Obsidian 根位置，用于建议新库的父目录；不会自动选择、改写或迁移扫描到的旧 vault。空白新库只创建索引、必要资产目录和 `.agent-wiki-vault.json` 稳定身份标记。路径变化后同时匹配用户名称和身份重连；多路径命中时等待用户确认。已有知识库只能通过迁移预览、复制、完成校验后切换，来源始终保留。
 
@@ -100,6 +103,8 @@ python3.11 server/launcher.py status
 | 扩展 -> Agent | `cookie_update` | 写 Douyin Cookie 文件 |
 | 扩展 -> Agent | `task_request` | 提交知识入库来源和页面线索 |
 | 扩展 -> Agent | `task_status_request` | 拉取任务进度 |
+| 扩展 -> Agent | `task_cancel` / `task_retry` | 取消运行/排队任务，或从终态创建有关联的新重试任务 |
+| 扩展 -> Agent | `operation_diagnostics_request` | 按 operationId 查询持久化诊断时间线 |
 | 扩展 -> Agent | `github_*` | GitHub Device Flow、仓库搜索、Stars 导入与手动刷新 |
 | Agent -> 扩展 | `agent_ready` | 服务已连接 |
 | Agent -> 扩展 | `status_snapshot` | 当前状态快照 |
@@ -109,9 +114,12 @@ python3.11 server/launcher.py status
 | Agent -> 扩展 | `cookie_synced` | Cookie 已写入 |
 | Agent -> 扩展 | `task_accepted` / `task_rejected` | 任务进入队列或被拒绝 |
 | Agent -> 扩展 | `task_status_snapshot` | 任务进度快照 |
+| Agent -> 扩展 | `task_control_done` / `task_control_rejected` / `operation_diagnostics` | 任务控制和诊断查询结果 |
 | Agent -> 扩展 | `github_status` / `github_*_results` | GitHub 登录、列表、批量进度与刷新结果 |
 
 `task_request` 只能提交 URL 和页面线索，不能提交 Cookie、API Key、质量档或业务编排步骤。
+
+扩展请求和服务回复携带统一 `operationId/taskId/parentId`。任务状态、GitHub 批次与知识库生命周期结果会公开 operation 或诊断位置；服务重启后仍可从 `operations/` 查询。任何 Cookie、API Key、Authorization、GitHub token、设备码/用户码或完整认证响应都不得进入该时间线。
 
 ## 扩展只做什么
 

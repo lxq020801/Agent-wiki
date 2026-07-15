@@ -1573,7 +1573,14 @@ class GitHubService:
         self.pending_refreshes.pop(str(refresh_id or ""), None)
         return {"ok": True, "state": "cancelled"}
 
-    def create_import_batch(self, repositories: Any, *, request_key: str = "") -> dict[str, Any]:
+    def create_import_batch(
+        self,
+        repositories: Any,
+        *,
+        request_key: str = "",
+        operation_id: str = "",
+        parent_id: str = "",
+    ) -> dict[str, Any]:
         if not isinstance(repositories, list) or not repositories:
             raise GitHubServiceError("selection_empty", "请至少选择一个 GitHub Star。")
         clean: list[dict[str, Any]] = []
@@ -1606,7 +1613,12 @@ class GitHubService:
                 seen_names.setdefault(full_name, len(clean) - 1)
         if not clean:
             raise GitHubServiceError("selection_invalid", "选择的 GitHub 仓库无效。")
-        batch, created = self.task_store.create_batch(clean, request_key=request_key)
+        batch, created = self.task_store.create_batch(
+            clean,
+            request_key=request_key,
+            operation_id=operation_id,
+            parent_id=parent_id,
+        )
         batch["idempotent"] = not created
         return batch
 

@@ -332,7 +332,9 @@ function connectWebSocket() {
       githubValidationRequestedForConnection = false;
       githubImportStatusRequestedFor = '';
       updateConnectionStatus(true);
-      ws.send(JSON.stringify(RuntimeVersion.buildHandshake('agent-wiki-extension')));
+      ws.send(JSON.stringify(withOperationContext(
+        RuntimeVersion.buildHandshake('agent-wiki-extension')
+      )));
       requestStatus();
       startStatusPolling();
     };
@@ -373,14 +375,30 @@ function stopStatusPolling() {
 }
 
 function sendToAgent(data) {
-  if (!RuntimeVersion.canSendMessage(data?.type, runtimeCompatibility)) {
+  const payload = withOperationContext(data);
+  if (!RuntimeVersion.canSendMessage(payload?.type, runtimeCompatibility)) {
     return false;
   }
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(data));
+    ws.send(JSON.stringify(payload));
     return true;
   }
   return false;
+}
+
+function makeOperationId(type = 'operation') {
+  const prefix = String(type || 'operation').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+  const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${prefix}-${suffix}`;
+}
+
+function withOperationContext(data) {
+  const payload = { ...(data || {}) };
+  payload.operationId = payload.operationId || makeOperationId(payload.type);
+  payload.taskId = payload.taskId || payload.batchId || payload.flowId || '';
+  payload.parentId = payload.parentId || payload.parentTaskId || '';
+  payload.requestId = payload.requestId || `${payload.type || 'request'}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return payload;
 }
 
 function requestStatus() {
@@ -1272,6 +1290,7 @@ function applyTaskStatus(snapshot) {
   const items = Array.isArray(snapshot.items) ? snapshot.items : [];
   const running = Number(snapshot.running || 0);
   const failed = Number(snapshot.failed || 0);
+  const cancelled = Number(snapshot.cancelled || 0);
   const done = Number(snapshot.done || 0);
   const latest = items[0] || null;
   if (snapshot.taskConcurrency) {
@@ -1286,6 +1305,8 @@ function applyTaskStatus(snapshot) {
     setStatus('tasks', `${running} 个进行中`, 'warning', formatTaskTime(latest?.updatedAt));
   } else if (failed > 0 && latest?.ok === false) {
     setStatus('tasks', '最近失败', 'offline', formatTaskTime(latest.updatedAt));
+  } else if (cancelled > 0 && latest?.stage === 'cancelled') {
+    setStatus('tasks', '最近取消', 'warning', formatTaskTime(latest.updatedAt));
   } else if (done > 0 && latest?.ok === true) {
     setStatus('tasks', '最近成功', 'online', formatTaskTime(latest?.updatedAt));
   } else {
@@ -1328,7 +1349,9 @@ function renderTaskList(targetId, items) {
     const detail = document.createElement('div');
     detail.className = 'task-detail';
     if (task.ok === false) {
-      detail.textContent = task.error || task.hint || '任务失败';
+      detail.textContent = task.stage === 'cancelled'
+        ? '任务已取消，可重新提交'
+        : task.error || task.hint || '任务失败';
     } else if (task.ok === true && (task.stage === 'done' || task.displayStage === 'done')) {
       const star = task.githubIntegration?.autoStar;
       if (star?.attempted && star.ok === false) {
@@ -1341,6 +1364,27 @@ function renderTaskList(targetId, items) {
       detail.textContent = task.url || '任务已进入队列';
     }
     card.append(head, meta, bar, detail);
+    const controls = document.createElement('div');
+    controls.className = 'task-actions';
+    if (task.ok === null || task.ok === undefined) {
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'small secondary task-control';
+      cancel.dataset.action = 'cancel';
+      cancel.dataset.taskId = task.id || '';
+      cancel.textContent = '取消';
+      controls.appendChild(cancel);
+    } else if (task.ok === false) {
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'small secondary task-control';
+      retry.dataset.action = 'retry';
+      retry.dataset.taskId = task.id || '';
+      retry.dataset.parentId = task.operationId || '';
+      retry.textContent = '重试';
+      controls.appendChild(retry);
+    }
+    if (controls.childElementCount) card.appendChild(controls);
     appendDerivedPanel(card, task);
     list.appendChild(card);
   }
@@ -1507,6 +1551,11 @@ function stageLabel(stage) {
     downloaded: '下载完成',
     downloading_images: '下载图片',
     downloaded_images: '图片下载完成',
+    source_identified: '识别来源',
+    cookie_availability_checked: '检查 Cookie',
+    source_metadata_read: '读取来源信息',
+    download_file_validated: '校验下载文件',
+    download_files_validated: '校验下载文件',
     probed_duration: '读取视频信息',
     fps_decided: '计算抽帧',
     chunking_plan: '规划切片',
@@ -1540,11 +1589,44 @@ function stageLabel(stage) {
     target_resolved: '派生目标已解析',
     analyzing_derived_target: '分析派生目标',
     writing_vault: '写入知识库',
+    concise_summary_generated: '生成简洁概括',
+    complete_content_generated: '整理完整内容',
+    ai_analysis_generated: '生成 AI 分析',
+    asset_structure_parsed: '解析资产结构',
+    asset_fields_validated: '校验资产字段',
+    asset_title_selected: '确定标题',
+    asset_tags_selected: '确定标签',
+    asset_filename_selected: '确定文件名',
+    asset_file_written: '写入资产',
+    asset_index_updated: '更新索引',
+    derived_output_validated: '校验派生内容',
+    derived_asset_fields_selected: '确定派生字段',
+    derived_asset_file_written: '写入派生资产',
+    derived_index_updated: '更新派生索引',
+    derived_parent_child_linked: '建立父子关系',
     done: '成功',
+    cancelled: '已取消',
+    retry_queued: '重试已入队',
     failed: '失败',
     config_error: '配置错误',
     task_invalid: '任务无效'
   }[stage] || stage || '处理中';
+}
+
+function submitTaskControl(button) {
+  const taskId = button?.dataset.taskId || '';
+  const action = button?.dataset.action || '';
+  if (!taskId || !['cancel', 'retry'].includes(action)) return;
+  button.disabled = true;
+  const sent = sendToAgent({
+    type: action === 'cancel' ? 'task_cancel' : 'task_retry',
+    taskId,
+    parentId: button.dataset.parentId || ''
+  });
+  if (!sent) {
+    button.disabled = false;
+    showHint('task-hint', runtimeUnavailableMessage(), 'warning');
+  }
 }
 
 async function loadConfig() {
@@ -2554,6 +2636,11 @@ function bindDerivedTaskActions() {
   const list = document.getElementById('settings-task-list');
   if (!list) return;
   list.addEventListener('click', event => {
+    const taskControl = event.target.closest('.task-control');
+    if (taskControl) {
+      submitTaskControl(taskControl);
+      return;
+    }
     const button = event.target.closest('.derived-action');
     if (!button) return;
     const row = button.closest('.derived-item');
