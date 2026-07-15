@@ -183,6 +183,8 @@ def inspect_vault_identity(vault_path: Path | str) -> tuple[str, Optional[dict[s
     except VaultLifecycleError:
         return "missing_vault", None
     marker = vault / VAULT_IDENTITY_FILENAME
+    if marker.is_symlink():
+        return "invalid", None
     if not marker.is_file():
         return "missing", None
     payload = _read_json(marker)

@@ -187,6 +187,21 @@ class VaultLifecycleTests(unittest.TestCase):
             self.assertFalse((root / "runtime" / "config.toml").exists())
             self.assertFalse((old_vault / VAULT_IDENTITY_FILENAME).exists())
 
+    def test_identity_marker_symlink_is_rejected_without_following_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            vault = root / "vault"
+            private = root / ".obsidian" / "private.json"
+            vault.mkdir()
+            private.parent.mkdir()
+            private.write_text("not an identity", encoding="utf-8")
+            (vault / VAULT_IDENTITY_FILENAME).symlink_to(private)
+
+            identity_state, identity = inspect_vault_identity(vault)
+
+            self.assertEqual(identity_state, "invalid")
+            self.assertIsNone(identity)
+
     def test_moved_vault_reconnects_only_with_matching_name_and_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
