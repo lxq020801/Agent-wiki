@@ -10,12 +10,39 @@ const html = fs.readFileSync(path.join(root, 'chrome-extension/popup/popup.html'
 const css = fs.readFileSync(path.join(root, 'chrome-extension/popup/popup.css'), 'utf8');
 const js = fs.readFileSync(path.join(root, 'chrome-extension/popup/popup.js'), 'utf8');
 const visualMock = fs.readFileSync(path.join(root, 'tests/fixtures/popup_visual_mock.html'), 'utf8');
+const settingsDetailIds = [
+  'agent-settings',
+  'api-settings',
+  'video-settings',
+  'vault-settings',
+  'cookie-settings',
+  'task-settings'
+];
 
 assert.match(html, /class="status-strip"[\s\S]*id="status-agent"[\s\S]*id="status-api"[\s\S]*id="status-cookie"[\s\S]*id="status-vault"/);
 for (const id of ['status-agent', 'status-api', 'status-cookie', 'status-vault']) {
   assert.doesNotMatch(html, new RegExp(`<button[^>]+id="${id}"`), `${id} must be display-only`);
 }
+for (const [id, label] of Object.entries({
+  agent: 'Agent',
+  api: 'API',
+  cookie: 'Cookie',
+  vault: '知识库'
+})) {
+  assert.match(
+    html,
+    new RegExp(`id="status-${id}"[\\s\\S]*?<b>${label}</b>[\\s\\S]*?id="${id}-status-dot"[\\s\\S]*?id="${id}-status-text"`),
+    `${label} status must stay on one compact display row`
+  );
+}
+assert.doesNotMatch(html, /system-summary|系统就绪/);
 assert.match(html, /<button class="task-activity-entry" id="status-tasks"/);
+assert.match(html, /id="back-home-from-index"[^>]*>← 首页</);
+assert.match(html, /id="back-settings-index"[^>]*>← 设置</);
+for (const id of settingsDetailIds) {
+  assert.match(html, new RegExp(`class="settings-card"[^>]+data-target="${id}"`));
+  assert.match(html, new RegExp(`class="settings-group detail-section" id="${id}"`));
+}
 
 for (const id of [
   'scan-knowledge-bases',
@@ -37,6 +64,13 @@ assert.match(html, />迁移现有知识库</);
 assert.doesNotMatch(html, /Git 仓库/);
 
 assert.match(css, /--popup-height:\s*600px/);
+assert.match(css, /:root\s*\{[\s\S]*?color-scheme:\s*dark;[\s\S]*?--bg:\s*#15171c/);
+assert.match(css, /@media\s*\(prefers-color-scheme:\s*light\)\s*\{[\s\S]*?color-scheme:\s*light;[\s\S]*?--bg:\s*#f5f7f8/);
+assert.match(css, /\.status-strip\s*\{[\s\S]*?grid-template-columns:\s*repeat\(4, minmax\(0, 1fr\)\)/);
+assert.match(css, /\.status-indicator\s*\{[\s\S]*?grid-template-columns:\s*auto 6px minmax\(0, 1fr\)/);
+const compactStatusRule = css.match(/\.status-indicator b,\s*\.status-indicator em\s*\{([^}]*)\}/)?.[1] || '';
+assert.doesNotMatch(compactStatusRule, /text-overflow|white-space:\s*nowrap|overflow:\s*hidden/);
+assert.match(css, /\.status-indicator em\s*\{[^}]*overflow-wrap:\s*anywhere/);
 assert.match(css, /body\s*\{[\s\S]*?border:\s*0;[\s\S]*?border-radius:\s*0;/);
 assert.match(css, /\.view\s*\{[\s\S]*?overflow-y:\s*auto/);
 assert.match(css, /\.task-head\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto/);
@@ -68,6 +102,8 @@ assert.match(js, /status\.activeVault\?\.vaultPath/);
 assert.match(js, /state === 'ready' && action !== 'scan'/);
 assert.match(js, /status\.ok === false \|\| \['failed', 'error', 'rejected'\]/);
 assert.match(js, /function setView\(viewId\) \{\s*releaseFocusBeforeViewChange\(viewId\);/);
+assert.match(js, /back-settings-index'\)\.addEventListener\('click', closeSettingsDetailToIndex\)/);
+assert.doesNotMatch(js, /system-summary|系统就绪/);
 
 async function main() {
   const stored = {};
@@ -98,6 +134,7 @@ async function main() {
     Date,
     document: {
       body: { dataset: { view: 'home-view' } },
+      documentElement: { dataset: {} },
       addEventListener() {}
     },
     setTimeout,
@@ -170,6 +207,123 @@ async function main() {
     return { blurCount };
   })()`);
   assert.deepEqual(sameViewFocus, { blurCount: 0 });
+
+  const themeTransition = route(`(() => {
+    let changeListener = null;
+    let requestedQuery = '';
+    globalThis.matchMedia = query => {
+      requestedQuery = query;
+      return {
+        matches: true,
+        addEventListener(type, listener) {
+          if (type === 'change') changeListener = listener;
+        }
+      };
+    };
+    document.documentElement.dataset = {};
+    initColorScheme();
+    const dark = document.documentElement.dataset.theme;
+    changeListener({ matches: false });
+    const light = document.documentElement.dataset.theme;
+    changeListener({ matches: true });
+    return { requestedQuery, dark, light, darkAgain: document.documentElement.dataset.theme };
+  })()`);
+  assert.deepEqual(themeTransition, {
+    requestedQuery: '(prefers-color-scheme: dark)',
+    dark: 'dark',
+    light: 'light',
+    darkAgain: 'dark'
+  });
+
+  const compactStatuses = route(`({
+    agentOnline: compactStatusText('agent', 'online'),
+    agentOffline: compactStatusText('agent', 'offline'),
+    apiWarning: compactStatusText('api', 'warning'),
+    cookieOnline: compactStatusText('cookie', 'online'),
+    cookieWarning: compactStatusText('cookie', 'warning'),
+    vaultWarning: compactStatusText('vault', 'warning')
+  })`);
+  assert.deepEqual(compactStatuses, {
+    agentOnline: '已连接',
+    agentOffline: '未连接',
+    apiWarning: '待检查',
+    cookieOnline: '已同步',
+    cookieWarning: '待同步',
+    vaultWarning: '待识别'
+  });
+
+  const statusDetailSeparation = route(`(() => {
+    const elements = Object.fromEntries([
+      'agent-status-dot',
+      'agent-status-text',
+      'settings-agent-dot',
+      'settings-agent-summary'
+    ].map(id => [id, { className: '', textContent: '' }]));
+    document.getElementById = id => elements[id] || null;
+    setStatus('agent', '服务 v9.9.9', 'online', '07月16日 12:34');
+    return {
+      top: elements['agent-status-text'].textContent,
+      topTone: elements['agent-status-text'].className,
+      settings: elements['settings-agent-summary'].textContent,
+      settingsTone: elements['settings-agent-summary'].className
+    };
+  })()`);
+  assert.deepEqual(statusDetailSeparation, {
+    top: '已连接',
+    topTone: 'online',
+    settings: '服务 v9.9.9 · 07月16日 12:34',
+    settingsTone: 'online'
+  });
+
+  const detailNavigation = route(`(() => {
+    const makeClassList = () => {
+      const values = new Set();
+      return {
+        add(value) { values.add(value); },
+        remove(value) { values.delete(value); },
+        toggle(value, enabled) { enabled ? values.add(value) : values.delete(value); },
+        contains(value) { return values.has(value); }
+      };
+    };
+    const views = Object.fromEntries(Object.values(POPUP_VIEWS).map(id => [id, {
+      id,
+      inert: false,
+      classList: makeClassList(),
+      setAttribute() {}
+    }]));
+    const sections = Object.fromEntries(Object.keys(SETTINGS_DETAIL_TITLES).map(id => [id, {
+      id,
+      hidden: true,
+      dataset: { title: SETTINGS_DETAIL_TITLES[id] },
+      classList: makeClassList()
+    }]));
+    const title = { textContent: '' };
+    const elements = { ...views, ...sections, 'settings-detail-title': title };
+    document.getElementById = id => elements[id] || null;
+    document.querySelectorAll = selector => selector === '.detail-section' ? Object.values(sections) : [];
+    document.activeElement = null;
+
+    return Object.keys(SETTINGS_DETAIL_TITLES).map(id => {
+      openSettingsDetail(id, { persist: false, focus: false });
+      const detailView = document.body.dataset.view;
+      const onlyTargetVisible = Object.values(sections).every(section => section.hidden === (section.id !== id));
+      closeSettingsDetailToIndex({ focus: false });
+      return {
+        id,
+        detailView,
+        onlyTargetVisible,
+        parentView: document.body.dataset.view,
+        allDetailsHidden: Object.values(sections).every(section => section.hidden)
+      };
+    });
+  })()`);
+  assert.deepEqual(detailNavigation.map(item => item.id), settingsDetailIds);
+  for (const result of detailNavigation) {
+    assert.equal(result.detailView, 'settings-detail-view', `${result.id} must open in the detail view`);
+    assert.equal(result.onlyTargetVisible, true, `${result.id} must be the only visible detail`);
+    assert.equal(result.parentView, 'settings-index-view', `${result.id} must return to settings index`);
+    assert.equal(result.allDetailsHidden, true, `${result.id} must be hidden after returning`);
+  }
 
   assert.deepEqual(route(`buildVaultCreatePayload({ id: 'root-1', obsidianRoot: '/tmp/root' }, 'Demo')`), {
     userName: 'Demo',

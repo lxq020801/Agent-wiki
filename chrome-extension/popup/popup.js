@@ -91,6 +91,7 @@ let lastPreviewKey = '';
 let lastSettingsTrigger = null;
 let runtimeCompatibility = null;
 let runtimeSyncStarted = false;
+let colorSchemeMedia = null;
 const pendingDerivedActions = new Map();
 let githubAuthFlow = null;
 let githubStars = [];
@@ -117,6 +118,22 @@ let vaultWorkflow = {
 
 function debugLog(...args) {
   if (DEBUG_LOGS) console.log(...args);
+}
+
+function applyColorScheme(state) {
+  if (!document.documentElement) return;
+  document.documentElement.dataset.theme = state?.matches ? 'dark' : 'light';
+}
+
+function initColorScheme() {
+  if (typeof globalThis.matchMedia !== 'function') return;
+  colorSchemeMedia = globalThis.matchMedia('(prefers-color-scheme: dark)');
+  applyColorScheme(colorSchemeMedia);
+  if (typeof colorSchemeMedia.addEventListener === 'function') {
+    colorSchemeMedia.addEventListener('change', applyColorScheme);
+  } else if (typeof colorSchemeMedia.addListener === 'function') {
+    colorSchemeMedia.addListener(applyColorScheme);
+  }
 }
 
 function hasExtensionApis() {
@@ -676,7 +693,6 @@ function applyRuntimeCompatibility(msg, override = null) {
     runtimeCompatibility.canOperate ? 'success' : runtimeCompatibility.tone === 'offline' ? 'error' : 'warning',
     { persist: true }
   );
-  updateSystemSummary();
   return runtimeCompatibility;
 }
 
@@ -2411,7 +2427,20 @@ function updateConnectionStatus(connected) {
     showHint('runtime-version-hint', '', '');
   }
   refreshCookieStatusFromStorage();
-  updateSystemSummary();
+}
+
+function compactStatusText(kind, type) {
+  const status = type || 'warning';
+  if (kind === 'cookie') {
+    if (status === 'online') return '已同步';
+    if (status === 'offline') return '未同步';
+    return '待同步';
+  }
+  if (status === 'online') return '已连接';
+  if (status === 'offline') return '未连接';
+  if (kind === 'agent') return '检查中';
+  if (kind === 'vault') return '待识别';
+  return '待检查';
 }
 
 function setStatus(kind, text, type, time) {
@@ -2423,42 +2452,12 @@ function setStatus(kind, text, type, time) {
   if (dot) dot.className = `status-dot inline-dot ${normalized}`;
   if (menuDot) menuDot.className = `status-dot inline-dot ${normalized}`;
   if (label) {
-    label.textContent = time ? `${text} · ${time}` : text;
+    label.textContent = compactStatusText(kind, normalized);
     label.className = normalized;
   }
   if (menuLabel) {
     menuLabel.textContent = time ? `${text} · ${time}` : text;
     menuLabel.className = normalized;
-  }
-  updateSystemSummary();
-}
-
-function updateSystemSummary() {
-  const el = document.getElementById('system-summary');
-  if (!el) return;
-  if (!isAgentConnected) {
-    el.textContent = 'Agent 未连接';
-    return;
-  }
-  if (!runtimeCompatibility) {
-    el.textContent = '正在校验服务版本';
-    return;
-  }
-  if (!runtimeCompatibility.canOperate) {
-    el.textContent = runtimeCompatibility.state === 'legacy_server'
-      ? '检测到旧服务，已暂停入库'
-      : '版本不一致，已暂停入库';
-    return;
-  }
-  const api = document.getElementById('api-status-text')?.className || '';
-  const cookie = document.getElementById('cookie-status-text')?.className || '';
-  const vault = document.getElementById('vault-status-text')?.className || '';
-  if ([api, cookie, vault].includes('offline')) {
-    el.textContent = '存在配置异常';
-  } else if ([api, cookie, vault].includes('warning')) {
-    el.textContent = '有配置待处理';
-  } else {
-    el.textContent = '系统就绪';
   }
 }
 
@@ -2550,6 +2549,15 @@ function closeToHome() {
   } else {
     document.getElementById('open-settings').focus();
   }
+}
+
+function closeSettingsDetailToIndex({ focus = true } = {}) {
+  const trigger = lastSettingsTrigger?.closest?.('#settings-index-view') ? lastSettingsTrigger : null;
+  openSettingsIndex({ focus: false });
+  if (!focus) return;
+  requestAnimationFrame(() => {
+    (trigger || document.getElementById(POPUP_VIEWS.SETTINGS_INDEX))?.focus({ preventScroll: true });
+  });
 }
 
 function closeGithubToHome() {
@@ -2703,10 +2711,11 @@ function syncModelPresetFromInput() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  initColorScheme();
   document.getElementById('extension-version').textContent = `v${EXTENSION_VERSION || '未知'}`;
   document.getElementById('open-settings').addEventListener('click', openSettingsIndex);
   document.getElementById('open-github').addEventListener('click', () => openGithubPage());
-  document.getElementById('back-home').addEventListener('click', closeToHome);
+  document.getElementById('back-settings-index').addEventListener('click', closeSettingsDetailToIndex);
   document.getElementById('back-home-from-index').addEventListener('click', closeToHome);
   document.getElementById('back-home-from-github').addEventListener('click', closeGithubToHome);
   document.getElementById('status-tasks').addEventListener('click', () => openSettingsDetail('task-settings'));
@@ -2762,7 +2771,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       source: 'current',
       message: '打开扩展后自动识别抖音内容'
     });
-    updateSystemSummary();
     return;
   }
   await restorePopupRoute();

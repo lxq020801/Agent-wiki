@@ -11,24 +11,27 @@
     <div class="topbar-copy">
       <div class="topbar-title-row">
         <h1>知识库控制台</h1>
-        <p id="system-summary">正在连接 Agent</p>
       </div>
       <div class="status-strip" aria-label="连接状态">
         <span class="status-indicator" id="status-agent">
+          <b>Agent</b>
           <span class="status-dot inline-dot offline" id="agent-status-dot"></span>
-          <span><b>Agent</b><em id="agent-status-text">未连接</em></span>
+          <em id="agent-status-text">未连接</em>
         </span>
         <span class="status-indicator" id="status-api">
+          <b>API</b>
           <span class="status-dot inline-dot warning" id="api-status-dot"></span>
-          <span><b>API</b><em id="api-status-text">未检查</em></span>
+          <em id="api-status-text">待检查</em>
         </span>
         <span class="status-indicator" id="status-cookie">
+          <b>Cookie</b>
           <span class="status-dot inline-dot warning" id="cookie-status-dot"></span>
-          <span><b>Cookie</b><em id="cookie-status-text">未同步</em></span>
+          <em id="cookie-status-text">待同步</em>
         </span>
         <span class="status-indicator" id="status-vault">
+          <b>知识库</b>
           <span class="status-dot inline-dot warning" id="vault-status-dot"></span>
-          <span><b>知识库</b><em id="vault-status-text">待识别</em></span>
+          <em id="vault-status-text">待识别</em>
         </span>
       </div>
     </div>
@@ -124,7 +127,7 @@
 
   <main class="view" id="settings-detail-view" aria-hidden="true" inert>
     <div class="settings-page-head detail-head">
-      <button class="back-button" id="back-home" type="button">← 首页</button>
+      <button class="back-button" id="back-settings-index" type="button">← 设置</button>
       <h2 id="settings-detail-title">设置</h2>
     </div>
 

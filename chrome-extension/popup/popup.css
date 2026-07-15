@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --bg: #15171c;
   --surface: #1d2229;
   --panel: #222833;
@@ -14,9 +15,64 @@
   --warning: #f59e0b;
   --error: #ef4444;
   --focus: rgba(34, 197, 94, 0.24);
+  --button-surface: #1a1f27;
+  --feature-surface: #181d24;
+  --feature-border: rgba(255, 255, 255, 0.14);
+  --github-mark-bg: #f0f3f6;
+  --github-mark-text: #11151b;
+  --soft-border: rgba(255, 255, 255, 0.08);
+  --faint-border: rgba(255, 255, 255, 0.06);
+  --hairline-border: rgba(255, 255, 255, 0.05);
+  --hint-bg: rgba(255, 255, 255, 0.03);
+  --preview-start: #11151b;
+  --preview-end: #202832;
+  --primary-text: #04110a;
+  --task-progress-bg: #11151b;
+  --derived-bg: #151a21;
+  --strong-field: #10151c;
+  --backdrop: rgba(5, 7, 10, 0.76);
+  --modal-shadow: rgba(0, 0, 0, 0.42);
   --radius-card: 8px;
   --popup-width: 390px;
   --popup-height: 600px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #f5f7f8;
+    --surface: #ffffff;
+    --panel: #eef2f4;
+    --panel-hover: #e8f3ec;
+    --field: #f1f4f5;
+    --text: #171a1f;
+    --text-secondary: #555e68;
+    --muted: #727c87;
+    --border: #d5dbe0;
+    --primary: #16803c;
+    --primary-hover: #116b32;
+    --success: #16803c;
+    --warning: #9a5b05;
+    --error: #b4232c;
+    --focus: rgba(22, 128, 60, 0.18);
+    --button-surface: #ffffff;
+    --feature-surface: #ffffff;
+    --feature-border: rgba(23, 26, 31, 0.13);
+    --github-mark-bg: #171a1f;
+    --github-mark-text: #ffffff;
+    --soft-border: rgba(23, 26, 31, 0.10);
+    --faint-border: rgba(23, 26, 31, 0.08);
+    --hairline-border: rgba(23, 26, 31, 0.06);
+    --hint-bg: rgba(23, 26, 31, 0.035);
+    --preview-start: #edf1f3;
+    --preview-end: #dfe5e8;
+    --primary-text: #ffffff;
+    --task-progress-bg: #dfe5e8;
+    --derived-bg: #f7f9fa;
+    --strong-field: #ffffff;
+    --backdrop: rgba(23, 26, 31, 0.48);
+    --modal-shadow: rgba(23, 26, 31, 0.18);
+  }
 }
 
 * {
@@ -80,51 +136,33 @@ button {
 
 .topbar-title-row {
   display: flex;
-  align-items: baseline;
   min-width: 0;
-  gap: 8px;
 }
 
 .topbar-title-row h1 {
   flex: 0 0 auto;
 }
 
-.topbar-title-row p {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .status-strip {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   min-width: 0;
-  gap: 7px;
+  gap: 6px;
 }
 
 .status-indicator {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 6px minmax(0, 1fr);
   align-items: center;
   min-width: 0;
-  gap: 5px;
-}
-
-.status-indicator > span:last-child {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 1px;
+  gap: 3px;
 }
 
 .status-indicator b,
 .status-indicator em {
   min-width: 0;
-  overflow: hidden;
-  font-size: 9px;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 9.5px;
+  line-height: 1.25;
 }
 
 .status-indicator b {
@@ -136,6 +174,7 @@ button {
   color: var(--text);
   font-style: normal;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .status-indicator em.online {
@@ -186,7 +225,7 @@ h1 {
   padding: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: #1a1f27;
+  background: var(--button-surface);
   color: var(--text-secondary);
   font-size: 12px;
 }
@@ -248,9 +287,9 @@ body[data-view="github-view"] #open-settings {
   min-height: 54px;
   gap: 9px;
   padding: 8px 28px 8px 9px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--feature-border);
   border-radius: var(--radius-card);
-  background: #181d24;
+  background: var(--feature-surface);
   color: var(--text);
   text-align: left;
 }
@@ -282,8 +321,8 @@ body[data-view="github-view"] #open-settings {
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  background: #f0f3f6;
-  color: #11151b;
+  background: var(--github-mark-bg);
+  color: var(--github-mark-text);
 }
 
 .github-feature-mark svg {
@@ -529,7 +568,7 @@ button.secondary {
 
 button.primary {
   background: var(--primary);
-  color: #04110a;
+  color: var(--primary-text);
 }
 
 button.primary:hover,
@@ -541,7 +580,7 @@ button.primary:focus-visible {
 
 button.secondary {
   border: 1px solid var(--border);
-  background: #1a1f27;
+  background: var(--button-surface);
   color: var(--text-secondary);
 }
 
@@ -633,7 +672,7 @@ select {
   padding: 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: #1a1f27;
+  background: var(--button-surface);
   color: var(--text-secondary);
   text-align: left;
 }
@@ -725,7 +764,7 @@ select {
   min-height: 34px;
   border: 1px solid var(--border);
   border-radius: 7px;
-  background: #1a1f27;
+  background: var(--button-surface);
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 700;
@@ -756,9 +795,9 @@ textarea {
   min-height: 72px;
   margin-bottom: 10px;
   padding: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--soft-border);
   border-radius: 9px;
-  background: #171b22;
+  background: var(--field);
 }
 
 .preview-thumb {
@@ -771,7 +810,7 @@ textarea {
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: linear-gradient(135deg, #11151b, #202832);
+  background: linear-gradient(135deg, var(--preview-start), var(--preview-end));
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 650;
@@ -898,9 +937,9 @@ select:focus {
 
 .hint:not(:empty) {
   padding: 8px 9px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--soft-border);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--hint-bg);
 }
 
 .hint.success {
@@ -955,7 +994,7 @@ select:focus {
   padding: 0 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: #1a1f27;
+  background: var(--button-surface);
   color: var(--text);
   font-size: 12px;
   font-weight: 650;
@@ -1078,7 +1117,7 @@ select:focus {
   flex: 0 0 28px;
   border: 1px solid var(--border);
   border-radius: 7px;
-  background: #1a1f27;
+  background: var(--button-surface);
   color: var(--text-secondary);
 }
 
@@ -1305,8 +1344,8 @@ select:focus {
   flex-direction: column;
   gap: 1px;
   overflow-y: auto;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--faint-border);
+  border-bottom: 1px solid var(--faint-border);
 }
 
 .github-list .empty {
@@ -1323,7 +1362,7 @@ select:focus {
   gap: 8px;
   min-height: 56px;
   padding: 7px 2px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid var(--hairline-border);
   min-width: 0;
 }
 
@@ -1445,7 +1484,7 @@ select:focus {
   padding: 9px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: #1a1f27;
+  background: var(--button-surface);
 }
 
 .task-head {
@@ -1514,7 +1553,7 @@ select:focus {
   margin-top: 7px;
   overflow: hidden;
   border-radius: 999px;
-  background: #11151b;
+  background: var(--task-progress-bg);
 }
 
 .task-progress div {
@@ -1526,7 +1565,7 @@ select:focus {
 .derived-panel {
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  border-top: 1px solid var(--faint-border);
 }
 
 .derived-panel-title {
@@ -1541,7 +1580,7 @@ select:focus {
   padding: 7px;
   border: 1px solid var(--border);
   border-radius: 7px;
-  background: #151a21;
+  background: var(--derived-bg);
   overflow: hidden;
 }
 
@@ -1646,7 +1685,7 @@ select:focus {
   padding: 0 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: #10151c;
+  background: var(--strong-field);
   color: var(--text);
   font-size: 11px;
 }
@@ -1659,7 +1698,7 @@ select:focus {
   align-items: flex-end;
   justify-content: center;
   padding: 12px;
-  background: rgba(5, 7, 10, 0.76);
+  background: var(--backdrop);
 }
 
 .modal-shell {
@@ -1672,7 +1711,7 @@ select:focus {
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   background: var(--surface);
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
+  box-shadow: 0 18px 48px var(--modal-shadow);
 }
 
 .modal-head {
