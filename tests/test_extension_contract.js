@@ -143,6 +143,10 @@ async function main() {
   })})`, context);
   assert.equal(stored.runtimeCompatibility.canOperate, true);
   assert.equal(stored.agentRuntime.productVersion, '0.3.0');
+  const automaticVaultScan = socket.sent.find(message => message.type === 'vault_scan');
+  assert.ok(automaticVaultScan, 'compatible handshake must trigger one automatic vault scan');
+  assert.equal(automaticVaultScan.data.source, 'extension_handshake');
+  assert.match(automaticVaultScan.operationId, /^vault_scan-/);
 
   const candidate = {
     url: 'https://www.douyin.com/video/7390000000000000000',

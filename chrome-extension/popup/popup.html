@@ -236,24 +236,10 @@
         <p>管理本地 Markdown 知识资产的存放位置。</p>
       </div>
       <div class="vault-current" aria-live="polite">
-        <div class="vault-current-head">
-          <span>当前知识库</span>
-          <button class="compact-icon-button" id="scan-knowledge-bases" type="button" aria-label="扫描知识库" title="扫描知识库">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"></path>
-              <path d="M3 21v-5h5"></path>
-              <path d="M3 12A9 9 0 0 1 18.5 5.8L21 8"></path>
-              <path d="M21 3v5h-5"></path>
-            </svg>
-          </button>
-        </div>
+        <span>当前知识库</span>
         <strong id="vault-current-path">尚未连接</strong>
       </div>
-      <div class="knowledge-base-actions">
-        <button class="primary" id="create-knowledge-base" type="button">新建知识库</button>
-        <button class="secondary" id="switch-knowledge-base" type="button">切换知识库</button>
-        <button class="secondary" id="migrate-knowledge-base" type="button">迁移现有知识库</button>
-      </div>
+      <button class="primary full-width" id="select-knowledge-base" type="button">选择知识库</button>
       <div class="hint persistent" id="vault-hint"></div>
     </section>
 
@@ -365,14 +351,14 @@
     <div class="hint persistent" id="github-hint" role="status" aria-live="polite"></div>
   </main>
 
-  <div class="modal-backdrop" id="vault-workflow-modal" hidden>
-    <section class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="vault-workflow-title" aria-describedby="vault-workflow-copy">
+  <div class="modal-backdrop" id="vault-confirmation-modal" hidden>
+    <section class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="vault-confirmation-title" aria-describedby="vault-confirmation-copy">
       <header class="modal-head">
         <div>
-          <h2 id="vault-workflow-title">知识库</h2>
-          <p id="vault-workflow-copy">正在准备</p>
+          <h2 id="vault-confirmation-title">确认使用此文件夹</h2>
+          <p id="vault-confirmation-copy">确认后只会补齐缺失的 Agent-wiki 必要结构。</p>
         </div>
-        <button class="compact-icon-button" id="close-vault-workflow" type="button" aria-label="关闭" title="关闭">
+        <button class="compact-icon-button" id="close-vault-confirmation" type="button" aria-label="关闭" title="关闭">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M18 6 6 18"></path>
             <path d="m6 6 12 12"></path>
@@ -381,38 +367,16 @@
       </header>
 
       <div class="modal-body">
-        <div class="field" id="vault-candidate-field">
-          <label for="vault-candidate-select" id="vault-candidate-label">保存位置</label>
-          <select id="vault-candidate-select" disabled>
-            <option value="">正在扫描候选位置</option>
-          </select>
-          <p class="microcopy" id="vault-candidate-copy">候选位置由本地 Agent 扫描提供。</p>
+        <div class="vault-confirmation">
+          <strong id="vault-selection-folder">所选文件夹</strong>
+          <p>不会复制、迁移、删除或覆盖任何已有内容，也不会自动启用版本控制。</p>
         </div>
-
-        <div class="field" id="vault-name-field">
-          <label for="vault-name">知识库名称</label>
-          <input type="text" id="vault-name" maxlength="64" autocomplete="off" placeholder="例如：我的知识库">
-        </div>
-
-        <div class="vault-confirmation" id="vault-confirmation" hidden>
-          <strong>需要确认候选</strong>
-          <p id="vault-confirmation-copy">检测到多个可能位置，请确认所选知识库。</p>
-        </div>
-
-        <div class="vault-migration-summary" id="vault-migration-summary" hidden>
-          <div><span>迁移文件</span><strong id="vault-migration-files">待计算</strong></div>
-          <div><span>冲突</span><strong id="vault-migration-conflicts">待计算</strong></div>
-          <div><span>目标</span><strong id="vault-migration-target">待确认</strong></div>
-          <ul id="vault-migration-notes"></ul>
-        </div>
-
-        <div class="hint persistent" id="vault-workflow-hint" role="status" aria-live="polite"></div>
+        <div class="hint persistent" id="vault-selection-hint" role="status" aria-live="polite"></div>
       </div>
 
       <footer class="modal-actions">
-        <button class="secondary" id="cancel-vault-workflow" type="button">取消</button>
-        <button class="secondary" id="rollback-vault-migration" type="button" hidden>回退迁移</button>
-        <button class="primary" id="confirm-vault-workflow" type="button">继续</button>
+        <button class="secondary" id="cancel-vault-confirmation" type="button">取消</button>
+        <button class="primary" id="confirm-vault-selection" type="button">确认使用</button>
       </footer>
     </section>
   </div>

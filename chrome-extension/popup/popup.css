@@ -1139,14 +1139,6 @@ select:focus {
   font-size: 10px;
 }
 
-.vault-current-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-width: 0;
-  gap: 8px;
-}
-
 .compact-icon-button {
   display: inline-flex;
   align-items: center;
@@ -1187,14 +1179,8 @@ select:focus {
   line-height: 1.35;
 }
 
-.knowledge-base-actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
-}
-
-.knowledge-base-actions #create-knowledge-base {
-  grid-column: 1 / -1;
+#select-knowledge-base {
+  width: 100%;
 }
 
 .detail-section[hidden] {
@@ -1808,55 +1794,6 @@ select:focus {
   font-size: 10px;
   line-height: 1.4;
   overflow-wrap: anywhere;
-}
-
-.vault-migration-summary {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-bottom: 10px;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--field);
-}
-
-.vault-migration-summary > div {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.vault-migration-summary > div:last-of-type {
-  grid-column: 1 / -1;
-}
-
-.vault-migration-summary span {
-  color: var(--text-secondary);
-  font-size: 10px;
-}
-
-.vault-migration-summary strong {
-  min-width: 0;
-  color: var(--text);
-  font-size: 11px;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.vault-migration-summary ul {
-  grid-column: 1 / -1;
-  margin: 0;
-  padding-left: 17px;
-  color: var(--text-secondary);
-  font-size: 10px;
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-}
-
-.vault-migration-summary ul:empty {
-  display: none;
 }
 
 .modal-actions {
