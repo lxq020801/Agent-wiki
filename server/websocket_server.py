@@ -27,7 +27,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "deps" / "douyin" / "scripts"))
 
 # Keep discover_vault importable for legacy no-fallback guards; lifecycle code
 # never calls it to select or persist an existing vault.
-from install.vault_discovery import discover_vault, score_vault
+from install.vault_discovery import discover_vault
 from install.vault_lifecycle import (
     VAULT_LIFECYCLE_REQUEST_TYPES,
     VAULT_LIFECYCLE_RESPONSE_TYPE,
@@ -103,6 +103,8 @@ GITHUB_COMPLETION_STAGES = {
 }
 VAULT_COMPLETION_STAGES = {
     "vault_scan": "vault_scan_completed",
+    "vault_select_folder": "vault_select_folder_completed",
+    "vault_select_confirm": "vault_select_confirm_completed",
     "vault_create": "vault_create_completed",
     "vault_switch": "vault_switch_completed",
     "vault_candidate_confirm": "vault_candidate_confirmed",
@@ -913,7 +915,10 @@ class LibrarianServer:
             or business_result.get('ok') is False
             or business_result.get('state') in {'error', 'failed'}
         )
-        cancelled = msg_type.endswith('_cancel') and not failed
+        cancelled = (
+            msg_type.endswith('_cancel')
+            or business_result.get('state') == 'cancelled'
+        ) and not failed
         continues = (
             msg_type in {'task_request', 'task_retry'}
             or (
@@ -1072,20 +1077,42 @@ class LibrarianServer:
             }, ensure_ascii=False))
 
         elif msg_type in VAULT_LIFECYCLE_REQUEST_TYPES:
-            async with self.control_write_lock:
-                result = await asyncio.to_thread(
-                    dispatch_vault_lifecycle,
-                    self.vault_lifecycle_manager(),
-                    msg_type,
-                    msg.get('data') or {},
-                )
+            manager = self.vault_lifecycle_manager()
+            if msg_type == 'vault_select_folder':
+                picked = await asyncio.to_thread(self.pick_vault_folder)
+                if picked.get('ok'):
+                    async with self.control_write_lock:
+                        result = await asyncio.to_thread(
+                            dispatch_vault_lifecycle,
+                            manager,
+                            msg_type,
+                            {'selectedPath': picked.get('path') or ''},
+                        )
+                else:
+                    result = manager.selection_interrupted(
+                        state=str(picked.get('state') or 'error'),
+                        message=str(picked.get('message') or '文件夹选择失败。'),
+                        error_code=str(picked.get('errorCode') or ''),
+                    )
+            else:
+                async with self.control_write_lock:
+                    result = await asyncio.to_thread(
+                        dispatch_vault_lifecycle,
+                        manager,
+                        msg_type,
+                        msg.get('data') or {},
+                    )
             result['operationId'] = str(msg.get('operationId') or '')
             result['parentId'] = str(msg.get('parentId') or '')
             result['diagnostics'] = self.audit_store.diagnostics_ref(msg.get('operationId'))
             self.audit_store.record_event(
                 str(msg.get('operationId') or ''),
                 stage=VAULT_COMPLETION_STAGES.get(msg_type, 'vault_lifecycle_completed'),
-                state='succeeded' if result.get('ok') is True else 'failed',
+                state=(
+                    'cancelled'
+                    if result.get('state') == 'cancelled'
+                    else 'succeeded' if result.get('ok') is True else 'failed'
+                ),
                 result={
                     'operation': result.get('operation'),
                     'state': result.get('state'),
@@ -3057,13 +3084,11 @@ class LibrarianServer:
             'auto',
         )
 
-        incoming_vault = config_data.get('vaultPath') or config_data.get('vault_path') or ''
         vault_path = existing_vault_path or ''
-        if incoming_vault:
-            selected_vault = _safe_explicit_vault_path(incoming_vault)
-            if selected_vault is None:
-                raise ValueError('vaultPath must be an existing directory outside .obsidian')
-            vault_path = str(selected_vault)
+        lifecycle_status = self.vault_lifecycle_manager().status()
+        if lifecycle_status.get('state') == 'ready':
+            active_vault = lifecycle_status.get('activeVault') or {}
+            vault_path = str(active_vault.get('vaultPath') or vault_path)
         quality = 'quality'
         model = None if legacy_agent_plan_payload else (
             video_config.get('analyzerModel')
@@ -3208,29 +3233,18 @@ task_concurrency = {int(task_concurrency)}
                 'reasons': ['stable_identity'] if active else [],
             }
 
-        # A path-only legacy config remains readable, but it is never produced
-        # by first-use discovery and cannot participate in identity reconnect.
+        # A path-only legacy config is not proof of an active Agent-wiki vault.
         configured = _simple_config_value(config_path, 'vault', 'path')
         if configured:
-            selected = _safe_explicit_vault_path(configured)
-            if selected is None:
-                return {
-                    'ok': False,
-                    'state': 'invalid',
-                    'path': configured,
-                    'source': 'config.toml',
-                    'score': 0,
-                    'reasons': ['explicit_config_invalid'],
-                    'message': '已配置的 vault 路径无效；不会自动改用其他 Obsidian vault。',
-                }
-            candidate = score_vault(selected, source='config.toml')
             return {
-                'ok': True,
-                'state': 'ready',
-                'path': str(selected),
-                'source': 'config.toml',
-                'score': candidate.score if candidate else 0,
-                'reasons': candidate.reasons if candidate else ['explicit_config'],
+                **lifecycle,
+                'ok': False,
+                'state': 'selection_required',
+                'path': '',
+                'source': '',
+                'score': 0,
+                'reasons': ['legacy_config_unverified'],
+                'message': '检测到旧配置中的知识库路径，但它没有经过稳定身份确认。请点击“选择知识库”重新选择。',
             }
 
         return {
@@ -3408,7 +3422,7 @@ task_concurrency = {int(task_concurrency)}
             'reasons': ['legacy_message'],
             'candidates': lifecycle.get('vaultCandidates') or [],
             'obsidianRoots': lifecycle.get('obsidianRoots') or [],
-            'message': '请使用 vault_scan 后通过新建、切换或迁移完成知识库配置。',
+            'message': '请升级扩展并通过“选择知识库”完成知识库配置。',
         }
 
     def pick_vault_folder(self):
@@ -3419,41 +3433,59 @@ task_concurrency = {int(task_concurrency)}
                 'path': '',
                 'message': '当前系统暂不支持从扩展打开文件夹选择器',
             }
-        script = 'POSIX path of (choose folder with prompt "选择 Obsidian 父目录")'
+        script = '''
+try
+    set selectedFolder to choose folder with prompt "选择 Agent-wiki 知识库文件夹"
+    return POSIX path of selectedFolder
+on error number -128
+    return "__AGENT_WIKI_FOLDER_SELECTION_CANCELLED__"
+end try
+'''.strip()
         try:
             proc = subprocess.run(
-                ['osascript', '-e', script],
+                ['/usr/bin/osascript', '-e', script],
                 capture_output=True,
                 text=True,
                 timeout=120,
             )
-        except Exception as exc:
+        except Exception:
             return {
                 'ok': False,
                 'state': 'error',
                 'path': '',
-                'message': type(exc).__name__,
+                'errorCode': 'folder_picker_failed',
+                'message': '无法打开系统文件夹选择窗口，请稍后重试。',
             }
-        if proc.returncode != 0:
+        output = proc.stdout.strip()
+        if output == '__AGENT_WIKI_FOLDER_SELECTION_CANCELLED__':
             return {
                 'ok': False,
                 'state': 'cancelled',
                 'path': '',
-                'message': '用户取消选择',
+                'message': '已取消选择，知识库保持不变。',
             }
-        selected = _safe_explicit_vault_path(proc.stdout.strip())
+        if proc.returncode != 0:
+            return {
+                'ok': False,
+                'state': 'error',
+                'path': '',
+                'errorCode': 'folder_picker_failed',
+                'message': '系统文件夹选择窗口返回错误，知识库保持不变。',
+            }
+        selected = _safe_explicit_vault_path(output)
         if selected is None:
             return {
                 'ok': False,
                 'state': 'invalid',
                 'path': '',
+                'errorCode': 'selected_folder_invalid',
                 'message': '所选路径无效或位于 .obsidian 内部',
             }
         return {
-            'ok': False,
-            'state': 'lifecycle_required',
+            'ok': True,
+            'state': 'selected',
             'path': str(selected),
-            'message': '请由 UI 选择父目录，并通过 vault_create 或 vault_migration_preview 提交。',
+            'message': '已选择文件夹。',
         }
 
     async def check_model_health(self, config_data):

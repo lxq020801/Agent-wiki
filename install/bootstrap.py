@@ -208,7 +208,7 @@ def ensure_config_template(result: CheckResult) -> None:
     os.chmod(CONFIG_PATH, 0o600)
     result.actions.append(f"config template created: {CONFIG_PATH}")
     result.missing_user_actions.append(
-        "Open the extension, enter a user name, and create a new Agent-wiki vault."
+        "打开扩展并通过“选择知识库”选择一个文件夹。"
     )
     result.missing_user_actions.append(
         "Configure AGENT_WIKI_GITHUB_CLIENT_ID before using GitHub Device Flow."
@@ -458,7 +458,7 @@ def check_vault(result: CheckResult) -> None:
     vault_raw = _simple_config_value("vault", "path")
     if not vault_raw:
         result.missing_user_actions.append(
-            "Create a new Agent-wiki vault in the extension; existing Obsidian vaults are never adopted automatically."
+            "请在扩展中点击“选择知识库”；普通 Obsidian 目录不会自动连接。"
         )
         if not api_key:
             result.missing_user_actions.append(
@@ -481,14 +481,13 @@ def check_vault(result: CheckResult) -> None:
     identity_state, _identity = inspect_vault_identity(vault)
     if identity_state != "valid":
         result.missing_user_actions.append(
-            "The configured directory has no valid Agent-wiki identity marker. "
-            "Use migration preview for an existing knowledge vault."
+            "配置目录没有有效的 Agent-wiki 身份标记，请在扩展中重新选择知识库。"
         )
         return
     lifecycle = VaultLifecycleManager(runtime_root=RUNTIME_ROOT, config_path=CONFIG_PATH)
     switched = lifecycle.switch(vault_path=vault)
     if not switched.get("ok"):
-        result.missing_user_actions.append(switched.get("message") or "Select an Agent-wiki vault in the extension.")
+        result.missing_user_actions.append(switched.get("message") or "请在扩展中选择 Agent-wiki 知识库。")
         return
     result.actions.append(f"vault selected by explicit config: {vault}")
     result.actions.append(f"vault structure ready: {vault}")

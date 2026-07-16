@@ -48,7 +48,7 @@ async function main() {
     },
     notifications: { create() {} },
     runtime: {
-      getManifest: () => ({ version: '0.3.0' }),
+      getManifest: () => ({ version: '0.3.1' }),
       lastError: null,
       onInstalled: extensionEvent(),
       onMessage: extensionEvent(),
@@ -108,7 +108,7 @@ async function main() {
     type: 'handshake',
     client: 'agent-wiki-background',
     product: 'agent-wiki',
-    version: '0.3.0',
+    version: '0.3.1',
     protocolVersion: 1
   });
   assert.match(socket.sent[0].operationId, /^handshake-/);
@@ -125,7 +125,7 @@ async function main() {
 
   const compatibleRuntime = {
     product: 'agent-wiki',
-    productVersion: '0.3.0',
+    productVersion: '0.3.1',
     protocolVersion: 1,
     sourceRevision: 'abcdef123456',
     buildId: 'src-1234567890abcdef',
@@ -137,12 +137,16 @@ async function main() {
     compatibility: {
       state: 'compatible',
       canOperate: true,
-      clientVersion: '0.3.0',
+      clientVersion: '0.3.1',
       clientProtocolVersion: 1
     }
   })})`, context);
   assert.equal(stored.runtimeCompatibility.canOperate, true);
-  assert.equal(stored.agentRuntime.productVersion, '0.3.0');
+  assert.equal(stored.agentRuntime.productVersion, '0.3.1');
+  const automaticVaultScan = socket.sent.find(message => message.type === 'vault_scan');
+  assert.ok(automaticVaultScan, 'compatible handshake must trigger one automatic vault scan');
+  assert.equal(automaticVaultScan.data.source, 'extension_handshake');
+  assert.match(automaticVaultScan.operationId, /^vault_scan-/);
 
   const candidate = {
     url: 'https://www.douyin.com/video/7390000000000000000',

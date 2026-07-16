@@ -430,7 +430,7 @@ class GitHubProtocolTests(unittest.TestCase):
                 "type": "handshake",
                 "client": "agent-wiki-extension",
                 "product": "agent-wiki",
-                "version": "0.3.0",
+                "version": "0.3.1",
                 "protocolVersion": 1,
             },
             {"type": "status_request"},
@@ -464,7 +464,7 @@ class GitHubProtocolTests(unittest.TestCase):
             self.assertIn("fps_min = 2.0", updated)
             self.assertIn('video_fps_mode = "fixed_3"', updated)
 
-    def test_explicit_vault_status_never_falls_back_to_discovery(self) -> None:
+    def test_path_only_config_is_never_reported_as_connected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             vault = root / "empty-vault"
@@ -483,11 +483,12 @@ class GitHubProtocolTests(unittest.TestCase):
             ):
                 status = server.vault_status()
 
-            self.assertTrue(status["ok"])
-            self.assertEqual(status["path"], str(vault.resolve()))
-            self.assertEqual(status["reasons"], ["explicit_config"])
+            self.assertFalse(status["ok"])
+            self.assertEqual(status["state"], "selection_required")
+            self.assertEqual(status["path"], "")
+            self.assertEqual(status["reasons"], ["legacy_config_unverified"])
 
-    def test_obsidian_internal_status_and_invalid_update_never_discover(self) -> None:
+    def test_obsidian_internal_status_and_config_update_never_adopt_incoming_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             internal = root / ".ObSiDiAn" / "looks-like-vault"
@@ -504,11 +505,12 @@ class GitHubProtocolTests(unittest.TestCase):
                 side_effect=AssertionError("invalid explicit path must not auto-discover"),
             ):
                 status = server.vault_status()
-                with self.assertRaisesRegex(ValueError, "outside .obsidian"):
-                    asyncio.run(server.handle_config_update({"vaultPath": str(root / "missing")}))
+                asyncio.run(server.handle_config_update({"vaultPath": str(root / "missing")}))
 
-            self.assertEqual(status["state"], "invalid")
+            self.assertEqual(status["state"], "selection_required")
+            self.assertEqual(status["path"], "")
             self.assertIn(str(internal), config.read_text(encoding="utf-8"))
+            self.assertNotIn(str(root / "missing"), config.read_text(encoding="utf-8"))
 
     def test_folder_picker_never_discovers_after_explicit_invalid_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
