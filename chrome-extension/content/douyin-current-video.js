@@ -1,5 +1,5 @@
 (() => {
-  const SCRIPT_VERSION = '2026-07-05-popup-ingest-v1';
+  const SCRIPT_VERSION = '2026-07-16-current-video-title-v2';
 
   if (
     window.__obsidianLibrarianDouyinCurrentVideoLoaded &&
@@ -13,6 +13,54 @@
   const MAX_PARENT_DEPTH = 10;
   const CONTEXT_TTL_MS = 15000;
   const COLLECT_CACHE_TTL_MS = 1200;
+  const TITLE_SELECTOR_GROUPS = [
+    {
+      score: 500,
+      selectors: [
+        '[data-e2e="video-desc"]',
+        '[data-e2e="feed-video-desc"]',
+        '[data-e2e="video-description"]',
+        '[data-e2e="video-title"]',
+        '[data-e2e="aweme-desc"]',
+        '[data-e2e="browse-video-desc"]'
+      ]
+    },
+    {
+      score: 400,
+      selectors: [
+        '[data-e2e*="video-desc"]',
+        '[data-e2e*="video-title"]',
+        '[data-e2e*="caption"]',
+        '[itemprop="description"]'
+      ]
+    },
+    {
+      score: 300,
+      selectors: [
+        '[class*="video-desc"]',
+        '[class*="video-title"]',
+        '[class*="video-caption"]',
+        '[class*="aweme-desc"]'
+      ]
+    }
+  ];
+  const TITLE_EXCLUDED_CONTAINER_SELECTOR = [
+    'button',
+    'input',
+    'textarea',
+    'select',
+    'svg',
+    'canvas',
+    '[role="button"]',
+    '[data-e2e*="author"]',
+    '[data-e2e*="nickname"]',
+    '[data-e2e*="user-info"]',
+    '[data-e2e*="control"]',
+    '[class*="author"]',
+    '[class*="nickname"]',
+    '[class*="user-info"]',
+    '[class*="player-control"]'
+  ].join(', ');
   let lastContextCandidate = null;
   let currentCandidateCache = null;
 
@@ -140,20 +188,10 @@
   }
 
   function candidateFromActiveFeed() {
-    const selectors = [
-      '[data-e2e="feed-active-video"]',
-      '[data-e2e-vid]',
-      '[data-e2e="feed-video"]',
-      '[data-e2e="video-player"]'
-    ];
-    const candidates = [];
-    for (const selector of selectors) {
-      for (const element of Array.from(document.querySelectorAll(selector))) {
-        const score = 850 + Math.max(0, Math.min(visibleScore(element) / 10000, 100));
-        candidates.push(candidateFromElement(element, `active-feed:${selector}`, score));
-      }
-    }
-    return best(candidates);
+    const active = activeVideoElement();
+    if (!active) return null;
+    const visibility = Math.max(0, Math.min(visibleScore(active) / 10000, 100));
+    return candidateFromElement(active, 'active-feed', 1100 + visibility);
   }
 
   function candidateFromVideos() {
@@ -201,51 +239,111 @@
     return text.length > 180 ? `${text.slice(0, 180).trim()}...` : text;
   }
 
-  function isNoiseText(value) {
-    const text = normalizeText(value);
+  function cleanTitleCandidate(value) {
+    const withoutTrailingNotice = normalizeText(value).replace(/\s+/g, ' ').replace(
+      /\s+(?:(?:作者|平台)?声明\s*[:：]?|(?:本?内容|本?作品)\s*(?:由|为)?\s*AI\s*(?:生成|制作|创作)|(?:广告|商业推广|赞助内容|购物推广)(?:声明|提示|[:：])).*$/i,
+      ''
+    );
+    return cleanMediaTitle(withoutTrailingNotice);
+  }
+
+  function isDeclarationOrNoticeText(value) {
+    const text = normalizeText(value).replace(/\s+/g, ' ');
     if (!text) return true;
+    return (
+      /^(?:作者|平台)?声明\s*[:：]?/i.test(text) ||
+      /^(?:本?内容|本?作品)\s*(?:由|为)?\s*AI\s*(?:生成|制作|创作)/i.test(text) ||
+      /^AI\s*(?:生成|制作|创作)(?:内容|作品)?$/i.test(text) ||
+      /^(?:广告|商业推广|赞助内容|购物推广)(?:声明|提示|[:：]|$)/i.test(text) ||
+      /^(?:版权|侵权|风险|安全)(?:声明|提示|提醒|[:：]|$)/i.test(text) ||
+      /^(?:仅供娱乐|请勿当真|内容仅供参考)(?:[，。！!]|$)/i.test(text)
+    );
+  }
+
+  function isNoiseText(value) {
+    const text = normalizeText(value).replace(/\s+/g, ' ');
+    if (!text) return true;
+    if (isDeclarationOrNoticeText(text)) return true;
     if (/^(倍速|智能|清屏|连播|发送|通知|私信|投稿|客户端|壁纸|充钻石|听抖音|识别画面|章节要点|下一章)$/.test(text)) return true;
-    if (/^(发一条友好的弹幕吧|点击|进入直播间|读屏标签已关闭)$/.test(text)) return true;
-    if (/^@/.test(text) || /^·/.test(text)) return true;
+    if (/^(发一条友好的弹幕吧|点击|进入直播间|读屏标签已关闭|展开|收起|更多)$/.test(text)) return true;
+    if (/^@[^\s]{1,40}$/.test(text) || /^·/.test(text)) return true;
     if (/^\d{1,2}:\d{2}(?:\s*\/\s*\d{1,2}:\d{2})?$/.test(text)) return true;
     if (/^[\d.]+万?$/.test(text)) return true;
     if (/^\d+(?:\.\d+)?x$/i.test(text)) return true;
     if (/^相关搜索/.test(text)) return true;
-    if (/^[#＃][\s\S]{1,30}$/.test(text)) return true;
+    if (/^(?:\d{4}[-/.年])?\d{1,2}[-/.月]\d{1,2}日?$/.test(text)) return true;
+    if (/^(?:今天|昨天|前天)?\s*\d{1,2}:\d{2}$/.test(text)) return true;
+    if (/^\d+\s*(?:秒|分钟|小时|天|周|个月|月|年)前$/.test(text)) return true;
+    if (/^(?:点赞|评论|收藏|分享|转发)\s*[\d.]*万?$/.test(text)) return true;
+    if (/的抖音$/.test(text)) return true;
+    if (/^(?:抖音[-—\s]*)?记录美好生活$/.test(text)) return true;
     return false;
   }
 
   function isInsideIgnoredNode(element) {
     if (!isElement(element)) return true;
-    return Boolean(element.closest?.('button, input, textarea, select, svg, canvas, [role="button"]'));
+    return Boolean(element.closest?.(TITLE_EXCLUDED_CONTAINER_SELECTOR));
+  }
+
+  function titleTextFromElement(element) {
+    if (!isElement(element)) return '';
+    const segments = [];
+    const visit = (node, isRoot = false) => {
+      if (!node || segments.length >= 80) return;
+      if (node.nodeType === 3) {
+        for (const line of String(node.textContent || '').split(/[\r\n]+/)) {
+          const text = cleanTitleCandidate(line);
+          if (text && !isNoiseText(text)) segments.push(text);
+        }
+        return;
+      }
+      if (!isElement(node)) return;
+      if (!isRoot && node.matches?.(TITLE_EXCLUDED_CONTAINER_SELECTOR)) return;
+      for (const child of Array.from(node.childNodes || [])) visit(child);
+    };
+    visit(element, true);
+    return cleanMediaTitle(segments.join(' '));
+  }
+
+  function titleCandidateScore(text, baseScore) {
+    let score = baseScore + Math.min(text.length, 90);
+    if (text.length >= 4 && text.length <= 120) score += 50;
+    if (/[#＃]/.test(text)) score += 12;
+    if (/[，。！？?!：:]/.test(text)) score += 8;
+    if (text.length > 180) score -= 20;
+    return score;
   }
 
   function extractTitleFromRoot(root) {
     if (!isElement(root)) return '';
     const candidates = [];
+    const seen = new Set();
+    const addCandidate = (value, baseScore) => {
+      const text = cleanTitleCandidate(value);
+      if (!text || text.length < 2 || isNoiseText(text) || seen.has(text)) return;
+      seen.add(text);
+      candidates.push({ text, score: titleCandidateScore(text, baseScore) });
+    };
+
+    for (const group of TITLE_SELECTOR_GROUPS) {
+      for (const selector of group.selectors) {
+        const elements = [];
+        if (root.matches?.(selector)) elements.push(root);
+        elements.push(...Array.from(root.querySelectorAll?.(selector) || []));
+        for (const element of elements.slice(0, 20)) {
+          if (!isVisibleElement(element, 4, 4)) continue;
+          addCandidate(titleTextFromElement(element), group.score);
+        }
+      }
+    }
+
     const elements = [root, ...Array.from(root.querySelectorAll?.('*') || []).slice(0, 320)];
     for (const parent of elements) {
       if (isInsideIgnoredNode(parent) || !isVisibleElement(parent, 12, 8)) continue;
       for (const node of Array.from(parent.childNodes || [])) {
         if (node.nodeType !== 3) continue;
         const text = cleanMediaTitle(node.textContent);
-        if (
-          text &&
-          text.length >= 4 &&
-          text.length <= 260 &&
-          !isNoiseText(text)
-        ) {
-          let score = Math.min(text.length, 80);
-          if (text.length >= 8 && text.length <= 80) score += 60;
-          if (/[，。！？?!：:]/.test(text)) score += 16;
-          if (/[#＃]/.test(text)) score -= 10;
-          if (text.length > 100) score -= 80;
-          if (text.length > 140) score -= 40;
-          if ((text.match(/[。！？?!]/g) || []).length >= 2) score -= 60;
-          if (/^第\d+章/.test(text)) score -= 30;
-          if (/^原视频|作者声明|汽水音乐/.test(text)) score -= 30;
-          candidates.push({ text, score });
-        }
+        if (text.length >= 4 && text.length <= 260) addCandidate(text, 100);
       }
     }
     return candidates.sort((a, b) => b.score - a.score)[0]?.text || '';
@@ -256,11 +354,18 @@
   }
 
   function fallbackPageTitle() {
-    return cleanMediaTitle(
-      metaContent('meta[property="og:title"]') ||
-      metaContent('meta[name="twitter:title"]') ||
+    const candidates = [
+      metaContent('meta[property="og:title"]'),
+      metaContent('meta[name="twitter:title"]'),
+      metaContent('meta[property="og:description"]'),
+      metaContent('meta[name="twitter:description"]'),
       document.title
-    );
+    ];
+    for (const candidate of candidates) {
+      const title = cleanTitleCandidate(candidate);
+      if (title && !isNoiseText(title)) return title;
+    }
+    return '';
   }
 
   function extractCoverFromRoot(root, active) {
@@ -330,9 +435,11 @@
 
     let result;
     if (candidate) {
+      const metadata = collectCurrentMetadata();
       result = {
         ...candidate,
-        ...collectCurrentMetadata(),
+        ...metadata,
+        title: metadata.title || (candidate.type === 'note' ? '当前抖音图文' : '当前抖音视频'),
         collectedAt: new Date().toISOString()
       };
     } else {
@@ -349,13 +456,33 @@
   }
 
   function activeVideoElement() {
-    const activeSelectors = [
+    const explicitActiveSelectors = [
       '[data-e2e="feed-active-video"]',
+      '[aria-current="true"][data-e2e-vid]',
+      '[data-active="true"][data-e2e-vid]'
+    ];
+    const explicitlyActive = explicitActiveSelectors
+      .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+      .map((element) => ({ element, score: visibleScore(element) }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)[0]?.element;
+    if (explicitlyActive) return explicitlyActive;
+
+    const playingVideo = Array.from(document.querySelectorAll('video'))
+      .map((video) => ({
+        video,
+        score: visibleScore(video) + (!video.paused && !video.ended && video.readyState >= 2 ? 1000000 : 0)
+      }))
+      .filter((item) => item.score > 1000000)
+      .sort((a, b) => b.score - a.score)[0]?.video;
+    if (playingVideo) return playingVideo;
+
+    const visibleSelectors = [
       '[data-e2e-vid]',
       '[data-e2e="feed-video"]',
       '[data-e2e="video-player"]'
     ];
-    const activeElements = activeSelectors
+    const activeElements = visibleSelectors
       .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
       .map((element) => ({ element, score: visibleScore(element) }))
       .filter((item) => item.score > 0)
@@ -385,6 +512,9 @@
       element.closest?.('[data-e2e="feed-active-video"]') ||
       element.closest?.('[data-e2e="feed-video"]') ||
       element.closest?.('[data-e2e="video-player"]') ||
+      element.closest?.('[data-e2e-vid]') ||
+      element.closest?.('[data-aweme-id]') ||
+      element.closest?.('[data-item-id]') ||
       element.closest?.('.xgplayer') ||
       element.closest?.('[class*="xgplayer"]')
     );
