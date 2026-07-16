@@ -282,9 +282,9 @@ class WebSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
         initial_status = await self.receive_json()
 
         self.assertEqual(ready["type"], "agent_ready")
-        self.assertEqual(ready["version"], "0.2.1")
+        self.assertEqual(ready["version"], "0.3.0")
         self.assertEqual(ready["runtime"]["product"], "agent-wiki")
-        self.assertEqual(ready["runtime"]["productVersion"], "0.2.1")
+        self.assertEqual(ready["runtime"]["productVersion"], "0.3.0")
         self.assertEqual(ready["runtime"]["protocolVersion"], 1)
         self.assertTrue(
             {"config_sync", "extension_task_ingest", "task_status"}
@@ -313,7 +313,7 @@ class WebSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "type": "handshake",
             "client": "agent-wiki-background",
             "product": "agent-wiki",
-            "version": "0.2.1",
+            "version": "0.3.0",
             "protocolVersion": 1,
         }))
         handshake_ack = await self.receive_json()
