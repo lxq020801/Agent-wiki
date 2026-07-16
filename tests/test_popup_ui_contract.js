@@ -20,8 +20,13 @@ const settingsDetailIds = [
 ];
 
 assert.match(html, /class="status-strip"[\s\S]*id="status-agent"[\s\S]*id="status-api"[\s\S]*id="status-cookie"[\s\S]*id="status-vault"/);
+assert.match(html, /<h1>Agent-wiki 控制台<\/h1>/);
+assert.doesNotMatch(html, new RegExp(['知识库', '控制台'].join('')));
+assert.equal((html.match(/<h1\b/g) || []).length, 1, 'all popup views must share one brand heading');
 for (const id of ['status-agent', 'status-api', 'status-cookie', 'status-vault']) {
+  assert.match(html, new RegExp(`<span class="status-indicator" id="${id}"`), `${id} must use display-only markup`);
   assert.doesNotMatch(html, new RegExp(`<button[^>]+id="${id}"`), `${id} must be display-only`);
+  assert.doesNotMatch(html, new RegExp(`id="${id}"[^>]+(?:tabindex|role="button")`), `${id} must not be interactive`);
 }
 for (const [id, label] of Object.entries({
   agent: 'Agent',
@@ -63,20 +68,44 @@ assert.match(html, />切换知识库</);
 assert.match(html, />迁移现有知识库</);
 assert.doesNotMatch(html, /Git 仓库/);
 
+assert.match(css, /--popup-width:\s*390px/);
 assert.match(css, /--popup-height:\s*600px/);
 assert.match(css, /:root\s*\{[\s\S]*?color-scheme:\s*dark;[\s\S]*?--bg:\s*#15171c/);
 assert.match(css, /@media\s*\(prefers-color-scheme:\s*light\)\s*\{[\s\S]*?color-scheme:\s*light;[\s\S]*?--bg:\s*#f5f7f8/);
+assert.match(css, /:root\s*\{[\s\S]*?--github-mark-bg:\s*#0d1117;[\s\S]*?--github-mark-text:\s*#f0f6fc;[\s\S]*?--github-mark-border:\s*#30363d/);
+assert.match(css, /@media\s*\(prefers-color-scheme:\s*light\)\s*\{[\s\S]*?--github-mark-bg:\s*#ffffff;[\s\S]*?--github-mark-text:\s*#24292f;[\s\S]*?--github-mark-border:\s*#d0d7de/);
+assert.match(css, /:root\[data-theme="dark"\]\s*\{[\s\S]*?--github-mark-bg:\s*#0d1117;[\s\S]*?--github-mark-text:\s*#f0f6fc/);
+assert.match(css, /:root\[data-theme="light"\]\s*\{[\s\S]*?--github-mark-bg:\s*#ffffff;[\s\S]*?--github-mark-text:\s*#24292f/);
+assert.match(css, /\.github-feature-mark\s*\{[\s\S]*?border:\s*1px solid var\(--github-mark-border\);[\s\S]*?background:\s*var\(--github-mark-bg\);[\s\S]*?color:\s*var\(--github-mark-text\)/);
+assert.match(css, /\.github-feature-mark svg\s*\{[\s\S]*?stroke:\s*currentColor/);
+assert.match(css, /\.github-feature-entry:hover,[\s\S]*?\.github-feature-entry:focus-visible\s*\{[\s\S]*?background:\s*var\(--panel-hover\)/);
+assert.match(css, /\.github-feature-entry:hover \.github-feature-mark,[\s\S]*?\.github-feature-entry:focus-visible \.github-feature-mark\s*\{[\s\S]*?background:\s*var\(--github-mark-bg\);[\s\S]*?color:\s*var\(--github-mark-text\)/);
 assert.match(css, /\.topbar\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*34px minmax\(0, 1fr\) 34px/);
 assert.match(css, /\.topbar-copy\s*\{[^}]*display:\s*contents/);
 assert.match(css, /\.topbar-title-row\s*\{[\s\S]*?grid-column:\s*2;[\s\S]*?justify-content:\s*center/);
-assert.match(css, /\.status-strip\s*\{[\s\S]*?grid-template-columns:\s*repeat\(4, minmax\(0, 1fr\)\)/);
-assert.match(css, /\.status-strip\s*\{[\s\S]*?grid-column:\s*1 \/ -1;[\s\S]*?width:\s*100%/);
+const statusStripRule = css.match(/\.status-strip\s*\{([^}]*)\}/)?.[1] || '';
+assert.match(statusStripRule, /display:\s*flex/);
+assert.match(statusStripRule, /justify-content:\s*space-between/);
+assert.match(statusStripRule, /gap:\s*6px/);
+assert.match(statusStripRule, /flex-wrap:\s*nowrap/);
+assert.match(statusStripRule, /grid-column:\s*1 \/ -1/);
+assert.match(statusStripRule, /width:\s*100%/);
+assert.match(statusStripRule, /max-width:\s*100%/);
+assert.doesNotMatch(statusStripRule, /grid-template-columns/);
 assert.match(css, /\.topbar > \.icon-button\s*\{[\s\S]*?grid-column:\s*3;[\s\S]*?grid-row:\s*1/);
 assert.match(css, /body\[data-view="settings-index-view"\] #open-settings,[\s\S]*?body\[data-view="settings-detail-view"\] #open-settings,[\s\S]*?body\[data-view="github-view"\] #open-settings\s*\{[\s\S]*?visibility:\s*hidden;[\s\S]*?pointer-events:\s*none/);
-assert.match(css, /\.status-indicator\s*\{[\s\S]*?grid-template-columns:\s*auto 6px minmax\(0, 1fr\)/);
+const statusIndicatorRule = css.match(/\.status-indicator\s*\{([^}]*)\}/)?.[1] || '';
+assert.match(statusIndicatorRule, /display:\s*inline-flex/);
+assert.match(statusIndicatorRule, /flex:\s*0 1 auto/);
+assert.match(statusIndicatorRule, /min-width:\s*0/);
+assert.match(statusIndicatorRule, /max-width:\s*100%/);
 const compactStatusRule = css.match(/\.status-indicator b,\s*\.status-indicator em\s*\{([^}]*)\}/)?.[1] || '';
 assert.doesNotMatch(compactStatusRule, /text-overflow|white-space:\s*nowrap|overflow:\s*hidden/);
-assert.match(css, /\.status-indicator em\s*\{[^}]*overflow-wrap:\s*anywhere/);
+const statusTextRule = css.match(/\.status-indicator b\s*\{[^}]*\}\s*\.status-indicator em\s*\{([^}]*)\}/)?.[1] || '';
+assert.match(statusTextRule, /flex:\s*0 1 auto/);
+assert.match(statusTextRule, /overflow-wrap:\s*anywhere/);
+assert.match(statusTextRule, /word-break:\s*break-word/);
+assert.doesNotMatch(statusTextRule, /text-overflow|white-space:\s*nowrap|overflow:\s*hidden/);
 assert.match(css, /body\s*\{[\s\S]*?border:\s*0;[\s\S]*?border-radius:\s*0;/);
 assert.match(css, /\.view\s*\{[\s\S]*?overflow-y:\s*auto/);
 assert.match(css, /\.task-head\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto/);
@@ -90,6 +119,9 @@ assert.doesNotMatch(derivedTitleRule, /overflow:\s*hidden|text-overflow:\s*ellip
 assert.match(css, /\.derived-actions\s*\{[^}]*flex-wrap:\s*wrap/);
 assert.match(visualMock, /mock-account-with-an-intentionally-very-long-login-name/);
 assert.match(visualMock, /超长派生候选名称也必须稳定换行且不挤压确认与忽略按钮/);
+assert.match(visualMock, /scenario === 'header-long-home' \|\| scenario === 'header-long-settings'/);
+assert.match(visualMock, /等待浏览器同步较长状态/);
+assert.match(visualMock, /正在识别很长的知识库状态/);
 assert.match(visualMock, /https:\/\/mock\.invalid\//);
 assert.doesNotMatch(visualMock, /fetch\(|WebSocket|chrome\.(?:runtime|storage|tabs)|github\.com|douyin\.com/);
 
@@ -115,6 +147,7 @@ assert.match(js, /status\.activeVault\?\.vaultPath/);
 assert.match(js, /state === 'ready' && action !== 'scan'/);
 assert.match(js, /status\.ok === false \|\| \['failed', 'error', 'rejected'\]/);
 assert.match(js, /function setView\(viewId\) \{\s*releaseFocusBeforeViewChange\(viewId\);/);
+assert.match(js, /DOMContentLoaded[\s\S]*?initColorScheme\(\)/);
 assert.match(js, /back-settings-index'\)\.addEventListener\('click', closeSettingsDetailToIndex\)/);
 assert.doesNotMatch(js, /system-summary|系统就绪/);
 

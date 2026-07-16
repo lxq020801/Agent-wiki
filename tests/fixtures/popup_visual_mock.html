@@ -30,6 +30,17 @@
 
     frame.addEventListener('load', () => {
       const popup = frame.contentWindow;
+      if (scenario === 'header-long-home' || scenario === 'header-long-settings') {
+        if (scenario === 'header-long-settings') {
+          popup.openSettingsIndex({ persist: false, focus: false });
+        }
+        popup.document.getElementById('agent-status-text').textContent = '未连接';
+        popup.document.getElementById('api-status-text').textContent = '待检查';
+        popup.document.getElementById('cookie-status-text').textContent = '等待浏览器同步较长状态';
+        popup.document.getElementById('vault-status-text').textContent = '正在识别很长的知识库状态';
+        return;
+      }
+
       if (scenario === 'github') {
         popup.openGithubPage({ persist: false, focus: false });
         popup.applyGithubStatus({

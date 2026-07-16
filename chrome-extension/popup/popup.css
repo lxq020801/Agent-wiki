@@ -18,8 +18,9 @@
   --button-surface: #1a1f27;
   --feature-surface: #181d24;
   --feature-border: rgba(255, 255, 255, 0.14);
-  --github-mark-bg: #f0f3f6;
-  --github-mark-text: #11151b;
+  --github-mark-bg: #0d1117;
+  --github-mark-text: #f0f6fc;
+  --github-mark-border: #30363d;
   --soft-border: rgba(255, 255, 255, 0.08);
   --faint-border: rgba(255, 255, 255, 0.06);
   --hairline-border: rgba(255, 255, 255, 0.05);
@@ -58,8 +59,9 @@
     --button-surface: #ffffff;
     --feature-surface: #ffffff;
     --feature-border: rgba(23, 26, 31, 0.13);
-    --github-mark-bg: #171a1f;
-    --github-mark-text: #ffffff;
+    --github-mark-bg: #ffffff;
+    --github-mark-text: #24292f;
+    --github-mark-border: #d0d7de;
     --soft-border: rgba(23, 26, 31, 0.10);
     --faint-border: rgba(23, 26, 31, 0.08);
     --hairline-border: rgba(23, 26, 31, 0.06);
@@ -73,6 +75,18 @@
     --backdrop: rgba(23, 26, 31, 0.48);
     --modal-shadow: rgba(23, 26, 31, 0.18);
   }
+}
+
+:root[data-theme="dark"] {
+  --github-mark-bg: #0d1117;
+  --github-mark-text: #f0f6fc;
+  --github-mark-border: #30363d;
+}
+
+:root[data-theme="light"] {
+  --github-mark-bg: #ffffff;
+  --github-mark-text: #24292f;
+  --github-mark-border: #d0d7de;
 }
 
 * {
@@ -146,20 +160,24 @@ button {
 }
 
 .status-strip {
-  display: grid;
+  display: flex;
   grid-column: 1 / -1;
   grid-row: 2;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: flex-start;
+  justify-content: space-between;
   width: 100%;
+  max-width: 100%;
   min-width: 0;
   gap: 6px;
+  flex-wrap: nowrap;
 }
 
 .status-indicator {
-  display: grid;
-  grid-template-columns: auto 6px minmax(0, 1fr);
+  display: inline-flex;
+  flex: 0 1 auto;
   align-items: center;
   min-width: 0;
+  max-width: 100%;
   gap: 3px;
 }
 
@@ -176,15 +194,18 @@ button {
 }
 
 .status-indicator b {
+  flex: 0 0 auto;
   color: var(--text-secondary);
   font-weight: 650;
 }
 
 .status-indicator em {
+  flex: 0 1 auto;
   color: var(--text);
   font-style: normal;
   font-weight: 600;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .status-indicator em.online {
@@ -324,12 +345,20 @@ body[data-view="github-view"] #open-settings {
   box-shadow: 0 0 0 3px var(--focus);
 }
 
+.github-feature-entry:hover .github-feature-mark,
+.github-feature-entry:focus-visible .github-feature-mark {
+  border-color: var(--github-mark-border);
+  background: var(--github-mark-bg);
+  color: var(--github-mark-text);
+}
+
 .github-feature-mark {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 34px;
   height: 34px;
+  border: 1px solid var(--github-mark-border);
   border-radius: 50%;
   background: var(--github-mark-bg);
   color: var(--github-mark-text);
