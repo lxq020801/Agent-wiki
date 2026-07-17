@@ -9,7 +9,7 @@
 - 格式：JSON text message
 - Origin：允许 Chrome 扩展和本地无 Origin 测试客户端；拒绝普通网页 Origin
 - 敏感信息：服务端状态响应不得返回 API Key、Cookie、Bearer token
-- 当前产品版本：`0.3.1`
+- 当前产品版本：`0.4.0`
 - 当前协议版本：`1`
 
 连接建立后可以先读取状态，但配置、Cookie、模型检查、入库和派生操作必须通过版本握手。新服务会拒绝旧扩展的写操作；新扩展连接缺少完整运行身份的旧服务时，只保留状态诊断并暂停同步与入库。
@@ -43,7 +43,7 @@
   "type": "handshake",
   "client": "agent-wiki-extension",
   "product": "agent-wiki",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "protocolVersion": 1
 }
 ```
@@ -271,11 +271,11 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 ```json
 {
   "type": "agent_ready",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "protocolVersion": 1,
   "runtime": {
     "product": "agent-wiki",
-    "productVersion": "0.3.1",
+    "productVersion": "0.4.0",
     "protocolVersion": 1,
     "sourceRevision": "3c7ea9e0158a",
     "buildId": "src-0123456789abcdef",
@@ -319,7 +319,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
   "type": "handshake_ack",
   "runtime": {
     "product": "agent-wiki",
-    "productVersion": "0.3.1",
+    "productVersion": "0.4.0",
     "protocolVersion": 1,
     "sourceRevision": "3c7ea9e0158a",
     "buildId": "src-0123456789abcdef",
@@ -329,7 +329,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
     "state": "compatible",
     "canOperate": true,
     "message": "扩展、服务与协议版本一致。",
-    "clientVersion": "0.3.1",
+    "clientVersion": "0.4.0",
     "clientProtocolVersion": 1
   }
 }
@@ -345,8 +345,8 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 {
   "type": "protocol_rejected",
   "reason": "version_mismatch",
-  "message": "扩展 v0.0.9 与服务 v0.3.1 不一致。",
-  "runtime": { "product": "agent-wiki", "productVersion": "0.3.1", "protocolVersion": 1 }
+  "message": "扩展 v0.0.9 与服务 v0.4.0 不一致。",
+  "runtime": { "product": "agent-wiki", "productVersion": "0.4.0", "protocolVersion": 1 }
 }
 ```
 
@@ -360,7 +360,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
   "status": {
     "runtime": {
       "product": "agent-wiki",
-      "productVersion": "0.3.1",
+      "productVersion": "0.4.0",
       "protocolVersion": 1,
       "sourceRevision": "3c7ea9e0158a",
       "buildId": "src-0123456789abcdef",

@@ -26,7 +26,7 @@ for (const step of ['agent', 'api', 'vault', 'cookie', 'github']) {
   assert.match(html, new RegExp(`data-onboarding-action="${step}"`));
 }
 assert.match(html, /GitHub <em>可选<\/em>/);
-assert.match(html, /python3\.11 server\/launcher\.py start/);
+assert.match(html, /\.\/agent-wiki start/);
 assert.doesNotMatch(html + js, /\/Users\/|\.codex\/worktrees|obsidian-librarian/);
 assert.match(css, /\.onboarding-steps li,[\s\S]*?grid-template-columns:\s*auto minmax\(0, 1fr\) auto/);
 assert.match(css, /\.onboarding-step-copy small,[\s\S]*?overflow-wrap:\s*anywhere/);
@@ -60,7 +60,7 @@ async function main() {
   const context = vm.createContext({
     AgentWikiRuntime: {
       PROTOCOL_VERSION: 1,
-      extensionVersion: () => '0.3.1',
+      extensionVersion: () => '0.4.0',
       canSendMessage: () => true,
       buildHandshake: () => ({ type: 'handshake' }),
       evaluateRuntimeCompatibility: () => ({
@@ -69,7 +69,7 @@ async function main() {
         state: 'compatible',
         message: '版本一致',
         runtime: {
-          productVersion: '0.3.1',
+          productVersion: '0.4.0',
           protocolVersion: 1,
           sourceRevision: 'abcdef123456'
         }

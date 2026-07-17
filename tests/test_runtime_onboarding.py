@@ -219,6 +219,41 @@ class AutostartTests(unittest.TestCase):
 
 
 class UnifiedCliTests(unittest.TestCase):
+    def test_public_runtime_docs_use_root_cli_and_cover_lifecycle(self) -> None:
+        paths = (
+            ROOT / "README.md",
+            ROOT / "SKILL.md",
+            ROOT / "docs" / "runtime-operations.md",
+            ROOT / "docs" / "technical-overview.md",
+            ROOT / "docs" / "github-integration.md",
+            ROOT / "chrome-extension" / "popup" / "popup.html",
+            ROOT / "chrome-extension" / "popup" / "popup.js",
+        )
+        text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+        for internal_command in (
+            "python3 install/bootstrap.py",
+            "python3.11 install/bootstrap.py",
+            "python3 scripts/ingest_url.py",
+            "python3.11 scripts/ingest_url.py",
+            "python3 server/launcher.py",
+            "python3.11 server/launcher.py",
+        ):
+            self.assertNotIn(internal_command, text)
+
+        for command in (
+            "./agent-wiki install",
+            "./agent-wiki start",
+            "./agent-wiki status",
+            "./agent-wiki doctor",
+            "./agent-wiki stop",
+            "./agent-wiki restart",
+            "./agent-wiki autostart enable",
+            "./agent-wiki autostart disable",
+            "./agent-wiki autostart status",
+            "./agent-wiki uninstall",
+        ):
+            self.assertIn(command, text)
+
     def test_root_cli_help_uses_public_brand_for_every_command(self) -> None:
         internal_script_names = (
             "runtime_cli.py",
