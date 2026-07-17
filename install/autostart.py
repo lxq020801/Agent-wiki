@@ -511,8 +511,9 @@ def main(
     project_root: Optional[Path] = None,
     runtime_root: Optional[Path] = None,
     home: Optional[Path] = None,
+    prog: Optional[str] = None,
 ) -> int:
-    parser = argparse.ArgumentParser(description="管理 Agent-wiki 的 macOS 开机启动")
+    parser = argparse.ArgumentParser(prog=prog, description="管理 Agent-wiki 的 macOS 开机启动")
     parser.add_argument("command", choices=("enable", "disable", "status"))
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     args = parser.parse_args(argv)

@@ -85,15 +85,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     if command == "install":
         from install.bootstrap import main as bootstrap_main
 
-        return bootstrap_main(rest)
+        return bootstrap_main(rest, prog="agent-wiki install")
     if command in {"start", "stop", "restart", "status", "doctor"}:
         from server.runtime_manager import main as runtime_main
 
-        return runtime_main([command, *rest], project_root=PROJECT_ROOT, runtime_root=_runtime_root())
+        return runtime_main(
+            [command, *rest],
+            project_root=PROJECT_ROOT,
+            runtime_root=_runtime_root(),
+            prog="agent-wiki",
+        )
     if command == "autostart":
         from install.autostart import main as autostart_main
 
-        return autostart_main(rest, project_root=PROJECT_ROOT, runtime_root=_runtime_root())
+        return autostart_main(
+            rest,
+            project_root=PROJECT_ROOT,
+            runtime_root=_runtime_root(),
+            prog="agent-wiki autostart",
+        )
     if command == "uninstall":
         return uninstall(rest)
     print(f"未知命令：{command}", file=sys.stderr)
