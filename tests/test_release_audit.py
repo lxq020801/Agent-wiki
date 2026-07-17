@@ -108,6 +108,30 @@ class ReleaseAuditTests(unittest.TestCase):
         self.assertEqual(nearest, "v0.1.0")
         self.assertEqual(exact, ())
 
+    def test_public_version_surfaces_must_match_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            init_version_repo(root, "0.4.0")
+            (root / "README.md").write_text("当前版本为 **v9.9.9**\n", encoding="utf-8")
+            (root / "server").mkdir()
+            (root / "server" / "github_service.py").write_text(
+                'USER_AGENT = "Agent-wiki/9.9.9"\n',
+                encoding="utf-8",
+            )
+            (root / "docs").mkdir()
+            (root / "docs" / "websocket-protocol.md").write_text(
+                "当前产品版本：`9.9.9`\n",
+                encoding="utf-8",
+            )
+
+            findings, _nearest, _exact = release_audit.check_license_and_version(root)
+
+        self.assertEqual(
+            {item.path for item in findings},
+            {"README.md", "server/github_service.py", "docs/websocket-protocol.md"},
+        )
+        self.assertTrue(all(item.check == "version" for item in findings))
+
     def test_exact_head_release_tag_must_match_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

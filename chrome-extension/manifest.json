@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Agent-wiki",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "AI 知识库控制塔 — 配置、状态、Cookie 回传",
   "permissions": [
     "storage",

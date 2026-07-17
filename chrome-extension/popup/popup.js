@@ -24,7 +24,7 @@ const DEFAULT_TASK_CONCURRENCY = 2;
 const DEFAULT_CHUNK_CONCURRENCY = 2;
 const POPUP_ROUTE_STORAGE_KEY = 'popupRoute';
 const FIRST_RUN_COLLAPSED_STORAGE_KEY = 'firstRunGuideCollapsed';
-const AGENT_START_COMMAND = 'python3.11 server/launcher.py start';
+const AGENT_START_COMMAND = './agent-wiki start';
 const LEGACY_GITHUB_ROUTE = 'github';
 const POPUP_VIEWS = Object.freeze({
   HOME: 'home-view',
