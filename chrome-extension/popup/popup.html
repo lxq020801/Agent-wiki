@@ -50,6 +50,51 @@
       <span class="entry-chevron" aria-hidden="true"></span>
     </button>
 
+    <section class="onboarding-panel" id="first-run-guide" aria-labelledby="first-run-title">
+      <div class="onboarding-head">
+        <div>
+          <h2 id="first-run-title">首次配置</h2>
+          <p id="first-run-summary">正在检查下一步</p>
+        </div>
+        <button class="secondary small onboarding-toggle" id="toggle-first-run" type="button" aria-expanded="true">收起</button>
+      </div>
+      <div class="onboarding-reminder" id="first-run-reminder" hidden>
+        <span class="status-dot inline-dot warning" id="first-run-reminder-dot"></span>
+        <span>
+          <b id="first-run-reminder-title">继续首次配置</b>
+          <small id="first-run-reminder-copy">正在检查下一步</small>
+        </span>
+        <button class="secondary small" id="first-run-next-action" type="button">处理</button>
+      </div>
+      <ol class="onboarding-steps" id="first-run-steps">
+        <li data-onboarding-step="agent">
+          <span class="onboarding-step-index">1</span>
+          <span class="onboarding-step-copy"><b>本地 Agent 服务</b><small id="onboarding-agent-state">未连接</small></span>
+          <button class="secondary small onboarding-step-action" type="button" data-onboarding-action="agent">处理</button>
+        </li>
+        <li data-onboarding-step="api">
+          <span class="onboarding-step-index">2</span>
+          <span class="onboarding-step-copy"><b>Ark API</b><small id="onboarding-api-state">未配置</small></span>
+          <button class="secondary small onboarding-step-action" type="button" data-onboarding-action="api">配置</button>
+        </li>
+        <li data-onboarding-step="vault">
+          <span class="onboarding-step-index">3</span>
+          <span class="onboarding-step-copy"><b>知识库</b><small id="onboarding-vault-state">未连接</small></span>
+          <button class="secondary small onboarding-step-action" type="button" data-onboarding-action="vault">选择</button>
+        </li>
+        <li data-onboarding-step="cookie">
+          <span class="onboarding-step-index">4</span>
+          <span class="onboarding-step-copy"><b>抖音 Cookie</b><small id="onboarding-cookie-state">未同步</small></span>
+          <button class="secondary small onboarding-step-action" type="button" data-onboarding-action="cookie">同步</button>
+        </li>
+        <li data-onboarding-step="github">
+          <span class="onboarding-step-index">5</span>
+          <span class="onboarding-step-copy"><b>GitHub <em>可选</em></b><small id="onboarding-github-state">未登录，不影响完成</small></span>
+          <button class="secondary small onboarding-step-action" type="button" data-onboarding-action="github">查看</button>
+        </li>
+      </ol>
+    </section>
+
     <button class="github-feature-entry" id="open-github" type="button">
       <span class="github-feature-mark" aria-hidden="true">
         <svg data-lucide-icon="github" viewBox="0 0 24 24">
@@ -138,6 +183,21 @@
           <p id="agent-settings-copy">本地 Agent 未连接</p>
         </div>
         <button class="secondary small" id="refresh-status" type="button">刷新</button>
+      </div>
+      <div class="agent-recovery" id="agent-recovery">
+        <p>在 Agent-wiki 项目目录运行：</p>
+        <div class="command-row">
+          <code id="agent-start-command">python3.11 server/launcher.py start</code>
+          <button class="secondary small icon-text-button" id="copy-agent-start-command" type="button" title="复制启动命令">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>复制</span>
+          </button>
+        </div>
+        <button class="secondary full-width icon-text-button" id="retry-agent-connection" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"></path><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"></path></svg>
+          <span>重试连接</span>
+        </button>
+        <div class="hint" id="agent-recovery-hint" role="status" aria-live="polite"></div>
       </div>
       <dl class="runtime-details" aria-label="运行版本">
         <div><dt>扩展</dt><dd id="extension-version">待读取</dd></div>
