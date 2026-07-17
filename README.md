@@ -1,94 +1,158 @@
 # Agent-wiki
 
-Agent-wiki 是一个本地优先的个人知识资产系统。它把抖音视频、图文和后续派生资料整理进 Obsidian，让 AI 后续工作可以直接复用你的本地知识库。
+Agent-wiki 是一个开源、以本地 Markdown 为核心的个人 AI 知识资产系统。它把值得长期保留的外部信息整理成用户自己拥有、可以直接阅读和编辑、也能继续交给 AI 使用的来源资产。
 
-这个项目目前偏向“给会使用本地 AI / Agent 工具的人自部署使用”，不是一个开箱即用的云服务。
+当前版本为 **v0.3.1**，重点解决“把内容可靠地收进知识库”这件事：从 Chrome 扩展或本地入口提交抖音内容，或在扩展中选择导入自己的 GitHub Stars，交给本地服务下载、分析和写入，最终在 Obsidian 知识库中得到结构清楚、来源可追溯的 Markdown，而不是只留下链接、聊天记录或不可迁移的平台收藏。
 
-当前版本专注知识入库与后续知识派生。对标视频、爆款拆解、选题和创作分析不属于 Agent-wiki 的产品范围。
+Agent-wiki 适合愿意在自己的电脑上运行 Python 服务、管理模型凭据，并希望长期掌控知识文件的个人用户和 Agent 使用者。它不是云端收藏服务，也不是 Obsidian 插件；Obsidian 是当前默认的阅读与管理载体，知识资产本身仍是普通文件，可以被其他编辑器、Agent 和项目直接使用。
 
-## 能做什么
+## 当前能力
 
-- 从抖音视频或图文链接创建知识笔记。
-- 通过 `knowledge_ingest` 将抖音来源整理为可长期复用的知识资产。
-- 调用火山方舟 Ark 视频理解能力，把内容拆成结构化 Obsidian Markdown。
-- 通过 Chrome 扩展同步 Cookie、模型配置、任务状态和 Obsidian vault 路径。
-- 对高置信的 GitHub 项目线索生成派生候选，方便继续沉淀项目资料。
-- 通过 GitHub Device Flow 登录，搜索公开仓库、选择性导入 Stars，并手动确认项目资料刷新。
+### 已支持的来源与入口
 
-## 项目结构
+| 来源 | 当前入口 | 生成结果 | 使用前需要 |
+|---|---|---|---|
+| 抖音视频 | Chrome 扩展提交当前页面或分享链接；命令行提交链接 | 视频来源资产；长视频会先做全局概览，再分片精拆并汇总 | 用户自行配置 Ark API Key、同步已登录的抖音 Cookie，并安装 `ffmpeg` / `ffprobe` |
+| 抖音图文 | Chrome 扩展提交当前页面或分享链接；命令行提交链接 | 下载多图并生成图文来源资产，保留原始图像引用 | 同上；来源需要能被当前抖音解析链路正常访问 |
+| GitHub 公开仓库 | 登录后读取并选择导入自己的 Stars；抖音来源也可产生由服务内部搜索、解析的 GitHub 项目派生候选 | GitHub 项目来源资产，依据官方 API 字段与仓库 README 整理 | 用户自行配置 Ark API Key；Stars 与账号能力需要在 macOS 上完成 GitHub Device Flow 登录 |
 
-下面的 `.` 代表 Git 仓库根目录，也就是克隆后得到的 `Agent-wiki/` 文件夹，不需要再套一层项目目录。
+这些链路已经在产品代码中实现，并有静态、协议和 mock（模拟依赖）测试覆盖；抖音访问、GitHub OAuth、Stars 导入和 Ark 模型调用仍依赖用户自己的账号、网络、Cookie、配额与第三方服务状态，首次安装后需要在真实环境中自行验收。
 
-```text
-.
-├── AGENTS.md             # 开发 AI 的入口和文档权威边界
-├── chrome-extension/     # Chrome 扩展，负责配置、Cookie 和任务入口
-├── deps/douyin/          # 抖音内容解析与 Ark 分析工具链
-├── docs/                 # 当前技术说明和协议文档
-├── install/              # 本地初始化脚本
-├── PROJECT_INTENT.md     # 唯一长期产品基准
-├── rules/                # Obsidian 笔记规则
-├── scripts/              # 命令行入口
-├── server/               # 本地 WebSocket 控制服务
-├── templates/            # 知识资产模板
-├── tests/                # 静态和回归测试
-├── SCHEMA.md             # Obsidian 知识库结构约束
-└── SKILL.md              # 给 Agent 读取的项目说明
-```
+当前没有为通用网页、本地图片、本地音频或备忘录提供完整的用户入口。仓库中存在兼容字段、模板或派生执行代码，不代表这些来源已经是可直接使用的正式能力。
 
-源码、运行数据和个人知识库是三个不同位置：
+### 每个来源都形成三段式资产
+
+每次成功入库都会生成一份独立的来源 Markdown，正文固定区分三类信息：
+
+1. **简洁概括**：快速说明来源主要讲了什么。
+2. **完整内容整理**：尽量完整地保留来源表达、论证关系和必要上下文，但不追求逐字转录，也不按固定清单填充无关内容。
+3. **AI 分析**：明确标识为 AI 生成，只依据当前来源解释其意义、用途、适用条件与风险；不读取知识库中的其他资产，也不替用户完成外部事实核验。
+
+资产 frontmatter（文档头部元数据）会记录来源 URL、来源类型、平台 ID 等可获得的信息。抖音来源写入 `知识资产/知识入库/`，GitHub 项目写入 `知识资产/GitHub项目/`，并同步更新知识库根目录的 `index.md`。只有派生资产真实生成后，父子资产之间才会建立链接。
+
+### Chrome 扩展、本地服务与知识库
 
 ```text
-Agent-wiki/       # Git 仓库源码
-~/.agent-wiki/    # 本地配置、服务、扩展副本、缓存和任务状态
-<Obsidian vault>/ # 你的个人知识资产
+Chrome 扩展
+  配置 / Cookie / 知识库选择 / 任务与 GitHub 操作
+        |
+        | ws://127.0.0.1:8765
+        v
+本地 Agent-wiki 服务
+  持久任务队列 / 来源工具 / 模型调用 / 统一诊断 / 文件写入
+        |
+        v
+Obsidian 知识库文件夹
+  Markdown 来源资产 / 原始媒体 / index.md
 ```
 
-`~/.agent-wiki/` 和 Obsidian vault 都不属于本仓库，不应该提交到 GitHub。
+- **Chrome 扩展**是本地控制台，不直接下载、分析或写知识库。它提供抖音 Cookie 同步、Ark 配置、系统文件夹选择、任务状态、GitHub 登录与导入入口，并自动跟随系统深色或浅色外观。
+- **本地服务**负责执行与持久化。普通入库任务、GitHub 导入批次和诊断时间线保存在 `~/.agent-wiki/`；关闭扩展弹窗不会丢失任务，服务重启后会重新接续仍在队列中的任务与未完成批次。
+- **Obsidian 知识库**是最终资产所在位置。Agent-wiki 只处理自己的 Markdown、索引和相关媒体文件，不依赖 Obsidian 私有格式，也不会读取或修改 `.obsidian/`。
 
-## 准备条件
+任务面板可以查看进度和结果，并对符合条件的任务执行取消或重试。每次操作通过 `operationId`、`taskId` 和父子关系进入统一的脱敏诊断时间线，便于定位控制面、下载、模型、写入或 GitHub 批次中的失败。
 
-- macOS 或 Linux
+## 从安装到第一份资产
+
+### 1. 准备环境
+
+当前完整桌面流程以 **macOS** 为准：系统文件夹选择器使用 macOS 原生窗口，GitHub 凭证只保存在 macOS Keychain。Linux 可以运行部分 Python 工具和本地服务，但当前不具备等价的扩展选库与 GitHub 登录体验。
+
+需要准备：
+
 - Python 3.11+
 - Git
 - Chrome 或 Chromium 系浏览器
-- Obsidian vault
+- Obsidian（当前推荐的知识库阅读与管理工具）
+- `ffmpeg` 与 `ffprobe`
 - 火山方舟 Ark API Key
-- `ffmpeg` / `ffprobe`
+- 处理抖音内容时可用的抖音网页登录状态
 
-Node.js 不是运行依赖；贡献者只在执行扩展脚本语法检查时需要它。
+Node.js 不是产品运行依赖，只在开发扩展和执行 JavaScript 检查时使用。
 
-## 快速开始
-
-克隆仓库并进入仓库根目录：
+### 2. 初始化运行环境
 
 ```bash
 git clone https://github.com/lxq020801/Agent-wiki.git
 cd Agent-wiki
-```
-
-初始化本地运行环境：
-
-```bash
 python3.11 install/bootstrap.py
 ```
 
-隔离验收或临时运行必须显式指定 vault；该路径会在检查前写入临时配置，且无效时直接报错，不会回退到 Obsidian 自动发现：
+`bootstrap.py` 会准备 `~/.agent-wiki/`、安装隔离的抖音工具依赖，并把当前扩展复制到 `~/.agent-wiki/extension/`。源码、运行数据与个人知识库彼此独立：
 
-```bash
-AGENT_WIKI_HOME=/tmp/agent-wiki-runtime python3.11 install/bootstrap.py --vault /tmp/agent-wiki-vault --skip-install-deps --skip-websocket-check
+```text
+Agent-wiki/        # 项目源码
+~/.agent-wiki/     # 本地配置、凭据引用、缓存、任务、日志与扩展副本
+<你的知识库>/      # Markdown 知识资产
 ```
 
-启动托管的本地控制服务：
+### 3. 启动本地服务
 
 ```bash
 python3.11 server/launcher.py start
 python3.11 server/launcher.py status
 ```
 
-`start` 会先检查 Python、控制面依赖、配置中的回环地址、端口占用、旧部署和已有服务的源码位置。它不会按进程名杀进程；`stop` 只停止由 Agent-wiki 私有状态完整确认的进程。需要前台运行时使用 `python3.11 server/launcher.py foreground`，无参数调用仍兼容此前的前台行为。
+需要前台调试时使用 `python3.11 server/launcher.py foreground`；停止或重启使用 `stop` / `restart`。服务只允许回环地址，不应暴露到局域网或公网。
 
-环境诊断和缓存占用预览：
+### 4. 加载 Chrome 扩展
+
+1. 打开 `chrome://extensions/`。
+2. 开启“开发者模式”。
+3. 点击“加载已解压的扩展程序”。
+4. 选择 `~/.agent-wiki/extension/`。
+
+扩展与本地服务会校验产品版本、协议版本和部署来源；不匹配时仍可显示诊断状态，但会暂停配置同步与入库写操作。
+
+### 5. 选择知识库并完成配置
+
+在扩展中点击“选择知识库”，通过系统原生文件夹选择器直接选择目标文件夹：
+
+- 已有有效 Agent-wiki 身份的知识库会直接连接。
+- 空目录会在原地创建最小结构和稳定身份标记。
+- 非空但未标记的目录会先要求确认；确认后只补齐缺失的 `index.md`、必要目录和身份标记，不覆盖、复制、迁移或删除已有内容。
+
+随后在扩展中填入 Ark API Key、选择主分析模型并按需调整任务与长视频分片并发；处理抖音内容前，在已登录抖音的浏览器中同步 Cookie。敏感信息不要粘贴到 issue、聊天或知识库笔记中。
+
+### 6. 提交并查看结果
+
+- 在抖音页面打开扩展，提交当前内容；也可以粘贴抖音分享链接或分享文案。
+- 在 GitHub 资产页完成登录后，可读取 Stars、选择本批仓库并开始导入。每个仓库会分别返回成功、已存在或失败状态，尚未执行的批次项可以取消。
+- 在任务面板查看进度、结果、派生状态与诊断信息；完成后到知识库的 `index.md` 或对应资产目录阅读 Markdown。
+
+配置完成后，Agent 或终端也可以直接提交抖音链接：
+
+```bash
+python3.11 scripts/ingest_url.py "https://v.douyin.com/..."
+```
+
+## GitHub 资产能力
+
+Agent-wiki 内置官方 GitHub App 的公开 client ID。普通安装可直接通过 Device Flow（设备授权流程）登录，不需要自行创建 App，也不需要提供 client secret 或手工填写 token。自维护部署可以用 `AGENT_WIKI_GITHUB_CLIENT_ID` 覆盖默认 client ID。
+
+当前 GitHub 能力保持在个人资产导入所需的范围内：
+
+- 用户可见入口是分页读取自己的 Stars，再选择性批量导入；扩展当前不提供手动仓库搜索。
+- 抖音来源产生 GitHub 项目派生候选后，服务会通过 GitHub 官方 API 在内部搜索和解析目标；唯一可信匹配可以继续执行，匹配歧义时等待用户确认。
+- 使用 repository ID 和规范化的 `owner/repo` 双重去重；仓库改名后仍优先按稳定 ID 识别。
+- 依据 GitHub 官方 API 元数据与公开 README 生成同样的“简洁概括 / 完整内容整理 / AI 分析”资产。
+- 由用户点击“检查更新”，先比较 README、Release、License、归档状态、默认分支等来源信息；只有用户确认后才改写资产。
+- “资产创建后自动 Star”默认关闭；即使开启，Star 失败也不会回滚已写入的知识资产。
+
+当前不支持私有仓库入库。官方 App 只申请 `Starring: Read and write` 与 `Metadata: Read-only`；公开 README 和 Release 通过匿名 GitHub API 获取。详细权限、凭证与刷新边界见 [GitHub 联动](docs/github-integration.md)。
+
+## 隐私与安全边界
+
+Agent-wiki 是本地优先产品，但不是完全离线产品。使用前应理解这些数据流：
+
+- Ark API Key、抖音 Cookie、本地任务和缓存保存在 `~/.agent-wiki/`；GitHub OAuth token 只保存在 macOS Keychain，不进入扩展存储、普通配置、诊断文件或知识库。
+- 抖音视频、图文及分析提示会发送到用户配置的火山方舟 Ark Files / Responses API；GitHub 公开来源材料会发送给已配置的 Ark 模型生成资产。第三方平台如何处理数据由其服务条款与用户账号配置决定。
+- 本地 WebSocket 默认只监听 `127.0.0.1`，没有独立多用户认证，信任边界是当前系统用户下的本地进程与已安装扩展。不要改成 `0.0.0.0`。
+- `doctor` 只检查 Cookie 文件是否存在，不读取 Cookie 正文；只检查知识库顶层标记，不读取 `.obsidian/` 内容。正常入库同样不会读写 `.obsidian/`。
+- Agent-wiki 不会对知识库执行 `git init`、`git add` 或 `git commit`，也不会修改已有 Git 历史。版本控制与备份由用户自行管理。
+- 不要提交或分享 `~/.agent-wiki/`、私人知识库、真实 Cookie、API Key、token、日志或缓存。报告安全问题前请阅读 [安全说明](SECURITY.md)。
+
+## 运行诊断
 
 ```bash
 python3.11 server/launcher.py doctor
@@ -96,93 +160,40 @@ python3.11 server/launcher.py cache report
 python3.11 server/launcher.py cache clean --dry-run
 ```
 
-缓存命令不实现真实删除。完整说明见 [本地运行与诊断](docs/runtime-operations.md)。
+`doctor` 是只读检查。当前缓存清理命令也只支持 `--dry-run` 预览，不会真实删除文件。服务管理、进程身份校验、运行目录和诊断格式见 [本地运行与诊断](docs/runtime-operations.md)。
 
-安装 Chrome 扩展：
+## 开发与验证
 
-1. 打开 `chrome://extensions/`
-2. 打开“开发者模式”
-3. 选择“加载已解压的扩展程序”
-4. 选择 `~/.agent-wiki/extension/`
+开始修改项目前，请先阅读 [产品基准线](PROJECT_INTENT.md) 和 [开发 AI 入口](AGENTS.md)。贡献约定与提交前检查见 [贡献指南](CONTRIBUTING.md)。
 
-然后在扩展里完成：
-
-- 填入 Ark API Key
-- 同步抖音 Cookie
-- 选择或识别 Obsidian vault
-- 在抖音页面提交“知识入库”任务
-
-GitHub 联动默认使用 Agent-wiki 官方 GitHub App。用户直接在扩展里点击“登录 GitHub”即可，不需要自行创建 App、配置 token 或 client secret。
-
-自行部署的分支如需使用自己的 GitHub App，可以用环境变量覆盖公开的默认 client ID：
-
-```bash
-export AGENT_WIKI_GITHUB_CLIENT_ID="<your-github-app-client-id>"
-python3.11 server/launcher.py restart
-```
-
-官方 GitHub App 只授予 `Starring: Read and write` 与 `Metadata: Read-only`，不需要 client secret。完整配置和安全边界见 [GitHub 联动](docs/github-integration.md)。
-
-也可以用命令行提交链接：
-
-```bash
-python3 scripts/ingest_url.py "https://v.douyin.com/..."
-```
-
-## 隐私和安全
-
-- API Key、Cookie、任务状态和缓存只应该保存在 `~/.agent-wiki/`。
-- GitHub OAuth token 只保存在 macOS Keychain，不写 `~/.agent-wiki/`、扩展存储、日志或审计产物。
-- 不要把 `~/.agent-wiki/`、Obsidian 私人 vault、真实 Cookie 或真实 API Key 提交到仓库。
-- 项目里有脱敏逻辑，但开源前仍建议运行 secret scan（密钥扫描）。
-- 解析公开视频内容时，请遵守平台规则、版权要求和你所在地区的法律。
-
-## 验证
-
-常用检查：
+常用的完整静态与回归检查入口：
 
 ```bash
 python3.11 scripts/release_audit.py
-python3.11 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py server/runtime_manager.py server/service_entry.py server/launcher.py install/bootstrap.py scripts/release_audit.py
-python3.11 tests/test_runtime_manager.py
-python3.11 tests/test_p0_static.py
-python3.11 tests/test_douyin_image_post_static.py
-python3.11 tests/test_runtime_version_protocol.py
-python3.11 tests/test_ci_integration.py
-python3.11 tests/test_release_audit.py
-python3.11 tests/test_github_service.py
-python3.11 tests/test_github_protocol.py
+python3.11 -m unittest discover -s tests -p 'test_*.py'
 node tests/test_extension_runtime_version.js
 node tests/test_extension_contract.js
 node tests/test_github_extension_contract.js
+node tests/test_douyin_current_video_title.js
+node tests/test_popup_ui_contract.js
 node --check chrome-extension/background.js
 node --check chrome-extension/runtime-version.js
 node --check chrome-extension/popup/popup.js
 node --check chrome-extension/content/douyin-current-video.js
 ```
 
-准备公开发布时，再运行包含 Git 历史的只读扫描：
+关键技术文档：
 
-```bash
-python3.11 scripts/release_audit.py --history
-```
-
-## 更多文档
-
-- [产品基准线](PROJECT_INTENT.md)
-- [开发 AI 入口](AGENTS.md)
+- [当前工具运行说明](SKILL.md)
 - [技术总览](docs/technical-overview.md)
-- [本地运行与诊断](docs/runtime-operations.md)
+- [知识资产结构契约](SCHEMA.md)
 - [WebSocket 协议](docs/websocket-protocol.md)
-- [GitHub 联动](docs/github-integration.md)
 - [Ark 视频理解链路](docs/ark-video-understanding.md)
 - [抖音工具说明](deps/douyin/SKILL.md)
-- [知识库结构约束](SCHEMA.md)
-- [第三方依赖与归属](THIRD_PARTY_NOTICES.md)
 - [发布检查清单](RELEASE_CHECKLIST.md)
 
-## 许可证
+## 许可证与第三方归属
 
-本项目使用 Apache License 2.0，见 [LICENSE](LICENSE)。
+Agent-wiki 使用 [Apache License 2.0](LICENSE)。
 
-`deps/douyin/vendor/` 内嵌了 [Evil0ctal/Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API) 的部分源码快照；该部分遵循其上游 Apache-2.0 许可证。完整来源、版本和本地修改见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+`deps/douyin/vendor/` 内嵌了 [Evil0ctal/Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API) 的部分源码快照，该部分遵循上游 Apache-2.0 许可证。具体上游版本、复制范围、本地修改以及直接依赖的许可信息见 [第三方依赖与归属](THIRD_PARTY_NOTICES.md)。
