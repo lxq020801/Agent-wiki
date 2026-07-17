@@ -23,6 +23,8 @@ const DEFAULT_MODEL_PRESET = 'lite';
 const DEFAULT_TASK_CONCURRENCY = 2;
 const DEFAULT_CHUNK_CONCURRENCY = 2;
 const POPUP_ROUTE_STORAGE_KEY = 'popupRoute';
+const FIRST_RUN_COLLAPSED_STORAGE_KEY = 'firstRunGuideCollapsed';
+const AGENT_START_COMMAND = 'python3.11 server/launcher.py start';
 const LEGACY_GITHUB_ROUTE = 'github';
 const POPUP_VIEWS = Object.freeze({
   HOME: 'home-view',
@@ -101,6 +103,13 @@ let githubRefresh = null;
 let githubIsConfigured = false;
 let githubIsAuthenticated = false;
 let githubValidationRequestedForConnection = false;
+let firstRunCollapsed = false;
+const setupState = {
+  api: { configured: false, verified: false, checkState: 'unchecked' },
+  vault: { configured: false, verified: false, checkState: 'unchecked' },
+  cookie: { configured: false, pending: false, verified: false, checkState: 'unchecked' },
+  github: { configured: false, verified: false }
+};
 let vaultWorkflow = {
   stage: 'idle',
   selectionId: '',
@@ -129,6 +138,193 @@ function initColorScheme() {
 
 function hasExtensionApis() {
   return typeof chrome !== 'undefined' && !!chrome.runtime?.sendMessage && !!chrome.storage?.local;
+}
+
+function serviceCanVerify() {
+  return Boolean(isAgentConnected && runtimeCompatibility?.canOperate);
+}
+
+function onboardingStepViews() {
+  const agentReady = serviceCanVerify();
+  return [
+    {
+      id: 'agent',
+      label: '本地 Agent 服务',
+      ready: agentReady,
+      state: agentReady
+        ? '已连接并通过版本校验'
+        : runtimeCompatibility && !runtimeCompatibility.canOperate
+          ? '已连接，版本校验未通过'
+          : isAgentConnected ? '已连接，版本待校验' : '未连接，先启动本地服务',
+      action: '处理'
+    },
+    {
+      id: 'api',
+      label: 'Ark API',
+      ready: setupState.api.verified,
+      state: setupState.api.verified
+        ? '服务已验证连接'
+        : setupState.api.configured
+          ? !agentReady
+            ? '已配置，待 Agent 检查'
+            : ['configured', 'unchecked'].includes(setupState.api.checkState)
+              ? '已配置，等待测试'
+              : '已配置，检查未通过'
+          : '未配置',
+      action: '配置'
+    },
+    {
+      id: 'vault',
+      label: '知识库',
+      ready: setupState.vault.verified,
+      state: setupState.vault.verified
+        ? '服务已确认连接'
+        : setupState.vault.configured
+          ? agentReady ? '已配置，服务未确认' : '已配置，待 Agent 检查'
+          : '未连接',
+      action: '选择'
+    },
+    {
+      id: 'cookie',
+      label: '抖音 Cookie',
+      ready: setupState.cookie.verified,
+      state: setupState.cookie.verified
+        ? '服务已确认同步'
+        : setupState.cookie.pending
+          ? '已抓取，待同步'
+          : setupState.cookie.configured
+            ? !agentReady
+              ? '已同步，待 Agent 检查'
+              : setupState.cookie.checkState === 'incomplete'
+                ? '同步不完整，请重新抓取'
+                : '已同步，服务未确认'
+            : '未同步',
+      action: '同步'
+    },
+    {
+      id: 'github',
+      label: 'GitHub（可选）',
+      optional: true,
+      ready: setupState.github.verified,
+      state: setupState.github.verified
+        ? '已登录'
+        : setupState.github.configured
+          ? '待 Agent 检查，不影响完成'
+          : '未登录，不影响完成',
+      action: '查看'
+    }
+  ];
+}
+
+function renderFirstRunGuide() {
+  const guide = document.getElementById('first-run-guide');
+  if (!guide || typeof guide.querySelector !== 'function') return;
+  const steps = onboardingStepViews();
+  const required = steps.filter(step => !step.optional);
+  const next = required.find(step => !step.ready) || null;
+  const requiredComplete = !next;
+  const summary = requiredComplete
+    ? '必填项已完成，GitHub 可稍后连接'
+    : `下一步：${next.label}`;
+  document.getElementById('first-run-summary').textContent = summary;
+
+  for (const step of steps) {
+    const row = guide.querySelector(`[data-onboarding-step="${step.id}"]`);
+    const state = document.getElementById(`onboarding-${step.id}-state`);
+    const action = row?.querySelector('.onboarding-step-action');
+    row?.classList.toggle('complete', step.ready);
+    if (state) state.textContent = step.state;
+    if (action) {
+      action.textContent = step.ready ? '完成' : step.action;
+      action.disabled = step.ready;
+      action.setAttribute('aria-label', `${step.action}${step.label}`);
+    }
+  }
+
+  const list = document.getElementById('first-run-steps');
+  const reminder = document.getElementById('first-run-reminder');
+  const toggle = document.getElementById('toggle-first-run');
+  list.hidden = firstRunCollapsed;
+  reminder.hidden = !firstRunCollapsed;
+  toggle.textContent = firstRunCollapsed ? '展开' : '收起';
+  toggle.setAttribute('aria-expanded', firstRunCollapsed ? 'false' : 'true');
+  if (firstRunCollapsed) {
+    document.getElementById('first-run-reminder-dot').className =
+      `status-dot inline-dot ${requiredComplete ? 'online' : 'warning'}`;
+    document.getElementById('first-run-reminder-title').textContent =
+      requiredComplete ? '首次配置已完成' : `待完成：${next.label}`;
+    document.getElementById('first-run-reminder-copy').textContent =
+      requiredComplete ? 'GitHub 为可选项' : next.state;
+    const action = document.getElementById('first-run-next-action');
+    action.hidden = requiredComplete;
+    action.disabled = requiredComplete;
+    action.dataset.onboardingAction = next?.id || '';
+    action.textContent = next?.action || '处理';
+  }
+}
+
+async function loadFirstRunPreference() {
+  const stored = await chrome.storage.local.get([FIRST_RUN_COLLAPSED_STORAGE_KEY]);
+  firstRunCollapsed = stored[FIRST_RUN_COLLAPSED_STORAGE_KEY] === true;
+  renderFirstRunGuide();
+}
+
+async function toggleFirstRunGuide() {
+  firstRunCollapsed = !firstRunCollapsed;
+  renderFirstRunGuide();
+  await chrome.storage.local.set({ [FIRST_RUN_COLLAPSED_STORAGE_KEY]: firstRunCollapsed });
+}
+
+function runOnboardingAction(action) {
+  const target = String(action || '');
+  if (target === 'agent') openSettingsDetail('agent-settings');
+  else if (target === 'api') openSettingsDetail('api-settings');
+  else if (target === 'vault') openSettingsDetail('vault-settings');
+  else if (target === 'cookie') openSettingsDetail('cookie-settings');
+  else if (target === 'github') openGithubPage();
+}
+
+async function copyPlainText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const input = document.createElement('textarea');
+  input.value = text;
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.select();
+  const copied = document.execCommand('copy');
+  input.remove();
+  if (!copied) throw new Error('clipboard unavailable');
+}
+
+async function copyAgentStartCommand() {
+  try {
+    await copyPlainText(AGENT_START_COMMAND);
+    showHint('agent-recovery-hint', '启动命令已复制', 'success');
+  } catch (_err) {
+    showHint('agent-recovery-hint', '复制失败，请手动选择命令', 'error', { persist: true });
+  }
+}
+
+function retryAgentConnection() {
+  const button = document.getElementById('retry-agent-connection');
+  button.disabled = true;
+  showHint('agent-recovery-hint', '正在重试本地连接', 'warning', { persist: true });
+  if (ws?.readyState === WebSocket.OPEN) {
+    runtimeCompatibility = null;
+    updateConnectionStatus(true);
+    ws.send(JSON.stringify(withOperationContext(RuntimeVersion.buildHandshake('agent-wiki-extension'))));
+    requestStatus();
+  } else if (ws?.readyState !== WebSocket.CONNECTING) {
+    connectWebSocket();
+  }
+  setTimeout(() => {
+    button.disabled = false;
+    if (serviceCanVerify()) showHint('agent-recovery-hint', 'Agent 已连接', 'success');
+  }, 1200);
 }
 
 function normalizeProvider(value) {
@@ -593,7 +789,11 @@ function handleAgentMessage(msg) {
       if (msg.status) {
         applyCookieStatus(msg.status);
       } else {
+        setupState.cookie.configured = true;
+        setupState.cookie.pending = false;
+        setupState.cookie.verified = serviceCanVerify();
         setStatus('cookie', '已同步', 'online', formatDateTime(msg.timestamp || new Date().toISOString()));
+        renderFirstRunGuide();
       }
       break;
     case 'vault_lifecycle_status':
@@ -682,6 +882,7 @@ function applyRuntimeCompatibility(msg, override = null) {
     runtimeCompatibility.canOperate ? 'success' : runtimeCompatibility.tone === 'offline' ? 'error' : 'warning',
     { persist: true }
   );
+  renderFirstRunGuide();
   return runtimeCompatibility;
 }
 
@@ -705,11 +906,15 @@ function applyVaultStatus(status) {
   const activeVault = status.activeVault || {};
   const state = String(status.state || '').toLowerCase();
   const path = activeVault.vaultPath || status.path || status.vaultPath || '';
+  setupState.vault.configured = Boolean(path);
+  setupState.vault.checkState = state || 'unchecked';
   const connected = Boolean(
+    serviceCanVerify() &&
     path &&
-    status.ok === true &&
+    status.ok !== false &&
     ['ready', 'selected', 'initialized', 'reconnected', 'switched', 'created'].includes(state)
   );
+  setupState.vault.verified = connected;
   if (connected) {
     if (currentPath) {
       currentPath.textContent = path || '已连接';
@@ -718,15 +923,26 @@ function applyVaultStatus(status) {
     chrome.storage.local.set({ vaultPath: path, vaultSyncedAt: new Date().toISOString() });
     setStatus('vault', '已连接', 'online');
     showHint('vault-hint', status.message || '知识库已连接。', 'success', { persist: true });
+    renderFirstRunGuide();
+    return;
+  }
+  if (path) {
+    if (currentPath) {
+      currentPath.textContent = '已配置，待 Agent 检查';
+      currentPath.title = path;
+    }
+    setStatus('vault', '已配置，待检查', 'warning');
+    renderFirstRunGuide();
     return;
   }
   if (currentPath) {
     currentPath.textContent = '尚未连接';
     currentPath.title = '';
   }
-  chrome.storage.local.set({ vaultPath: '' });
+  if (serviceCanVerify()) chrome.storage.local.set({ vaultPath: '' });
   setStatus('vault', '待识别', 'warning');
   if (status.message) showHint('vault-hint', status.message, 'warning', { persist: true });
+  renderFirstRunGuide();
 }
 
 function applyModelStatus(status) {
@@ -736,11 +952,19 @@ function applyModelStatus(status) {
     document.getElementById('endpoint-url').value = status.endpoint;
     chrome.storage.local.set({ arkEndpoint: status.endpoint, endpoint: status.endpoint });
   }
-  if (status.state === 'missing') {
+  const state = String(status.state || '').toLowerCase();
+  setupState.api.checkState = state || 'unchecked';
+  const ready = serviceCanVerify() && Boolean(status.ok || state === 'ready');
+  setupState.api.verified = ready;
+  if (state === 'missing') setupState.api.configured = false;
+  else if (status.ok || state) setupState.api.configured = true;
+  if (state === 'missing') {
     setStatus('api', '缺少 Key', 'warning', formatDateTime(status.checkedAt));
-  } else if (status.ok || status.state === 'ready') {
+  } else if (ready) {
     setStatus('api', '已连接', 'online', formatDateTime(status.checkedAt));
-  } else if (status.state === 'configured') {
+  } else if (setupState.api.configured && !serviceCanVerify()) {
+    setStatus('api', '已配置，待检查', 'warning', formatDateTime(status.checkedAt));
+  } else if (state === 'configured') {
     setStatus('api', '待测试', 'warning', formatDateTime(status.checkedAt));
   } else {
     setStatus('api', status.message || '连接异常', 'offline', formatDateTime(status.checkedAt));
@@ -749,6 +973,7 @@ function applyModelStatus(status) {
     const type = status.ok ? 'success' : status.state === 'missing' ? 'warning' : 'error';
     showHint('model-hint', `${info.shortLabel}: ${status.message}；该检查不等于视频端到端验证。`, type, { persist: true });
   }
+  renderFirstRunGuide();
 }
 
 function applyVideoStatus(status) {
@@ -770,18 +995,28 @@ function applyVideoStatus(status) {
 }
 
 function applyCookieStatus(status) {
-  if (status.ok || status.state === 'ready') {
+  const state = String(status.state || '').toLowerCase();
+  setupState.cookie.checkState = state || 'unchecked';
+  const ready = serviceCanVerify() && Boolean(status.ok || state === 'ready');
+  setupState.cookie.verified = ready;
+  setupState.cookie.pending = false;
+  if (state === 'missing') setupState.cookie.configured = false;
+  else if (status.ok || state) setupState.cookie.configured = true;
+  if (ready) {
     setStatus('cookie', '已同步', 'online', formatDateTime(status.updatedAt));
     document.getElementById('cookie-settings-copy').textContent = `上次同步：${formatDateTime(status.updatedAt) || '刚刚'}`;
-  } else if (status.state === 'incomplete') {
+  } else if (setupState.cookie.configured && !serviceCanVerify()) {
+    setStatus('cookie', '已同步，待检查', 'warning', formatDateTime(status.updatedAt));
+  } else if (state === 'incomplete') {
     setStatus('cookie', '不完整', 'warning', formatDateTime(status.updatedAt));
     showHint('cookie-hint', status.message || '请登录抖音后重新抓取', 'warning', { persist: true });
-  } else if (status.state === 'missing') {
+  } else if (state === 'missing') {
     setStatus('cookie', '未同步', isAgentConnected ? 'warning' : 'offline', formatDateTime(status.updatedAt));
     showHint('cookie-hint', status.message || '请打开抖音网页版登录后抓取 Cookie', 'warning', { persist: true });
   } else {
     setStatus('cookie', status.message || '状态未知', 'warning', formatDateTime(status.updatedAt));
   }
+  renderFirstRunGuide();
 }
 
 function githubConfigured(status) {
@@ -790,10 +1025,12 @@ function githubConfigured(status) {
 
 function applyGithubStatus(status) {
   const configured = githubConfigured(status);
-  const authenticated = Boolean(status.authenticated);
+  const authenticated = status.state !== 'unavailable' && Boolean(status.authenticated);
   const pending = ['checking', 'unchecked', 'unavailable'].includes(status.state);
   githubIsConfigured = configured;
   githubIsAuthenticated = authenticated;
+  setupState.github.configured = configured;
+  setupState.github.verified = authenticated;
   const account = status.account || {};
   const login = account.login || '';
   const homeSummary = document.getElementById('home-github-summary');
@@ -873,6 +1110,7 @@ function applyGithubStatus(status) {
   } else if (authenticated && !githubAuthFlow) {
     showHint('github-hint', login ? `GitHub 已连接：@${login}` : 'GitHub 已连接', 'success', { persist: true });
   }
+  renderFirstRunGuide();
 }
 
 function clearGithubAuthFlow() {
@@ -1669,6 +1907,7 @@ async function loadConfig() {
     'serverTaskConcurrency',
     'taskConcurrency',
     'cookieSyncedAt',
+    'vaultPath',
     'modelStatus',
     'videoAnalysisStatus'
   ]);
@@ -1682,9 +1921,18 @@ async function loadConfig() {
   setControlValue('task-concurrency', normalizeTaskConcurrency(result.serverTaskConcurrency || result.taskConcurrency));
   setControlValue('chunk-concurrency', normalizeChunkConcurrency(result.videoChunkConcurrency));
   updateVideoSettingsSummary();
-  if (result.modelStatus) applyModelStatus(result.modelStatus);
+  setupState.api.configured = Boolean(readStoredApiKey(result));
+  setupState.vault.configured = Boolean(result.vaultPath);
+  setupState.cookie.configured = Boolean(result.cookieSyncedAt);
+  if (result.vaultPath) {
+    const currentPath = document.getElementById('vault-current-path');
+    currentPath.textContent = '已配置，待 Agent 检查';
+    currentPath.title = result.vaultPath;
+    setStatus('vault', '已配置，待检查', 'warning');
+  }
   if (result.videoAnalysisStatus) applyVideoStatus(result.videoAnalysisStatus);
   if (readStoredApiKey(result)) setStatus('api', '待测试', 'warning');
+  renderFirstRunGuide();
 }
 
 async function collectConfig() {
@@ -1726,6 +1974,11 @@ async function persistConfigLocally() {
 async function saveApiConfig() {
   try {
     const config = await persistConfigLocally();
+    setupState.api.configured = Boolean(config.apiKey);
+    setupState.api.verified = false;
+    setupState.api.checkState = 'configured';
+    if (config.apiKey) setStatus('api', '已配置，待检查', 'warning');
+    renderFirstRunGuide();
     const agentConfig = await buildAgentConfig({ requireApiKey: false });
     const sent = sendToAgent({ type: 'config_update', data: agentConfig });
     if (!config.apiKey) {
@@ -1970,6 +2223,8 @@ function requestVaultLifecycle(type, payload, pendingCopy) {
 
 function selectVaultFolder() {
   vaultWorkflow = { stage: 'selecting', selectionId: '', pendingType: '' };
+  setupState.vault.verified = false;
+  renderFirstRunGuide();
   requestVaultLifecycle(
     VAULT_MESSAGE_TYPES.SELECT_FOLDER,
     {},
@@ -2100,6 +2355,10 @@ async function grabCookie() {
       pendingCookieNames: cookies.map(c => c.name).join(', '),
       pendingCookieGrabbedAt: grabbedAt
     });
+    setupState.cookie.configured = true;
+    setupState.cookie.pending = true;
+    setupState.cookie.verified = false;
+    setupState.cookie.checkState = 'pending';
     const sent = sendToAgent({
       type: 'cookie_update',
       platform: 'douyin',
@@ -2112,6 +2371,7 @@ async function grabCookie() {
       'warning',
       { persist: true }
     );
+    renderFirstRunGuide();
   } catch (err) {
     setStatus('cookie', '抓取失败', 'offline');
     showHint('cookie-hint', err.message || 'Cookie 抓取失败', 'error', { persist: true });
@@ -2128,55 +2388,90 @@ async function refreshCookieStatusFromStorage() {
     const pendingAt = new Date(pending.pendingCookieGrabbedAt || 0).getTime();
     const syncedAt = new Date(local.cookieSyncedAt || 0).getTime();
     if (!local.cookieSyncedAt || pendingAt >= syncedAt) {
+      setupState.cookie.configured = true;
+      setupState.cookie.pending = true;
+      setupState.cookie.verified = false;
+      setupState.cookie.checkState = 'pending';
       setStatus('cookie', '待同步', 'warning', formatDateTime(pending.pendingCookieGrabbedAt));
+      renderFirstRunGuide();
       return;
     }
   }
   if (local.cookieSyncedAt) {
-    setStatus('cookie', '已同步', 'online', formatDateTime(local.cookieSyncedAt));
+    setupState.cookie.configured = true;
+    setupState.cookie.pending = false;
+    if (!serviceCanVerify()) setupState.cookie.verified = false;
+    setStatus(
+      'cookie',
+      setupState.cookie.verified ? '已同步' : '已同步，待检查',
+      setupState.cookie.verified ? 'online' : 'warning',
+      formatDateTime(local.cookieSyncedAt)
+    );
     document.getElementById('cookie-settings-copy').textContent = `上次同步：${formatDateTime(local.cookieSyncedAt)}`;
+    renderFirstRunGuide();
     return;
   }
+  setupState.cookie.configured = false;
+  setupState.cookie.pending = false;
+  setupState.cookie.verified = false;
   setStatus('cookie', '未同步', isAgentConnected ? 'warning' : 'offline');
+  renderFirstRunGuide();
+}
+
+function invalidateServiceDependentStatuses() {
+  setupState.api.verified = false;
+  setupState.vault.verified = false;
+  setupState.cookie.verified = false;
+  setupState.github.verified = false;
+  setupState.api.checkState = 'unchecked';
+  setupState.vault.checkState = 'unchecked';
+  if (!setupState.cookie.pending) setupState.cookie.checkState = 'unchecked';
+  setStatus('api', setupState.api.configured ? '已配置，待检查' : '未配置', 'warning');
+  setStatus('vault', setupState.vault.configured ? '已配置，待检查' : '待识别', 'warning');
+  setStatus(
+    'cookie',
+    setupState.cookie.pending ? '已抓取，待同步' : setupState.cookie.configured ? '已同步，待检查' : '未同步',
+    'warning'
+  );
+  applyGithubStatus({
+    state: 'unavailable',
+    configured: githubIsConfigured,
+    authenticated: false
+  });
+  renderFirstRunGuide();
 }
 
 function updateConnectionStatus(connected) {
   isAgentConnected = connected;
   if (connected && !runtimeCompatibility) {
+    invalidateServiceDependentStatuses();
     setStatus('agent', '正在校验版本', 'warning');
     document.getElementById('agent-settings-copy').textContent = '本地服务已连接，正在校验版本';
-    applyGithubStatus({
-      state: 'checking',
-      configured: githubIsConfigured,
-      authenticated: false
-    });
   } else if (!connected) {
+    invalidateServiceDependentStatuses();
     setStatus('agent', '未连接', 'offline');
     document.getElementById('agent-settings-copy').textContent = '本地 Agent 未连接';
     document.getElementById('service-version').textContent = '待连接';
     document.getElementById('runtime-protocol-version').textContent = '待校验';
     document.getElementById('runtime-source-version').textContent = '待校验';
     showHint('runtime-version-hint', '', '');
-    applyGithubStatus({
-      state: 'unavailable',
-      configured: githubIsConfigured,
-      authenticated: false
-    });
   }
   refreshCookieStatusFromStorage();
+  renderFirstRunGuide();
 }
 
-function compactStatusText(kind, type) {
+function compactStatusText(kind, type, detail = '') {
   const status = type || 'warning';
   if (kind === 'cookie') {
     if (status === 'online') return '已同步';
     if (status === 'offline') return '未同步';
+    if (String(detail).includes('待检查')) return '待检查';
     return '待同步';
   }
   if (status === 'online') return '已连接';
   if (status === 'offline') return '未连接';
   if (kind === 'agent') return '检查中';
-  if (kind === 'vault') return '待识别';
+  if (kind === 'vault') return String(detail).includes('待检查') ? '待检查' : '待识别';
   return '待检查';
 }
 
@@ -2189,7 +2484,7 @@ function setStatus(kind, text, type, time) {
   if (dot) dot.className = `status-dot inline-dot ${normalized}`;
   if (menuDot) menuDot.className = `status-dot inline-dot ${normalized}`;
   if (label) {
-    label.textContent = compactStatusText(kind, normalized);
+    label.textContent = compactStatusText(kind, normalized, text);
     label.className = normalized;
   }
   if (menuLabel) {
@@ -2450,12 +2745,20 @@ function syncModelPresetFromInput() {
 document.addEventListener('DOMContentLoaded', async () => {
   initColorScheme();
   document.getElementById('extension-version').textContent = `v${EXTENSION_VERSION || '未知'}`;
+  document.getElementById('agent-start-command').textContent = AGENT_START_COMMAND;
   document.getElementById('open-settings').addEventListener('click', openSettingsIndex);
   document.getElementById('open-github').addEventListener('click', () => openGithubPage());
   document.getElementById('back-settings-index').addEventListener('click', closeSettingsDetailToIndex);
   document.getElementById('back-home-from-index').addEventListener('click', closeToHome);
   document.getElementById('back-home-from-github').addEventListener('click', closeGithubToHome);
   document.getElementById('status-tasks').addEventListener('click', () => openSettingsDetail('task-settings'));
+  bindClick('toggle-first-run', toggleFirstRunGuide);
+  document.getElementById('first-run-guide').addEventListener('click', event => {
+    const button = event.target.closest('[data-onboarding-action]');
+    if (button && !button.disabled) runOnboardingAction(button.dataset.onboardingAction);
+  });
+  bindClick('copy-agent-start-command', copyAgentStartCommand);
+  bindClick('retry-agent-connection', retryAgentConnection);
   document.querySelectorAll('.settings-card').forEach(button => {
     button.addEventListener('click', () => openSettingsDetail(button.dataset.target));
   });
@@ -2505,8 +2808,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
   await restorePopupRoute();
-  loadConfig();
-  refreshCookieStatusFromStorage();
+  await loadFirstRunPreference();
+  await loadConfig();
+  await refreshCookieStatusFromStorage();
   startDouyinPreviewLoop();
   connectWebSocket();
 });
