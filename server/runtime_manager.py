@@ -1254,8 +1254,11 @@ def _render_result(result: OperationResult, *, as_json: bool = False) -> int:
     return result.code
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Manage and diagnose the Agent-wiki local control plane")
+def build_parser(*, prog: Optional[str] = None) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=prog,
+        description="Manage and diagnose the Agent-wiki local control plane",
+    )
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("foreground", help="run in the foreground (default)")
     commands.add_parser("start", help="start the managed background service")
@@ -1280,10 +1283,11 @@ def main(
     *,
     project_root: Optional[Path] = None,
     runtime_root: Optional[Path] = None,
+    prog: Optional[str] = None,
 ) -> int:
     root = (project_root or Path(__file__).resolve().parents[1]).resolve()
     runtime = (runtime_root or default_runtime_root()).expanduser()
-    args = build_parser().parse_args(argv)
+    args = build_parser(prog=prog).parse_args(argv)
     command = args.command or "foreground"
     controller = ServiceController(root, runtime)
 

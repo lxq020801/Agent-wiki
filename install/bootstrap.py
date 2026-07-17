@@ -545,8 +545,8 @@ def bootstrap(
     return result
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Prepare Agent-wiki runtime")
+def main(argv: Optional[list[str]] = None, *, prog: Optional[str] = None) -> int:
+    parser = argparse.ArgumentParser(prog=prog, description="Prepare Agent-wiki runtime")
     parser.add_argument("--skip-install-deps", action="store_true", help="skip Python dependency installation")
     parser.add_argument(
         "--vault",

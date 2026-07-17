@@ -219,10 +219,51 @@ class AutostartTests(unittest.TestCase):
 
 
 class UnifiedCliTests(unittest.TestCase):
+    def test_root_cli_help_uses_public_brand_for_every_command(self) -> None:
+        internal_script_names = (
+            "runtime_cli.py",
+            "bootstrap.py",
+            "runtime_manager.py",
+            "autostart.py",
+        )
+        commands = (
+            "install",
+            "start",
+            "stop",
+            "restart",
+            "status",
+            "doctor",
+            "uninstall",
+            "autostart",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            temporary_root = Path(directory)
+            env = os.environ.copy()
+            env.update(
+                HOME=str(temporary_root / "home"),
+                AGENT_WIKI_HOME=str(temporary_root / "runtime"),
+            )
+            for command in commands:
+                with self.subTest(command=command):
+                    result = subprocess.run(
+                        [str(ROOT / "agent-wiki"), command, "--help"],
+                        cwd=ROOT,
+                        env=env,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    output = result.stdout + result.stderr
+                    self.assertEqual(result.returncode, 0, output)
+                    self.assertIn(f"usage: agent-wiki {command}", output)
+                    for script_name in internal_script_names:
+                        self.assertNotIn(script_name, output)
+
     def test_cli_routes_install_and_service_commands_to_existing_implementations(self) -> None:
         with mock.patch("install.bootstrap.main", return_value=7) as install_main:
             self.assertEqual(runtime_cli.main(["install", "--skip-install-deps"]), 7)
-        install_main.assert_called_once_with(["--skip-install-deps"])
+        install_main.assert_called_once_with(["--skip-install-deps"], prog="agent-wiki install")
 
         with mock.patch("server.runtime_manager.main", return_value=9) as runtime_main:
             self.assertEqual(runtime_cli.main(["status", "--json"]), 9)
@@ -230,6 +271,7 @@ class UnifiedCliTests(unittest.TestCase):
             ["status", "--json"],
             project_root=ROOT,
             runtime_root=runtime_cli._runtime_root(),
+            prog="agent-wiki",
         )
 
     def test_missing_dependencies_give_actionable_advice_without_installing_system_tools(self) -> None:
