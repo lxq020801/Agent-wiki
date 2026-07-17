@@ -1,0 +1,26 @@
+#!/bin/sh
+
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+for candidate in \
+    "$ROOT/deps/douyin/.venv/bin/python" \
+    python3.13 \
+    python3.12 \
+    python3.11 \
+    python3
+do
+    if [ "${candidate#*/}" = "$candidate" ]; then
+        candidate=$(command -v "$candidate" 2>/dev/null || true)
+    fi
+    if [ -n "$candidate" ] && [ -x "$candidate" ] && \
+        "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
+    then
+        exec "$candidate" "$ROOT/install/runtime_cli.py" "$@"
+    fi
+done
+
+printf '%s\n' '错误：Agent-wiki 需要 Python 3.11 或更高版本。' >&2
+printf '%s\n' '请先从 https://www.python.org/downloads/ 安装 Python 3.11+，然后重新运行 ./agent-wiki install。' >&2
+exit 2

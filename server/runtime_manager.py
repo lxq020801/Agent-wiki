@@ -13,6 +13,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -60,6 +61,13 @@ DEPENDENCY_POLICIES: dict[str, dict[str, Any]] = {
     "openai": {"distribution": "openai", "minimum": (1, 40)},
 }
 EXTENSION_IGNORES = {".DS_Store", "__pycache__"}
+SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)(api[_-]?key|authorization|cookie|access[_-]?token|refresh[_-]?token|token)(\s*[=:]\s*)([^&\s]+)"
+)
+SECRET_KEY_RE = re.compile(
+    r"(?i)^(api[_-]?key|authorization|cookie|access[_-]?token|refresh[_-]?token|token)$"
+)
+URL_QUERY_RE = re.compile(r"(https?://[^\s?#]+)\?[^\s]+", re.IGNORECASE)
 
 
 class RuntimeOperationError(RuntimeError):
@@ -181,6 +189,23 @@ class CacheUsage:
     files: int
     bytes: int
     errors: int = 0
+
+
+def redact_diagnostic_value(value: Any) -> Any:
+    """Redact common secret assignments and URL queries from user-facing diagnostics."""
+    if isinstance(value, str):
+        redacted = URL_QUERY_RE.sub(r"\1?[已脱敏]", value)
+        return SECRET_ASSIGNMENT_RE.sub(r"\1\2[已脱敏]", redacted)
+    if isinstance(value, dict):
+        return {
+            str(key): "[已脱敏]" if SECRET_KEY_RE.match(str(key)) else redact_diagnostic_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_diagnostic_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_diagnostic_value(item) for item in value)
+    return value
 
 
 def default_runtime_root() -> Path:
@@ -843,6 +868,7 @@ def _public_state(state: Optional[ServiceState]) -> Optional[dict[str, Any]]:
         "host": state.host,
         "port": state.port,
         "project_root": state.project_root,
+        "python": state.python,
         "source_version": state.source_version,
         "source_commit": state.source_commit,
         "source_dirty": state.source_dirty,
@@ -1064,12 +1090,40 @@ class Doctor:
                     f"managed service running (PID {status.metadata.pid})",
                 )
             )
-            source_status = "PASS" if status.state == "running" else "WARN"
+            recorded_root = Path(status.metadata.project_root)
+            source_exists = recorded_root.is_dir() and Path(status.metadata.entrypoint).is_file()
+            current_version = dict(self.controller.version_reader(self.controller.project_root))
+            current_commit = str(current_version.get("commit") or "unknown")
+            current_description = str(current_version.get("version") or "unknown")
+            version_matches = (
+                current_commit == "unknown"
+                or status.metadata.source_commit == "unknown"
+                or (
+                    current_commit == status.metadata.source_commit
+                    and (
+                        current_description == "unknown"
+                        or status.metadata.source_version == "unknown"
+                        or current_description == status.metadata.source_version
+                    )
+                )
+            )
+            source_status = (
+                "PASS"
+                if status.state == "running" and source_exists and version_matches
+                else "WARN"
+            )
+            source_message = (
+                f"running source: {status.metadata.project_root} ({status.metadata.source_version})"
+            )
+            if not source_exists:
+                source_message += "; source directory moved or is missing; stop the verified service before recovery"
+            elif not version_matches:
+                source_message += "; running version differs from the current checkout; restart after review"
             checks.append(
                 DoctorCheck(
                     "service.source",
                     source_status,
-                    f"running source: {status.metadata.project_root} ({status.metadata.source_version})",
+                    source_message,
                 )
             )
             listening = self.controller.port_probe(status.metadata.host, status.metadata.port)
@@ -1192,10 +1246,11 @@ def _status_payload(status: ServiceStatus) -> dict[str, Any]:
 
 def _render_result(result: OperationResult, *, as_json: bool = False) -> int:
     if as_json:
-        print(json.dumps(result.payload or {"messages": list(result.lines)}, ensure_ascii=False, indent=2))
+        payload = redact_diagnostic_value(result.payload or {"messages": list(result.lines)})
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         for line in result.lines:
-            print(line)
+            print(redact_diagnostic_value(line))
     return result.code
 
 
@@ -1244,21 +1299,26 @@ def main(
         status = controller.status()
         payload = _status_payload(status)
         if args.json:
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            print(json.dumps(redact_diagnostic_value(payload), ensure_ascii=False, indent=2))
         else:
-            print(status.message)
+            print(redact_diagnostic_value(status.message))
             if status.metadata:
                 print(f"PID: {status.metadata.pid}")
-                print(f"source: {status.metadata.project_root} ({status.metadata.source_version})")
-                print(f"log: {status.metadata.log_path}")
+                print(redact_diagnostic_value(
+                    f"source: {status.metadata.project_root} "
+                    f"({status.metadata.source_version}; {status.metadata.source_commit})"
+                ))
+                print(redact_diagnostic_value(f"python: {status.metadata.python}"))
+                print(f"listen: {status.metadata.host}:{status.metadata.port}")
+                print(redact_diagnostic_value(f"log: {status.metadata.log_path}"))
         return 0 if status.running else 3
     if command == "doctor":
         checks = Doctor(controller).run()
         if args.json:
-            print(json.dumps([asdict(check) for check in checks], ensure_ascii=False, indent=2))
+            print(json.dumps(redact_diagnostic_value([asdict(check) for check in checks]), ensure_ascii=False, indent=2))
         else:
             for check in checks:
-                print(f"[{check.status}] {check.key}: {check.message}")
+                print(redact_diagnostic_value(f"[{check.status}] {check.key}: {check.message}"))
         return 1 if any(check.status == "FAIL" for check in checks) else 0
     if command == "cache":
         usage = cache_report(controller.runtime_root)

@@ -295,7 +295,11 @@ def ensure_extension_copy(result: CheckResult) -> None:
 def ensure_douyin_venv(result: CheckResult, *, install_deps: bool) -> None:
     python = _find_python()
     if not python:
-        result.add_warning("Python 3.11+ not found. Install Python 3.11+ before video ingest.")
+        result.add_warning(
+            "未找到 Python 3.11+。请从 https://www.python.org/downloads/ 安装后重新运行 "
+            "./agent-wiki install；不会修改系统 Python。",
+            fatal=True,
+        )
         return
     if DOUYIN_VENV.exists() and not _venv_python_is_usable(DOUYIN_VENV):
         shutil.rmtree(DOUYIN_VENV)
@@ -333,10 +337,16 @@ def ensure_douyin_venv(result: CheckResult, *, install_deps: bool) -> None:
 
 
 def check_ffmpeg(result: CheckResult) -> None:
-    if shutil.which("ffprobe"):
-        result.actions.append("ffprobe available")
-    else:
-        result.add_warning("ffprobe not found. Install ffmpeg before real video analysis.")
+    missing = [tool for tool in ("ffmpeg", "ffprobe") if not shutil.which(tool)]
+    for tool in ("ffmpeg", "ffprobe"):
+        if tool not in missing:
+            result.actions.append(f"{tool} available")
+    if missing:
+        result.add_warning(
+            f"缺少系统命令：{', '.join(missing)}。请自行安装 FFmpeg（例如先安装 Homebrew，"
+            "再运行 brew install ffmpeg），然后重新运行 ./agent-wiki doctor；"
+            "Agent-wiki 不会静默安装 Homebrew。"
+        )
 
 
 def check_websocket(result: CheckResult, host: str = "127.0.0.1", port: int = 8765) -> None:
