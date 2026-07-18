@@ -208,7 +208,7 @@ def ensure_config_template(result: CheckResult) -> None:
     os.chmod(CONFIG_PATH, 0o600)
     result.actions.append(f"config template created: {CONFIG_PATH}")
     result.missing_user_actions.append(
-        "Open the extension, enter a user name, and create a new Agent-wiki vault."
+        "打开扩展并通过“选择知识库”选择一个文件夹。"
     )
     result.missing_user_actions.append(
         "Configure AGENT_WIKI_GITHUB_CLIENT_ID before using GitHub Device Flow."
@@ -295,7 +295,11 @@ def ensure_extension_copy(result: CheckResult) -> None:
 def ensure_douyin_venv(result: CheckResult, *, install_deps: bool) -> None:
     python = _find_python()
     if not python:
-        result.add_warning("Python 3.11+ not found. Install Python 3.11+ before video ingest.")
+        result.add_warning(
+            "未找到 Python 3.11+。请从 https://www.python.org/downloads/ 安装后重新运行 "
+            "./agent-wiki install；不会修改系统 Python。",
+            fatal=True,
+        )
         return
     if DOUYIN_VENV.exists() and not _venv_python_is_usable(DOUYIN_VENV):
         shutil.rmtree(DOUYIN_VENV)
@@ -333,10 +337,16 @@ def ensure_douyin_venv(result: CheckResult, *, install_deps: bool) -> None:
 
 
 def check_ffmpeg(result: CheckResult) -> None:
-    if shutil.which("ffprobe"):
-        result.actions.append("ffprobe available")
-    else:
-        result.add_warning("ffprobe not found. Install ffmpeg before real video analysis.")
+    missing = [tool for tool in ("ffmpeg", "ffprobe") if not shutil.which(tool)]
+    for tool in ("ffmpeg", "ffprobe"):
+        if tool not in missing:
+            result.actions.append(f"{tool} available")
+    if missing:
+        result.add_warning(
+            f"缺少系统命令：{', '.join(missing)}。请自行安装 FFmpeg（例如先安装 Homebrew，"
+            "再运行 brew install ffmpeg），然后重新运行 ./agent-wiki doctor；"
+            "Agent-wiki 不会静默安装 Homebrew。"
+        )
 
 
 def check_websocket(result: CheckResult, host: str = "127.0.0.1", port: int = 8765) -> None:
@@ -458,7 +468,7 @@ def check_vault(result: CheckResult) -> None:
     vault_raw = _simple_config_value("vault", "path")
     if not vault_raw:
         result.missing_user_actions.append(
-            "Create a new Agent-wiki vault in the extension; existing Obsidian vaults are never adopted automatically."
+            "请在扩展中点击“选择知识库”；普通 Obsidian 目录不会自动连接。"
         )
         if not api_key:
             result.missing_user_actions.append(
@@ -481,14 +491,13 @@ def check_vault(result: CheckResult) -> None:
     identity_state, _identity = inspect_vault_identity(vault)
     if identity_state != "valid":
         result.missing_user_actions.append(
-            "The configured directory has no valid Agent-wiki identity marker. "
-            "Use migration preview for an existing knowledge vault."
+            "配置目录没有有效的 Agent-wiki 身份标记，请在扩展中重新选择知识库。"
         )
         return
     lifecycle = VaultLifecycleManager(runtime_root=RUNTIME_ROOT, config_path=CONFIG_PATH)
     switched = lifecycle.switch(vault_path=vault)
     if not switched.get("ok"):
-        result.missing_user_actions.append(switched.get("message") or "Select an Agent-wiki vault in the extension.")
+        result.missing_user_actions.append(switched.get("message") or "请在扩展中选择 Agent-wiki 知识库。")
         return
     result.actions.append(f"vault selected by explicit config: {vault}")
     result.actions.append(f"vault structure ready: {vault}")
@@ -536,8 +545,8 @@ def bootstrap(
     return result
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Prepare Agent-wiki runtime")
+def main(argv: Optional[list[str]] = None, *, prog: Optional[str] = None) -> int:
+    parser = argparse.ArgumentParser(prog=prog, description="Prepare Agent-wiki runtime")
     parser.add_argument("--skip-install-deps", action="store_true", help="skip Python dependency installation")
     parser.add_argument(
         "--vault",

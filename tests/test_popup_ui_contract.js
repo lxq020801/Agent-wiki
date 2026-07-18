@@ -49,23 +49,51 @@ for (const id of settingsDetailIds) {
   assert.match(html, new RegExp(`class="settings-group detail-section" id="${id}"`));
 }
 
+const apiSettingsSection = html.match(/<section class="settings-group detail-section" id="api-settings"[\s\S]*?<\/section>/)?.[0] || '';
+const arkApiKeyLink = apiSettingsSection.match(/<a class="api-key-link icon-text-button" id="ark-api-key-link"[^>]*>/)?.[0] || '';
+assert.match(
+  arkApiKeyLink,
+  /href="https:\/\/console\.volcengine\.com\/ark\/region:ark\+cn-beijing\/apiKey"/,
+  'API settings must link directly to the official Ark API Key page'
+);
+assert.match(arkApiKeyLink, /target="_blank"/);
+assert.match(arkApiKeyLink, /rel="noopener noreferrer"/);
+assert.match(arkApiKeyLink, /aria-label="点这里获取火山方舟 API Key（在新标签页打开）"/);
+assert.doesNotMatch(arkApiKeyLink, /onclick=|data-(?:key|value|action)=/);
+assert.match(apiSettingsSection, />点这里获取火山方舟 API Key</);
+assert.match(apiSettingsSection, /data-lucide-icon="external-link"[\s\S]*?aria-hidden="true"/);
+
+const videoSettingsSection = html.match(/<section class="settings-group detail-section" id="video-settings"[\s\S]*?<\/section>/)?.[0] || '';
+assert.match(videoSettingsSection, /id="analysis-model-preset" value="lite"/);
+assert.match(videoSettingsSection, /data-value="lite" data-model-id="doubao-seed-2-0-lite-260428"/);
+assert.match(videoSettingsSection, /data-value="mini" data-model-id="doubao-seed-2-0-mini-260428"/);
+assert.match(videoSettingsSection, /id="task-concurrency" value="2"/);
+assert.match(videoSettingsSection, /id="chunk-concurrency" value="2"/);
+
 for (const id of [
+  'select-knowledge-base',
+  'vault-confirmation-modal',
+  'vault-selection-folder',
+  'confirm-vault-selection',
+  'cancel-vault-confirmation'
+]) {
+  assert.match(html, new RegExp(`id="${id}"`), `missing knowledge base control: ${id}`);
+}
+const vaultSection = html.match(/<section class="settings-group detail-section" id="vault-settings"[\s\S]*?<\/section>/)?.[0] || '';
+assert.match(vaultSection, />选择知识库</);
+assert.doesNotMatch(vaultSection, /<input|<select|知识库名称|根目录|父目录/);
+for (const removed of [
   'scan-knowledge-bases',
   'create-knowledge-base',
   'switch-knowledge-base',
   'migrate-knowledge-base',
-  'vault-workflow-modal',
   'vault-candidate-select',
   'vault-name',
-  'vault-migration-summary',
-  'confirm-vault-workflow',
-  'rollback-vault-migration'
+  'vault-migration-summary'
 ]) {
-  assert.match(html, new RegExp(`id="${id}"`), `missing knowledge base control: ${id}`);
+  assert.doesNotMatch(html, new RegExp(`id="${removed}"`));
 }
-assert.match(html, />新建知识库</);
-assert.match(html, />切换知识库</);
-assert.match(html, />迁移现有知识库</);
+assert.doesNotMatch(html, />新建知识库|>切换知识库|>迁移现有知识库/);
 assert.doesNotMatch(html, /Git 仓库/);
 
 assert.match(css, /--popup-width:\s*390px/);
@@ -111,6 +139,13 @@ assert.match(css, /\.view\s*\{[\s\S]*?overflow-y:\s*auto/);
 assert.match(css, /\.task-head\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto/);
 assert.match(css, /\.task-head strong\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
 assert.match(css, /button\.primary,[\s\S]*?button\.secondary\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
+const apiKeyLinkRule = css.match(/\.api-key-link\s*\{([^}]*)\}/)?.[1] || '';
+assert.match(apiKeyLinkRule, /display:\s*inline-flex/);
+assert.match(apiKeyLinkRule, /max-width:\s*100%/);
+assert.match(apiKeyLinkRule, /min-width:\s*0/);
+assert.match(apiKeyLinkRule, /overflow-wrap:\s*anywhere/);
+assert.match(apiKeyLinkRule, /color:\s*var\(--primary\)/);
+assert.match(css, /\.api-key-link:focus-visible\s*\{[\s\S]*?box-shadow:\s*0 0 0 3px var\(--focus\)/);
 const derivedTitleRule = css.match(/\.derived-head strong\s*\{([^}]*)\}/)?.[1] || '';
 assert.match(derivedTitleRule, /flex:\s*1 1 0/);
 assert.match(derivedTitleRule, /overflow-wrap:\s*anywhere/);
@@ -118,6 +153,7 @@ assert.match(derivedTitleRule, /white-space:\s*normal/);
 assert.doesNotMatch(derivedTitleRule, /overflow:\s*hidden|text-overflow:\s*ellipsis|white-space:\s*nowrap/);
 assert.match(css, /\.derived-actions\s*\{[^}]*flex-wrap:\s*wrap/);
 assert.match(visualMock, /mock-account-with-an-intentionally-very-long-login-name/);
+assert.match(visualMock, /scenario === 'api'[\s\S]*?openSettingsDetail\('api-settings'/);
 assert.match(visualMock, /超长派生候选名称也必须稳定换行且不挤压确认与忽略按钮/);
 assert.match(visualMock, /scenario === 'header-long-home' \|\| scenario === 'header-long-settings'/);
 assert.match(visualMock, /等待浏览器同步较长状态/);
@@ -126,26 +162,18 @@ assert.match(visualMock, /https:\/\/mock\.invalid\//);
 assert.doesNotMatch(visualMock, /fetch\(|WebSocket|chrome\.(?:runtime|storage|tabs)|github\.com|douyin\.com/);
 
 for (const [name, type] of Object.entries({
-  SCAN: 'vault_scan',
-  CREATE: 'vault_create',
-  SWITCH: 'vault_switch',
-  CANDIDATE_CONFIRM: 'vault_candidate_confirm',
-  MIGRATION_PREVIEW: 'vault_migration_preview',
-  MIGRATION_EXECUTE: 'vault_migration_execute',
-  MIGRATION_ROLLBACK: 'vault_migration_rollback'
+  SELECT_FOLDER: 'vault_select_folder',
+  SELECT_CONFIRM: 'vault_select_confirm'
 })) {
   assert.match(js, new RegExp(`${name}: '${type}'`), `missing knowledge base message: ${type}`);
 }
 assert.match(js, /case 'vault_lifecycle_status':/);
 assert.doesNotMatch(js, /knowledge_base_(?:scan|create|switch|migrate)|case 'vault_status':/);
 assert.match(js, /function requestVaultLifecycle[\s\S]*?data:\s*payload/);
-assert.match(js, /function buildVaultCreatePayload[\s\S]*?userName:\s*name[\s\S]*?obsidianRoot/);
-assert.match(js, /function confirmVaultWorkflow[\s\S]*?CANDIDATE_CONFIRM[\s\S]*?MIGRATION_EXECUTE[\s\S]*?MIGRATION_PREVIEW/);
-assert.match(js, /function rollbackVaultMigration[\s\S]*?MIGRATION_ROLLBACK/);
-assert.match(js, /status\.migration\?\.migrationId/);
+assert.match(js, /function selectVaultFolder[\s\S]*?SELECT_FOLDER/);
+assert.match(js, /function confirmVaultSelection[\s\S]*?SELECT_CONFIRM[\s\S]*?selectionId/);
 assert.match(js, /status\.activeVault\?\.vaultPath/);
-assert.match(js, /state === 'ready' && action !== 'scan'/);
-assert.match(js, /status\.ok === false \|\| \['failed', 'error', 'rejected'\]/);
+assert.doesNotMatch(js, /vault_create|vault_migration_|vault_candidate_confirm|buildVaultCreatePayload|normalizeVaultCandidates/);
 assert.match(js, /function setView\(viewId\) \{\s*releaseFocusBeforeViewChange\(viewId\);/);
 assert.match(js, /DOMContentLoaded[\s\S]*?initColorScheme\(\)/);
 assert.match(js, /back-settings-index'\)\.addEventListener\('click', closeSettingsDetailToIndex\)/);
@@ -371,36 +399,10 @@ async function main() {
     assert.equal(result.allDetailsHidden, true, `${result.id} must be hidden after returning`);
   }
 
-  assert.deepEqual(route(`buildVaultCreatePayload({ id: 'root-1', obsidianRoot: '/tmp/root' }, 'Demo')`), {
-    userName: 'Demo',
-    obsidianRoot: '/tmp/root'
-  });
-  assert.deepEqual(route(`buildVaultMigrationPreviewPayload({ id: 'root-2', obsidianRoot: '/tmp/target' }, 'Moved', '/tmp/source')`), {
-    sourcePath: '/tmp/source',
-    userName: 'Moved',
-    obsidianRoot: '/tmp/target'
-  });
-  assert.deepEqual(route(`(() => {
-    vaultWorkflow.mode = 'switch';
-    return normalizeVaultCandidates({
-      obsidianRoots: [{ candidateId: 'root-1', kind: 'obsidian_root', obsidianRoot: '/tmp/root' }],
-      vaultCandidates: [{
-        candidateId: 'vault-1', kind: 'agent_wiki_vault', vaultPath: '/tmp/vault',
-        vaultId: 'identity-1', userName: 'Demo', supportedActions: ['switch']
-      }]
-    });
-  })()`), [{
-    id: 'vault-1',
-    path: '/tmp/vault',
-    label: 'Demo',
-    kind: 'agent_wiki_vault',
-    obsidianRoot: '',
-    parentDirectory: '',
-    vaultPath: '/tmp/vault',
-    vaultId: 'identity-1',
-    key: 'vault-1',
-    requiresConfirmation: false
-  }]);
+  assert.equal(route(`JSON.stringify(VAULT_MESSAGE_TYPES)`), JSON.stringify({
+    SELECT_FOLDER: 'vault_select_folder',
+    SELECT_CONFIRM: 'vault_select_confirm'
+  }));
 
   await vm.runInContext(`persistPopupRoute({
     view: 'settings-detail-view',

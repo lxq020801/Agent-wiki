@@ -561,7 +561,7 @@ class CoverageMatrixTests(unittest.TestCase):
             "知识资产生成：简洁概括、完整整理、AI 分析的生成阶段，结构解析/校验，标题、标签、文件命名、文件写入、索引更新；大型 prompt/完整响应继续放现有 run-artifacts，只在统一时间线保存摘要与引用。",
             "派生策略全流程：候选产生、证据、筛选/保留/忽略原因、GitHub 官方 API 目标解析、歧义待确认、子任务创建、派生执行、父子关系、已有资产去重、成功/失败。",
             "GitHub 登录、Stars、资产、自动 Star、刷新。",
-            "知识库扫描、新建、切换、迁移和回退。",
+            "知识库自动扫描、文件夹选择、安全初始化和兼容生命周期操作。",
         )
         self.assertEqual(
             tuple(AUDIT_COVERAGE_MATRIX[index]["title"] for index in range(1, 10)),

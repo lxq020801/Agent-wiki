@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe first-use, switching, reconnection, and migration for Agent-wiki vaults."""
+"""Safe folder selection, reconnection, and legacy vault lifecycle support."""
 from __future__ import annotations
 
 import hashlib
@@ -46,6 +46,8 @@ CANDIDATE_TTL_SECONDS = 15 * 60
 
 VAULT_LIFECYCLE_REQUEST_TYPES = frozenset({
     "vault_scan",
+    "vault_select_folder",
+    "vault_select_confirm",
     "vault_create",
     "vault_switch",
     "vault_candidate_confirm",
@@ -62,6 +64,8 @@ VAULT_LIFECYCLE_CONTRACT = {
     "responseType": VAULT_LIFECYCLE_RESPONSE_TYPE,
     "requests": {
         "vault_scan": {"required": [], "optional": ["userName", "parentHints"]},
+        "vault_select_folder": {"required": [], "optional": []},
+        "vault_select_confirm": {"required": ["selectionId"], "optional": []},
         "vault_create": {
             "required": ["userName"],
             "oneOf": ["obsidianRoot", "parentDirectory"],
@@ -88,6 +92,7 @@ VAULT_LIFECYCLE_CONTRACT = {
         "activeVault",
         "obsidianRoots",
         "vaultCandidates",
+        "selection",
         "migration",
     ],
 }
@@ -109,19 +114,28 @@ def _contains_protected_component(path: Path) -> bool:
     return any(part.casefold() == ".obsidian" for part in path.parts)
 
 
+def _is_obsidian_icloud_container(path: Path) -> bool:
+    parts = tuple(part.casefold() for part in path.parts)
+    return parts[-3:] == ("library", "mobile documents", "icloud~md~obsidian")
+
+
 def _existing_directory(value: Path | str, field: str) -> Path:
     raw = str(value or "").strip()
     if not raw:
-        raise VaultLifecycleError(f"{field}_required", f"{field} is required")
+        raise VaultLifecycleError(f"{field}_required", "请选择一个文件夹。")
     path = Path(raw).expanduser()
     try:
         resolved = path.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
-        raise VaultLifecycleError(f"{field}_invalid", f"{field} must be an existing directory") from exc
-    if not resolved.is_dir() or _contains_protected_component(resolved):
+        raise VaultLifecycleError(f"{field}_invalid", "所选文件夹不存在或无法访问。") from exc
+    if (
+        not resolved.is_dir()
+        or _contains_protected_component(resolved)
+        or _is_obsidian_icloud_container(resolved)
+    ):
         raise VaultLifecycleError(
             f"{field}_invalid",
-            f"{field} must be an existing directory outside .obsidian",
+            "请选择知识库文件夹，不能选择 .obsidian 内部或 iCloud 的 Obsidian 应用容器层。",
         )
     return resolved
 
@@ -129,11 +143,11 @@ def _existing_directory(value: Path | str, field: str) -> Path:
 def normalize_user_name(value: str) -> str:
     name = unicodedata.normalize("NFC", str(value or "").strip())
     if not name:
-        raise VaultLifecycleError("user_name_required", "userName is required")
+        raise VaultLifecycleError("user_name_required", "所选文件夹必须有可用的名称。")
     if name in {".", ".."} or len(name) > 80:
-        raise VaultLifecycleError("user_name_invalid", "userName must contain 1 to 80 safe characters")
+        raise VaultLifecycleError("user_name_invalid", "文件夹名称长度必须在 1 到 80 个字符之间。")
     if any(char in name for char in "/\\:\0") or any(ord(char) < 32 for char in name):
-        raise VaultLifecycleError("user_name_invalid", "userName must not contain path separators or control characters")
+        raise VaultLifecycleError("user_name_invalid", "文件夹名称包含不支持的字符。")
     return name
 
 
@@ -167,6 +181,35 @@ def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def _atomic_json_create(path: Path, payload: dict[str, Any]) -> None:
+    """Create a JSON file once without replacing an entry that appears concurrently."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor: Optional[int] = None
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = None
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(path, 0o600)
+    except FileExistsError as exc:
+        raise VaultLifecycleError(
+            "identity_marker_conflict",
+            "文件夹中的知识库身份标记已发生变化，请重新选择。",
+        ) from exc
+    except Exception:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def _read_json(path: Path) -> Optional[dict[str, Any]]:
@@ -221,6 +264,7 @@ def _write_vault_identity(
     vault_id: str,
     user_name: str,
     created_at: str,
+    overwrite: bool = True,
 ) -> dict[str, Any]:
     payload = {
         "schemaVersion": VAULT_IDENTITY_SCHEMA_VERSION,
@@ -229,7 +273,11 @@ def _write_vault_identity(
         "userName": normalize_user_name(user_name),
         "createdAt": created_at,
     }
-    _atomic_json_write(vault_path / VAULT_IDENTITY_FILENAME, payload)
+    marker = vault_path / VAULT_IDENTITY_FILENAME
+    if overwrite:
+        _atomic_json_write(marker, payload)
+    else:
+        _atomic_json_create(marker, payload)
     return payload
 
 
@@ -238,6 +286,7 @@ def _ensure_minimal_vault_structure(
     *,
     identity: dict[str, Any],
     create_marker: bool = True,
+    overwrite_marker: bool = True,
 ) -> None:
     for relative in MINIMAL_VAULT_DIRECTORIES:
         (vault_path / relative).mkdir(parents=True, exist_ok=True)
@@ -254,15 +303,38 @@ def _ensure_minimal_vault_structure(
             vault_id=str(identity["vaultId"]),
             user_name=str(identity["userName"]),
             created_at=str(identity["createdAt"]),
+            overwrite=overwrite_marker,
         )
+
+
+def _validate_in_place_initialization_target(vault_path: Path) -> None:
+    marker = vault_path / VAULT_IDENTITY_FILENAME
+    if os.path.lexists(marker):
+        raise VaultLifecycleError(
+            "identity_marker_conflict",
+            "文件夹中已有无效或冲突的知识库身份标记，未进行任何覆盖。",
+        )
+    index = vault_path / "index.md"
+    if index.exists() and not index.is_file():
+        raise VaultLifecycleError(
+            "vault_index_conflict",
+            "文件夹中的 index.md 不是普通文件，无法安全初始化。",
+        )
+    for relative in MINIMAL_VAULT_DIRECTORIES:
+        target = vault_path / relative
+        if target.exists() and not target.is_dir():
+            raise VaultLifecycleError(
+                "vault_directory_conflict",
+                f"文件夹中的 {relative} 不是目录，无法安全初始化。",
+            )
 
 
 def _validate_minimal_vault(vault_path: Path, expected_identity: dict[str, Any]) -> None:
     if not (vault_path / "index.md").is_file():
-        raise VaultLifecycleError("vault_validation_failed", "vault index was not created")
+        raise VaultLifecycleError("vault_validation_failed", "未能安全创建知识库索引。")
     for relative in MINIMAL_VAULT_DIRECTORIES:
         if not (vault_path / relative).is_dir():
-            raise VaultLifecycleError("vault_validation_failed", f"missing vault directory: {relative}")
+            raise VaultLifecycleError("vault_validation_failed", f"未能安全创建知识库目录：{relative}")
     state, identity = inspect_vault_identity(vault_path)
     if (
         state != "valid"
@@ -270,7 +342,7 @@ def _validate_minimal_vault(vault_path: Path, expected_identity: dict[str, Any])
         or identity["vaultId"] != str(expected_identity["vaultId"]).lower()
         or identity["userName"] != expected_identity["userName"]
     ):
-        raise VaultLifecycleError("vault_validation_failed", "vault identity marker validation failed")
+        raise VaultLifecycleError("vault_validation_failed", "知识库身份标记校验失败。")
 
 
 def _empty_registry() -> dict[str, Any]:
@@ -458,6 +530,7 @@ class VaultLifecycleManager:
             "activeVault": None,
             "obsidianRoots": [],
             "vaultCandidates": [],
+            "selection": None,
             "migration": None,
         }
         result.update(values)
@@ -500,7 +573,7 @@ class VaultLifecycleManager:
         path = _existing_directory(path, "vault_path")
         state, actual = inspect_vault_identity(path)
         if state != "valid" or not actual or actual["vaultId"] != identity["vaultId"]:
-            raise VaultLifecycleError("identity_mismatch", "vault identity changed before activation")
+            raise VaultLifecycleError("identity_mismatch", "知识库身份在连接前发生变化，请重新选择。")
         previous = self._registry()
         updated = json.loads(json.dumps(previous))
         updated["vaults"][identity["vaultId"]] = self._entry_payload(
@@ -536,7 +609,7 @@ class VaultLifecycleManager:
             return self._base_result(
                 "status",
                 state="first_use",
-                message="Create a new Agent-wiki vault before ingesting content.",
+                message="请选择一个文件夹作为 Agent-wiki 知识库。",
             )
         entry = registry["vaults"].get(active_id)
         if not isinstance(entry, dict):
@@ -544,7 +617,7 @@ class VaultLifecycleManager:
                 "status",
                 state="registry_invalid",
                 errorCode="active_vault_missing",
-                message="The active vault registry entry is missing.",
+                message="当前知识库记录不完整，请重新选择知识库。",
             )
         active = {
             "vaultId": active_id,
@@ -557,7 +630,7 @@ class VaultLifecycleManager:
             return self._base_result(
                 "status",
                 state="disconnected",
-                message="The saved vault path moved. Scan roots to reconnect by name and identity.",
+                message="原知识库位置已变化，正在按稳定身份重新扫描。",
                 activeVault=active,
             )
         if (
@@ -570,7 +643,7 @@ class VaultLifecycleManager:
                 "status",
                 state="identity_mismatch",
                 errorCode="identity_mismatch",
-                message="The path exists but its vault identity does not match the saved vault.",
+                message="当前路径的知识库身份与保存记录不一致，请重新选择。",
                 activeVault=active,
             )
         active["identityState"] = "valid"
@@ -579,7 +652,7 @@ class VaultLifecycleManager:
             ok=True,
             state="ready",
             requiresUserAction=False,
-            message="The Agent-wiki vault is ready.",
+            message="Agent-wiki 知识库已就绪。",
             activeVault=active,
         )
 
@@ -656,7 +729,7 @@ class VaultLifecycleManager:
                     paths.setdefault(str(child.resolve()), (child.resolve(), False))
 
         candidates: list[dict[str, Any]] = []
-        for path, from_registry in sorted(paths.values(), key=lambda item: str(item[0])):
+        for path, _from_registry in sorted(paths.values(), key=lambda item: str(item[0])):
             identity_state, identity = inspect_vault_identity(path)
             if identity_state == "valid" and identity:
                 match_state = "none"
@@ -675,18 +748,6 @@ class VaultLifecycleManager:
                     "matchState": match_state,
                     "supportedActions": ["switch"],
                 })
-            elif from_registry:
-                candidates.append({
-                    "candidateId": _candidate_id("existing", path),
-                    "kind": "existing_obsidian_vault",
-                    "vaultPath": str(path),
-                    "vaultId": "",
-                    "userName": "",
-                    "identityMarker": VAULT_IDENTITY_FILENAME,
-                    "identityState": identity_state,
-                    "matchState": "none",
-                    "supportedActions": ["migrate"],
-                })
         return candidates
 
     def _cache_candidates(
@@ -694,10 +755,23 @@ class VaultLifecycleManager:
         roots: list[dict[str, Any]],
         vaults: list[dict[str, Any]],
     ) -> None:
+        existing = _read_json(self.candidates_path) or {}
+        existing_items = (
+            existing.get("items")
+            if isinstance(existing.get("items"), dict)
+            and float(existing.get("expiresAtEpoch") or 0) >= time.time()
+            else {}
+        )
+        preserved = {
+            key: item
+            for key, item in existing_items.items()
+            if isinstance(item, dict) and item.get("kind") == "selected_folder"
+        }
         items = {
             item["candidateId"]: item
             for item in [*roots, *vaults]
         }
+        items.update(preserved)
         _atomic_json_write(self.candidates_path, {
             "contractVersion": CONTRACT_VERSION,
             "createdAtEpoch": time.time(),
@@ -735,24 +809,41 @@ class VaultLifecycleManager:
                     ok=True,
                     state="reconnected",
                     requiresUserAction=False,
-                    message="The moved vault was reconnected by matching user name and vault identity.",
+                    message="已通过稳定身份重新连接移动后的知识库。",
                     activeVault=active,
                 )
         elif current["state"] == "disconnected" and len(exact) > 1:
             current = self._base_result(
                 "scan",
                 state="ambiguous",
-                message="Multiple paths have the same user name and vault identity. Confirm one candidate.",
+                message="扫描到多个相同身份的知识库，未自动连接，请手动选择。",
                 activeVault=current.get("activeVault"),
             )
+        elif current["state"] == "first_use" and len(vaults) == 1:
+            selected = vaults[0]
+            identity_state, identity = inspect_vault_identity(selected["vaultPath"])
+            if identity_state == "valid" and identity:
+                active = self._activate(
+                    identity=identity,
+                    path=Path(selected["vaultPath"]),
+                    origin="auto_reconnected",
+                )
+                current = self._base_result(
+                    "scan",
+                    ok=True,
+                    state="reconnected",
+                    requiresUserAction=False,
+                    message="已自动重新连接唯一匹配的 Agent-wiki 知识库。",
+                    activeVault=active,
+                )
         elif current["state"] == "first_use":
             current = self._base_result(
                 "scan",
-                state="root_ready" if roots else "root_selection_required",
+                state="selection_required",
                 message=(
-                    "Choose an Obsidian root and create a new Agent-wiki vault."
-                    if roots
-                    else "No Obsidian root was found. Select the parent directory for the new vault."
+                    "扫描到多个有效身份的知识库，未自动连接，请点击“选择知识库”确认。"
+                    if len(vaults) > 1
+                    else "未自动连接知识库，请点击“选择知识库”选择一个文件夹。"
                 ),
             )
         else:
@@ -761,6 +852,132 @@ class VaultLifecycleManager:
         current["obsidianRoots"] = roots
         current["vaultCandidates"] = vaults
         return current
+
+    def _cache_selected_folder(self, vault: Path) -> dict[str, Any]:
+        selection_id = f"selection-{self._new_uuid()}"
+        existing = _read_json(self.candidates_path) or {}
+        items = existing.get("items") if isinstance(existing.get("items"), dict) else {}
+        items = dict(items)
+        selected = {
+            "candidateId": selection_id,
+            "kind": "selected_folder",
+            "vaultPath": str(vault),
+            "folderName": vault.name,
+        }
+        items[selection_id] = selected
+        _atomic_json_write(self.candidates_path, {
+            "contractVersion": CONTRACT_VERSION,
+            "createdAtEpoch": time.time(),
+            "expiresAtEpoch": time.time() + CANDIDATE_TTL_SECONDS,
+            "items": items,
+        })
+        return selected
+
+    def selection_interrupted(
+        self,
+        *,
+        state: str,
+        message: str,
+        error_code: str = "",
+    ) -> dict[str, Any]:
+        values: dict[str, Any] = {
+            "ok": state == "cancelled",
+            "state": state,
+            "requiresUserAction": False,
+            "message": message,
+        }
+        if error_code:
+            values["errorCode"] = error_code
+        return self._base_result("select_folder", **values)
+
+    def _initialize_selected_folder(self, vault: Path) -> dict[str, Any]:
+        _validate_in_place_initialization_target(vault)
+        identity = {
+            "vaultId": self._new_uuid(),
+            "userName": normalize_user_name(vault.name),
+            "createdAt": _now_iso(),
+        }
+        _ensure_minimal_vault_structure(
+            vault,
+            identity=identity,
+            overwrite_marker=False,
+        )
+        _validate_minimal_vault(vault, identity)
+        active = self._activate(identity=identity, path=vault, origin="selected_initialized")
+        return self._base_result(
+            "select_folder",
+            ok=True,
+            state="initialized",
+            requiresUserAction=False,
+            message="已在所选文件夹中补齐 Agent-wiki 必要结构，已有内容保持不变。",
+            activeVault=active,
+        )
+
+    def select_folder(self, *, vault_path: Path | str) -> dict[str, Any]:
+        vault = _existing_directory(vault_path, "selected_folder")
+        if not os.access(vault, os.W_OK):
+            raise VaultLifecycleError("selected_folder_not_writable", "所选文件夹不可写，请选择其他文件夹。")
+        identity_state, identity = inspect_vault_identity(vault)
+        if identity_state == "valid" and identity:
+            active = self._activate(identity=identity, path=vault, origin="selected")
+            return self._base_result(
+                "select_folder",
+                ok=True,
+                state="selected",
+                requiresUserAction=False,
+                message="已选择并连接 Agent-wiki 知识库。",
+                activeVault=active,
+            )
+        if identity_state == "invalid":
+            raise VaultLifecycleError(
+                "identity_marker_invalid",
+                "所选文件夹中的 Agent-wiki 身份标记无效，未修改任何内容。",
+            )
+        try:
+            non_empty = next(vault.iterdir(), None) is not None
+        except OSError as exc:
+            raise VaultLifecycleError("selected_folder_unreadable", "无法读取所选文件夹。") from exc
+        if not non_empty:
+            return self._initialize_selected_folder(vault)
+        selected = self._cache_selected_folder(vault)
+        return self._base_result(
+            "select_folder",
+            ok=True,
+            state="confirmation_required",
+            requiresUserAction=True,
+            message="所选文件夹已有内容。确认后只会补齐缺失的 Agent-wiki 必要结构，不会覆盖、复制、迁移或删除任何已有文件。",
+            selection={
+                "selectionId": selected["candidateId"],
+                "folderName": selected["folderName"],
+                "nonEmpty": True,
+                "identityState": "missing",
+            },
+        )
+
+    def confirm_selection(self, *, selection_id: str) -> dict[str, Any]:
+        candidate = self._cached_candidate(selection_id)
+        if candidate.get("kind") != "selected_folder":
+            raise VaultLifecycleError("selection_invalid", "选择记录无效，请重新选择文件夹。")
+        vault = _existing_directory(candidate.get("vaultPath", ""), "selected_folder")
+        identity_state, identity = inspect_vault_identity(vault)
+        if identity_state == "valid" and identity:
+            active = self._activate(identity=identity, path=vault, origin="selected_confirmed")
+            return self._base_result(
+                "select_confirm",
+                ok=True,
+                state="selected",
+                requiresUserAction=False,
+                message="已选择并连接 Agent-wiki 知识库。",
+                activeVault=active,
+            )
+        if identity_state == "invalid":
+            raise VaultLifecycleError(
+                "identity_marker_invalid",
+                "确认前知识库身份标记已发生变化，未修改任何内容。",
+            )
+        initialized = self._initialize_selected_folder(vault)
+        initialized["operation"] = "select_confirm"
+        return initialized
 
     def _resolve_target(
         self,
@@ -916,10 +1133,10 @@ class VaultLifecycleManager:
     def _cached_candidate(self, candidate_id: str) -> dict[str, Any]:
         payload = _read_json(self.candidates_path) or {}
         if float(payload.get("expiresAtEpoch") or 0) < time.time():
-            raise VaultLifecycleError("candidate_expired", "The candidate expired. Scan again before confirming.")
+            raise VaultLifecycleError("candidate_expired", "选择记录已过期，请重新选择文件夹。")
         candidate = (payload.get("items") or {}).get(str(candidate_id or ""))
         if not isinstance(candidate, dict):
-            raise VaultLifecycleError("candidate_not_found", "The candidate was not found. Scan again.")
+            raise VaultLifecycleError("candidate_not_found", "未找到选择记录，请重新选择文件夹。")
         return candidate
 
     def confirm_candidate(
@@ -1221,6 +1438,10 @@ def dispatch_vault_lifecycle(
                 user_name=payload.get("userName", ""),
                 parent_hints=payload.get("parentHints") or (),
             )
+        if message_type == "vault_select_folder":
+            return manager.select_folder(vault_path=payload.get("selectedPath", ""))
+        if message_type == "vault_select_confirm":
+            return manager.confirm_selection(selection_id=payload.get("selectionId", ""))
         if message_type == "vault_create":
             return manager.create(
                 user_name=payload.get("userName", ""),

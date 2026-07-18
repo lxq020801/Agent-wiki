@@ -1819,19 +1819,24 @@ def test_websocket_config_writer(tmp: Path) -> None:
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
     from config_loader import load_config
+    from install.vault_lifecycle import VaultLifecycleManager
 
     vault = tmp / "ws-vault"
     vault.mkdir()
-    (vault / ".obsidian").mkdir()
-    (vault / "index.md").write_text("# 知识库索引\n", encoding="utf-8")
     server = LibrarianServer()
+    selected = VaultLifecycleManager(
+        runtime_root=tmp / "ws-runtime",
+        config_path=tmp / "ws-runtime" / "config.toml",
+        registry_vault_provider=lambda: [],
+        obsidian_root_provider=lambda: [],
+    ).select_folder(vault_path=vault)
+    assert selected["state"] == "initialized"
     asyncio.run(server.handle_config_update({
         "llm": {
             "provider": "doubao",
             "apiKey": "test-key",
             "endpoint": "https://ark.cn-beijing.volces.com/api/v3",
         },
-        "vaultPath": str(vault),
         "videoAnalysis": {
             "modelPreset": "lite",
             "analyzerModel": "doubao-seed-2-0-lite-260428",
@@ -3544,19 +3549,24 @@ def test_websocket_config_writer_uses_explicit_ark_key_when_old_provider_present
     sys.path.insert(0, str(ROOT / "server"))
     from websocket_server import LibrarianServer
     from config_loader import load_config
+    from install.vault_lifecycle import VaultLifecycleManager
 
     vault = tmp / "ws-vault-plan-fallback"
     vault.mkdir()
-    (vault / ".obsidian").mkdir()
-    (vault / "index.md").write_text("# 知识库索引\n", encoding="utf-8")
 
     server = LibrarianServer()
+    selected = VaultLifecycleManager(
+        runtime_root=runtime,
+        config_path=runtime / "config.toml",
+        registry_vault_provider=lambda: [],
+        obsidian_root_provider=lambda: [],
+    ).select_folder(vault_path=vault)
+    assert selected["state"] == "initialized"
     asyncio.run(server.handle_config_update({
         "provider": "volcengine_agent_plan",
         "arkApiKey": "normal-ark-key",
         "apiKey": "",
         "model": "doubao-seed-2.0-lite",
-        "vaultPath": str(vault),
     }))
 
     cfg = load_config(runtime / "config.toml")

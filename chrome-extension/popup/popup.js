@@ -23,6 +23,8 @@ const DEFAULT_MODEL_PRESET = 'lite';
 const DEFAULT_TASK_CONCURRENCY = 2;
 const DEFAULT_CHUNK_CONCURRENCY = 2;
 const POPUP_ROUTE_STORAGE_KEY = 'popupRoute';
+const FIRST_RUN_COLLAPSED_STORAGE_KEY = 'firstRunGuideCollapsed';
+const AGENT_START_COMMAND = './agent-wiki start';
 const LEGACY_GITHUB_ROUTE = 'github';
 const POPUP_VIEWS = Object.freeze({
   HOME: 'home-view',
@@ -45,13 +47,8 @@ const GITHUB_MESSAGE_TYPES = Object.freeze({
   REFRESH_CANCEL: 'github_refresh_cancel'
 });
 const VAULT_MESSAGE_TYPES = Object.freeze({
-  SCAN: 'vault_scan',
-  CREATE: 'vault_create',
-  SWITCH: 'vault_switch',
-  CANDIDATE_CONFIRM: 'vault_candidate_confirm',
-  MIGRATION_PREVIEW: 'vault_migration_preview',
-  MIGRATION_EXECUTE: 'vault_migration_execute',
-  MIGRATION_ROLLBACK: 'vault_migration_rollback'
+  SELECT_FOLDER: 'vault_select_folder',
+  SELECT_CONFIRM: 'vault_select_confirm'
 });
 const TRUSTED_ARK_HOSTS = new Set(['ark.cn-beijing.volces.com']);
 const SETTINGS_DETAIL_TITLES = {
@@ -106,13 +103,16 @@ let githubRefresh = null;
 let githubIsConfigured = false;
 let githubIsAuthenticated = false;
 let githubValidationRequestedForConnection = false;
+let firstRunCollapsed = false;
+const setupState = {
+  api: { configured: false, verified: false, checkState: 'unchecked' },
+  vault: { configured: false, verified: false, checkState: 'unchecked' },
+  cookie: { configured: false, pending: false, verified: false, checkState: 'unchecked' },
+  github: { configured: false, verified: false }
+};
 let vaultWorkflow = {
-  mode: null,
   stage: 'idle',
-  candidates: [],
-  pendingConfirmation: false,
-  migrationId: '',
-  rollbackAvailable: false,
+  selectionId: '',
   pendingType: ''
 };
 
@@ -138,6 +138,193 @@ function initColorScheme() {
 
 function hasExtensionApis() {
   return typeof chrome !== 'undefined' && !!chrome.runtime?.sendMessage && !!chrome.storage?.local;
+}
+
+function serviceCanVerify() {
+  return Boolean(isAgentConnected && runtimeCompatibility?.canOperate);
+}
+
+function onboardingStepViews() {
+  const agentReady = serviceCanVerify();
+  return [
+    {
+      id: 'agent',
+      label: '本地 Agent 服务',
+      ready: agentReady,
+      state: agentReady
+        ? '已连接并通过版本校验'
+        : runtimeCompatibility && !runtimeCompatibility.canOperate
+          ? '已连接，版本校验未通过'
+          : isAgentConnected ? '已连接，版本待校验' : '未连接，先启动本地服务',
+      action: '处理'
+    },
+    {
+      id: 'api',
+      label: 'Ark API',
+      ready: setupState.api.verified,
+      state: setupState.api.verified
+        ? '服务已验证连接'
+        : setupState.api.configured
+          ? !agentReady
+            ? '已配置，待 Agent 检查'
+            : ['configured', 'unchecked'].includes(setupState.api.checkState)
+              ? '已配置，等待测试'
+              : '已配置，检查未通过'
+          : '未配置',
+      action: '配置'
+    },
+    {
+      id: 'vault',
+      label: '知识库',
+      ready: setupState.vault.verified,
+      state: setupState.vault.verified
+        ? '服务已确认连接'
+        : setupState.vault.configured
+          ? agentReady ? '已配置，服务未确认' : '已配置，待 Agent 检查'
+          : '未连接',
+      action: '选择'
+    },
+    {
+      id: 'cookie',
+      label: '抖音 Cookie',
+      ready: setupState.cookie.verified,
+      state: setupState.cookie.verified
+        ? '服务已确认同步'
+        : setupState.cookie.pending
+          ? '已抓取，待同步'
+          : setupState.cookie.configured
+            ? !agentReady
+              ? '已同步，待 Agent 检查'
+              : setupState.cookie.checkState === 'incomplete'
+                ? '同步不完整，请重新抓取'
+                : '已同步，服务未确认'
+            : '未同步',
+      action: '同步'
+    },
+    {
+      id: 'github',
+      label: 'GitHub（可选）',
+      optional: true,
+      ready: setupState.github.verified,
+      state: setupState.github.verified
+        ? '已登录'
+        : setupState.github.configured
+          ? '待 Agent 检查，不影响完成'
+          : '未登录，不影响完成',
+      action: '查看'
+    }
+  ];
+}
+
+function renderFirstRunGuide() {
+  const guide = document.getElementById('first-run-guide');
+  if (!guide || typeof guide.querySelector !== 'function') return;
+  const steps = onboardingStepViews();
+  const required = steps.filter(step => !step.optional);
+  const next = required.find(step => !step.ready) || null;
+  const requiredComplete = !next;
+  const summary = requiredComplete
+    ? '必填项已完成，GitHub 可稍后连接'
+    : `下一步：${next.label}`;
+  document.getElementById('first-run-summary').textContent = summary;
+
+  for (const step of steps) {
+    const row = guide.querySelector(`[data-onboarding-step="${step.id}"]`);
+    const state = document.getElementById(`onboarding-${step.id}-state`);
+    const action = row?.querySelector('.onboarding-step-action');
+    row?.classList.toggle('complete', step.ready);
+    if (state) state.textContent = step.state;
+    if (action) {
+      action.textContent = step.ready ? '完成' : step.action;
+      action.disabled = step.ready;
+      action.setAttribute('aria-label', `${step.action}${step.label}`);
+    }
+  }
+
+  const list = document.getElementById('first-run-steps');
+  const reminder = document.getElementById('first-run-reminder');
+  const toggle = document.getElementById('toggle-first-run');
+  list.hidden = firstRunCollapsed;
+  reminder.hidden = !firstRunCollapsed;
+  toggle.textContent = firstRunCollapsed ? '展开' : '收起';
+  toggle.setAttribute('aria-expanded', firstRunCollapsed ? 'false' : 'true');
+  if (firstRunCollapsed) {
+    document.getElementById('first-run-reminder-dot').className =
+      `status-dot inline-dot ${requiredComplete ? 'online' : 'warning'}`;
+    document.getElementById('first-run-reminder-title').textContent =
+      requiredComplete ? '首次配置已完成' : `待完成：${next.label}`;
+    document.getElementById('first-run-reminder-copy').textContent =
+      requiredComplete ? 'GitHub 为可选项' : next.state;
+    const action = document.getElementById('first-run-next-action');
+    action.hidden = requiredComplete;
+    action.disabled = requiredComplete;
+    action.dataset.onboardingAction = next?.id || '';
+    action.textContent = next?.action || '处理';
+  }
+}
+
+async function loadFirstRunPreference() {
+  const stored = await chrome.storage.local.get([FIRST_RUN_COLLAPSED_STORAGE_KEY]);
+  firstRunCollapsed = stored[FIRST_RUN_COLLAPSED_STORAGE_KEY] === true;
+  renderFirstRunGuide();
+}
+
+async function toggleFirstRunGuide() {
+  firstRunCollapsed = !firstRunCollapsed;
+  renderFirstRunGuide();
+  await chrome.storage.local.set({ [FIRST_RUN_COLLAPSED_STORAGE_KEY]: firstRunCollapsed });
+}
+
+function runOnboardingAction(action) {
+  const target = String(action || '');
+  if (target === 'agent') openSettingsDetail('agent-settings');
+  else if (target === 'api') openSettingsDetail('api-settings');
+  else if (target === 'vault') openSettingsDetail('vault-settings');
+  else if (target === 'cookie') openSettingsDetail('cookie-settings');
+  else if (target === 'github') openGithubPage();
+}
+
+async function copyPlainText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const input = document.createElement('textarea');
+  input.value = text;
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.select();
+  const copied = document.execCommand('copy');
+  input.remove();
+  if (!copied) throw new Error('clipboard unavailable');
+}
+
+async function copyAgentStartCommand() {
+  try {
+    await copyPlainText(AGENT_START_COMMAND);
+    showHint('agent-recovery-hint', '启动命令已复制', 'success');
+  } catch (_err) {
+    showHint('agent-recovery-hint', '复制失败，请手动选择命令', 'error', { persist: true });
+  }
+}
+
+function retryAgentConnection() {
+  const button = document.getElementById('retry-agent-connection');
+  button.disabled = true;
+  showHint('agent-recovery-hint', '正在重试本地连接', 'warning', { persist: true });
+  if (ws?.readyState === WebSocket.OPEN) {
+    runtimeCompatibility = null;
+    updateConnectionStatus(true);
+    ws.send(JSON.stringify(withOperationContext(RuntimeVersion.buildHandshake('agent-wiki-extension'))));
+    requestStatus();
+  } else if (ws?.readyState !== WebSocket.CONNECTING) {
+    connectWebSocket();
+  }
+  setTimeout(() => {
+    button.disabled = false;
+    if (serviceCanVerify()) showHint('agent-recovery-hint', 'Agent 已连接', 'success');
+  }, 1200);
 }
 
 function normalizeProvider(value) {
@@ -290,8 +477,7 @@ async function buildAgentConfig({ requireApiKey = false } = {}) {
     'arkStrategyModel',
     'serverTaskConcurrency',
     'taskConcurrency',
-    'videoChunkConcurrency',
-    'vaultPath'
+    'videoChunkConcurrency'
   ]);
   const provider = normalizeProvider(stored.llmProvider || stored.provider);
   const keys = providerStorageKeys(provider);
@@ -334,7 +520,6 @@ async function buildAgentConfig({ requireApiKey = false } = {}) {
     endpoint: endpointResult.endpoint,
     arkEndpoint: endpointResult.endpoint
   };
-  if (stored.vaultPath) data.vaultPath = stored.vaultPath;
   return data;
 }
 
@@ -604,7 +789,11 @@ function handleAgentMessage(msg) {
       if (msg.status) {
         applyCookieStatus(msg.status);
       } else {
+        setupState.cookie.configured = true;
+        setupState.cookie.pending = false;
+        setupState.cookie.verified = serviceCanVerify();
         setStatus('cookie', '已同步', 'online', formatDateTime(msg.timestamp || new Date().toISOString()));
+        renderFirstRunGuide();
       }
       break;
     case 'vault_lifecycle_status':
@@ -693,6 +882,7 @@ function applyRuntimeCompatibility(msg, override = null) {
     runtimeCompatibility.canOperate ? 'success' : runtimeCompatibility.tone === 'offline' ? 'error' : 'warning',
     { persist: true }
   );
+  renderFirstRunGuide();
   return runtimeCompatibility;
 }
 
@@ -714,23 +904,45 @@ function applyStatusSnapshot(status) {
 function applyVaultStatus(status) {
   const currentPath = document.getElementById('vault-current-path');
   const activeVault = status.activeVault || {};
-  if (status.ok || status.state === 'ready' || activeVault.vaultPath) {
-    const path = activeVault.vaultPath || status.path || status.vaultPath || '';
+  const state = String(status.state || '').toLowerCase();
+  const path = activeVault.vaultPath || status.path || status.vaultPath || '';
+  setupState.vault.configured = Boolean(path);
+  setupState.vault.checkState = state || 'unchecked';
+  const connected = Boolean(
+    serviceCanVerify() &&
+    path &&
+    status.ok !== false &&
+    ['ready', 'selected', 'initialized', 'reconnected', 'switched', 'created'].includes(state)
+  );
+  setupState.vault.verified = connected;
+  if (connected) {
     if (currentPath) {
       currentPath.textContent = path || '已连接';
       currentPath.title = path;
     }
     chrome.storage.local.set({ vaultPath: path, vaultSyncedAt: new Date().toISOString() });
     setStatus('vault', '已连接', 'online');
-    showHint('vault-hint', `来源：${status.source || 'Agent 自动识别'}`, 'success', { persist: true });
+    showHint('vault-hint', status.message || '知识库已连接。', 'success', { persist: true });
+    renderFirstRunGuide();
+    return;
+  }
+  if (path) {
+    if (currentPath) {
+      currentPath.textContent = '已配置，待 Agent 检查';
+      currentPath.title = path;
+    }
+    setStatus('vault', '已配置，待检查', 'warning');
+    renderFirstRunGuide();
     return;
   }
   if (currentPath) {
     currentPath.textContent = '尚未连接';
     currentPath.title = '';
   }
+  if (serviceCanVerify()) chrome.storage.local.set({ vaultPath: '' });
   setStatus('vault', '待识别', 'warning');
   if (status.message) showHint('vault-hint', status.message, 'warning', { persist: true });
+  renderFirstRunGuide();
 }
 
 function applyModelStatus(status) {
@@ -740,11 +952,19 @@ function applyModelStatus(status) {
     document.getElementById('endpoint-url').value = status.endpoint;
     chrome.storage.local.set({ arkEndpoint: status.endpoint, endpoint: status.endpoint });
   }
-  if (status.state === 'missing') {
+  const state = String(status.state || '').toLowerCase();
+  setupState.api.checkState = state || 'unchecked';
+  const ready = serviceCanVerify() && Boolean(status.ok || state === 'ready');
+  setupState.api.verified = ready;
+  if (state === 'missing') setupState.api.configured = false;
+  else if (status.ok || state) setupState.api.configured = true;
+  if (state === 'missing') {
     setStatus('api', '缺少 Key', 'warning', formatDateTime(status.checkedAt));
-  } else if (status.ok || status.state === 'ready') {
+  } else if (ready) {
     setStatus('api', '已连接', 'online', formatDateTime(status.checkedAt));
-  } else if (status.state === 'configured') {
+  } else if (setupState.api.configured && !serviceCanVerify()) {
+    setStatus('api', '已配置，待检查', 'warning', formatDateTime(status.checkedAt));
+  } else if (state === 'configured') {
     setStatus('api', '待测试', 'warning', formatDateTime(status.checkedAt));
   } else {
     setStatus('api', status.message || '连接异常', 'offline', formatDateTime(status.checkedAt));
@@ -753,6 +973,7 @@ function applyModelStatus(status) {
     const type = status.ok ? 'success' : status.state === 'missing' ? 'warning' : 'error';
     showHint('model-hint', `${info.shortLabel}: ${status.message}；该检查不等于视频端到端验证。`, type, { persist: true });
   }
+  renderFirstRunGuide();
 }
 
 function applyVideoStatus(status) {
@@ -774,18 +995,28 @@ function applyVideoStatus(status) {
 }
 
 function applyCookieStatus(status) {
-  if (status.ok || status.state === 'ready') {
+  const state = String(status.state || '').toLowerCase();
+  setupState.cookie.checkState = state || 'unchecked';
+  const ready = serviceCanVerify() && Boolean(status.ok || state === 'ready');
+  setupState.cookie.verified = ready;
+  setupState.cookie.pending = false;
+  if (state === 'missing') setupState.cookie.configured = false;
+  else if (status.ok || state) setupState.cookie.configured = true;
+  if (ready) {
     setStatus('cookie', '已同步', 'online', formatDateTime(status.updatedAt));
     document.getElementById('cookie-settings-copy').textContent = `上次同步：${formatDateTime(status.updatedAt) || '刚刚'}`;
-  } else if (status.state === 'incomplete') {
+  } else if (setupState.cookie.configured && !serviceCanVerify()) {
+    setStatus('cookie', '已同步，待检查', 'warning', formatDateTime(status.updatedAt));
+  } else if (state === 'incomplete') {
     setStatus('cookie', '不完整', 'warning', formatDateTime(status.updatedAt));
     showHint('cookie-hint', status.message || '请登录抖音后重新抓取', 'warning', { persist: true });
-  } else if (status.state === 'missing') {
+  } else if (state === 'missing') {
     setStatus('cookie', '未同步', isAgentConnected ? 'warning' : 'offline', formatDateTime(status.updatedAt));
     showHint('cookie-hint', status.message || '请打开抖音网页版登录后抓取 Cookie', 'warning', { persist: true });
   } else {
     setStatus('cookie', status.message || '状态未知', 'warning', formatDateTime(status.updatedAt));
   }
+  renderFirstRunGuide();
 }
 
 function githubConfigured(status) {
@@ -794,10 +1025,12 @@ function githubConfigured(status) {
 
 function applyGithubStatus(status) {
   const configured = githubConfigured(status);
-  const authenticated = Boolean(status.authenticated);
+  const authenticated = status.state !== 'unavailable' && Boolean(status.authenticated);
   const pending = ['checking', 'unchecked', 'unavailable'].includes(status.state);
   githubIsConfigured = configured;
   githubIsAuthenticated = authenticated;
+  setupState.github.configured = configured;
+  setupState.github.verified = authenticated;
   const account = status.account || {};
   const login = account.login || '';
   const homeSummary = document.getElementById('home-github-summary');
@@ -877,6 +1110,7 @@ function applyGithubStatus(status) {
   } else if (authenticated && !githubAuthFlow) {
     showHint('github-hint', login ? `GitHub 已连接：@${login}` : 'GitHub 已连接', 'success', { persist: true });
   }
+  renderFirstRunGuide();
 }
 
 function clearGithubAuthFlow() {
@@ -1665,7 +1899,6 @@ async function loadConfig() {
     'provider',
     'arkEndpoint',
     'endpoint',
-    'vaultPath',
     'videoAnalysisModelPreset',
     'videoAnalysisModel',
     'model',
@@ -1674,6 +1907,7 @@ async function loadConfig() {
     'serverTaskConcurrency',
     'taskConcurrency',
     'cookieSyncedAt',
+    'vaultPath',
     'modelStatus',
     'videoAnalysisStatus'
   ]);
@@ -1682,19 +1916,23 @@ async function loadConfig() {
   document.getElementById('api-key').value = readStoredApiKey(result);
   setControlValue('provider', provider);
   document.getElementById('endpoint-url').value = result.arkEndpoint || result.endpoint || info.endpoint;
-  const currentPath = document.getElementById('vault-current-path');
-  if (currentPath && result.vaultPath) {
-    currentPath.textContent = result.vaultPath;
-    currentPath.title = result.vaultPath;
-  }
   setControlValue('analysis-model-preset', readStoredModelPreset(result));
   setControlValue('analysis-model-id', readStoredModelId(result));
   setControlValue('task-concurrency', normalizeTaskConcurrency(result.serverTaskConcurrency || result.taskConcurrency));
   setControlValue('chunk-concurrency', normalizeChunkConcurrency(result.videoChunkConcurrency));
   updateVideoSettingsSummary();
-  if (result.modelStatus) applyModelStatus(result.modelStatus);
+  setupState.api.configured = Boolean(readStoredApiKey(result));
+  setupState.vault.configured = Boolean(result.vaultPath);
+  setupState.cookie.configured = Boolean(result.cookieSyncedAt);
+  if (result.vaultPath) {
+    const currentPath = document.getElementById('vault-current-path');
+    currentPath.textContent = '已配置，待 Agent 检查';
+    currentPath.title = result.vaultPath;
+    setStatus('vault', '已配置，待检查', 'warning');
+  }
   if (result.videoAnalysisStatus) applyVideoStatus(result.videoAnalysisStatus);
   if (readStoredApiKey(result)) setStatus('api', '待测试', 'warning');
+  renderFirstRunGuide();
 }
 
 async function collectConfig() {
@@ -1736,6 +1974,11 @@ async function persistConfigLocally() {
 async function saveApiConfig() {
   try {
     const config = await persistConfigLocally();
+    setupState.api.configured = Boolean(config.apiKey);
+    setupState.api.verified = false;
+    setupState.api.checkState = 'configured';
+    if (config.apiKey) setStatus('api', '已配置，待检查', 'warning');
+    renderFirstRunGuide();
     const agentConfig = await buildAgentConfig({ requireApiKey: false });
     const sent = sendToAgent({ type: 'config_update', data: agentConfig });
     if (!config.apiKey) {
@@ -1959,108 +2202,6 @@ async function submitDouyinIngestFromPopup() {
   }
 }
 
-function normalizeVaultCandidates(status) {
-  const roots = Array.isArray(status.obsidianRoots) ? status.obsidianRoots : [];
-  const vaults = Array.isArray(status.vaultCandidates) ? status.vaultCandidates : [];
-  const source = vaultWorkflow.mode === 'switch'
-    ? vaults.filter(item => !Array.isArray(item?.supportedActions) || item.supportedActions.includes('switch'))
-    : roots.length ? roots : (status.candidates || status.roots || status.matches || status.scan?.candidates || []);
-  if (!Array.isArray(source)) return [];
-  return source.map((candidate, index) => {
-    const item = typeof candidate === 'string' ? { path: candidate } : (candidate || {});
-    const id = String(item.id || item.candidateId || item.key || '');
-    const path = String(item.obsidianRoot || item.parentDirectory || item.path || item.rootPath || item.vaultPath || '');
-    const label = String(item.label || item.userName || item.name || path || `候选 ${index + 1}`);
-    return {
-      id,
-      path,
-      label,
-      kind: String(item.kind || ''),
-      obsidianRoot: String(item.obsidianRoot || ''),
-      parentDirectory: String(item.parentDirectory || ''),
-      vaultPath: String(item.vaultPath || ''),
-      vaultId: String(item.vaultId || ''),
-      key: id || path || `candidate-${index}`,
-      requiresConfirmation: Boolean(item.ambiguous || item.requiresConfirmation || item.confirmationRequired)
-    };
-  });
-}
-
-function selectedVaultCandidate() {
-  const key = document.getElementById('vault-candidate-select').value;
-  return vaultWorkflow.candidates.find(candidate => candidate.key === key) || null;
-}
-
-function setVaultWorkflowCandidates(candidates) {
-  vaultWorkflow.candidates = candidates;
-  const select = document.getElementById('vault-candidate-select');
-  select.replaceChildren();
-  if (!candidates.length) {
-    const option = document.createElement('option');
-    option.value = '';
-    option.textContent = '没有可用候选';
-    select.appendChild(option);
-    select.disabled = true;
-  } else {
-    for (const candidate of candidates) {
-      const option = document.createElement('option');
-      option.value = candidate.key;
-      option.textContent = candidate.path && candidate.path !== candidate.label
-        ? `${candidate.label} · ${candidate.path}`
-        : candidate.label;
-      select.appendChild(option);
-    }
-    select.disabled = false;
-  }
-  updateVaultWorkflowPrimary();
-}
-
-function resetVaultWorkflow(mode) {
-  vaultWorkflow = {
-    mode,
-    stage: mode ? 'scanning' : 'idle',
-    candidates: [],
-    pendingConfirmation: false,
-    migrationId: '',
-    rollbackAvailable: false,
-    pendingType: ''
-  };
-}
-
-function openVaultWorkflow(mode) {
-  resetVaultWorkflow(mode);
-  const modal = document.getElementById('vault-workflow-modal');
-  const details = {
-    create: ['新建知识库', '选择根候选并为知识库命名。'],
-    switch: ['切换知识库', '选择 Agent 扫描到的知识库候选。'],
-    migrate: ['迁移现有知识库', '先选择目标根目录并预览迁移，再决定是否执行。']
-  }[mode];
-  document.getElementById('vault-workflow-title').textContent = details[0];
-  document.getElementById('vault-workflow-copy').textContent = details[1];
-  document.getElementById('vault-candidate-label').textContent = mode === 'switch' ? '知识库候选' : '根目录候选';
-  document.getElementById('vault-candidate-copy').textContent = '候选位置由本地 Agent 扫描提供。';
-  document.getElementById('vault-name-field').hidden = mode === 'switch';
-  document.getElementById('vault-name').value = '';
-  document.getElementById('vault-confirmation').hidden = true;
-  document.getElementById('vault-migration-summary').hidden = true;
-  document.getElementById('rollback-vault-migration').hidden = true;
-  document.getElementById('confirm-vault-workflow').hidden = false;
-  document.getElementById('confirm-vault-workflow').textContent = mode === 'create'
-    ? '创建知识库'
-    : mode === 'switch' ? '切换到所选知识库' : '预览迁移';
-  document.getElementById('cancel-vault-workflow').textContent = '取消';
-  showHint('vault-workflow-hint', '正在扫描候选位置', 'warning', { persist: true });
-  setVaultWorkflowCandidates([]);
-  modal.hidden = false;
-  requestAnimationFrame(() => document.getElementById('close-vault-workflow')?.focus({ preventScroll: true }));
-  requestVaultLifecycle(VAULT_MESSAGE_TYPES.SCAN, { purpose: mode }, '正在扫描候选位置');
-}
-
-function closeVaultWorkflow() {
-  document.getElementById('vault-workflow-modal').hidden = true;
-  resetVaultWorkflow(null);
-}
-
 function requestVaultLifecycle(type, payload, pendingCopy) {
   const sent = sendToAgent({
     type,
@@ -2070,269 +2211,98 @@ function requestVaultLifecycle(type, payload, pendingCopy) {
   });
   if (!sent) {
     setStatus('vault', runtimeCompatibility ? '版本未通过' : 'Agent 未连接', 'offline');
-    showHint('vault-workflow-hint', runtimeUnavailableMessage(), 'warning', { persist: true });
     showHint('vault-hint', runtimeUnavailableMessage(), 'warning', { persist: true });
     return false;
   }
-  document.getElementById('confirm-vault-workflow').disabled = true;
-  document.getElementById('rollback-vault-migration').disabled = true;
+  document.getElementById('select-knowledge-base').disabled = true;
   vaultWorkflow.pendingType = type;
   setStatus('vault', pendingCopy, 'warning');
-  showHint('vault-workflow-hint', pendingCopy, 'warning', { persist: true });
+  showHint('vault-hint', pendingCopy, 'warning', { persist: true });
   return true;
 }
 
-function updateVaultWorkflowPrimary() {
-  const button = document.getElementById('confirm-vault-workflow');
-  if (!button || button.hidden) return;
-  if (vaultWorkflow.stage === 'scanning') {
-    button.disabled = true;
-    return;
-  }
-  if (vaultWorkflow.stage === 'preview') {
-    button.disabled = false;
-    return;
-  }
-  const candidate = selectedVaultCandidate();
-  if (vaultWorkflow.pendingConfirmation) {
-    button.disabled = !candidate;
-    return;
-  }
-  const name = document.getElementById('vault-name').value.trim();
-  button.disabled = !candidate || (vaultWorkflow.mode !== 'switch' && !name);
-}
-
-function buildVaultCreatePayload(candidate, name) {
-  const parent = candidate?.obsidianRoot
-    ? { obsidianRoot: candidate.obsidianRoot }
-    : { parentDirectory: candidate?.parentDirectory || candidate?.path || '' };
-  return {
-    userName: name,
-    ...parent
-  };
-}
-
-function buildVaultMigrationPreviewPayload(candidate, name, sourcePath) {
-  const parent = candidate?.obsidianRoot
-    ? { obsidianRoot: candidate.obsidianRoot }
-    : { parentDirectory: candidate?.parentDirectory || candidate?.path || '' };
-  return {
-    sourcePath,
-    userName: name,
-    ...parent
-  };
-}
-
-function confirmVaultWorkflow() {
-  const candidate = selectedVaultCandidate();
-  const name = document.getElementById('vault-name').value.trim();
-  if (vaultWorkflow.mode === 'create') {
-    if (!candidate || !name) {
-      showHint('vault-workflow-hint', '请选择根候选并填写知识库名称', 'warning', { persist: true });
-      return;
-    }
-    requestVaultLifecycle(
-      VAULT_MESSAGE_TYPES.CREATE,
-      buildVaultCreatePayload(candidate, name),
-      '正在创建知识库'
-    );
-    return;
-  }
-  if (vaultWorkflow.mode === 'switch') {
-    if (!candidate) {
-      showHint('vault-workflow-hint', '请选择要切换的知识库', 'warning', { persist: true });
-      return;
-    }
-    const confirmCandidate = vaultWorkflow.pendingConfirmation || candidate.requiresConfirmation;
-    requestVaultLifecycle(
-      confirmCandidate ? VAULT_MESSAGE_TYPES.CANDIDATE_CONFIRM : VAULT_MESSAGE_TYPES.SWITCH,
-      confirmCandidate
-        ? { candidateId: candidate.id, action: 'switch' }
-        : { vaultPath: candidate.vaultPath || candidate.path, expectedVaultId: candidate.vaultId || '' },
-      confirmCandidate ? '正在确认并切换知识库' : '正在切换知识库'
-    );
-    return;
-  }
-  if (vaultWorkflow.mode !== 'migrate') return;
-  if (vaultWorkflow.stage === 'preview') {
-    if (!vaultWorkflow.migrationId) {
-      showHint('vault-workflow-hint', '迁移预览缺少任务标识，无法执行', 'error', { persist: true });
-      return;
-    }
-    requestVaultLifecycle(
-      VAULT_MESSAGE_TYPES.MIGRATION_EXECUTE,
-      { migrationId: vaultWorkflow.migrationId },
-      '正在执行迁移'
-    );
-    return;
-  }
-  if (!candidate || !name) {
-    showHint('vault-workflow-hint', '请选择目标根候选并填写知识库名称', 'warning', { persist: true });
-    return;
-  }
-  const currentPath = document.getElementById('vault-current-path').title || '';
+function selectVaultFolder() {
+  vaultWorkflow = { stage: 'selecting', selectionId: '', pendingType: '' };
+  setupState.vault.verified = false;
+  renderFirstRunGuide();
   requestVaultLifecycle(
-    VAULT_MESSAGE_TYPES.MIGRATION_PREVIEW,
-    buildVaultMigrationPreviewPayload(candidate, name, currentPath),
-    '正在生成迁移预览'
+    VAULT_MESSAGE_TYPES.SELECT_FOLDER,
+    {},
+    '正在打开系统文件夹选择窗口'
   );
 }
 
-function rollbackVaultMigration() {
-  if (!vaultWorkflow.migrationId || !vaultWorkflow.rollbackAvailable) return;
-  requestVaultLifecycle(
-    VAULT_MESSAGE_TYPES.MIGRATION_ROLLBACK,
-    { migrationId: vaultWorkflow.migrationId },
-    '正在回退迁移'
-  );
+function closeVaultConfirmation() {
+  document.getElementById('vault-confirmation-modal').hidden = true;
+  vaultWorkflow = { stage: 'idle', selectionId: '', pendingType: '' };
+  document.getElementById('select-knowledge-base').disabled = false;
 }
 
-function renderVaultMigrationPreview(status) {
-  const preview = status.migration || status.preview || status;
-  const files = Number(preview.fileCount ?? preview.files?.length ?? 0);
-  const conflicts = Number(preview.conflictCount ?? preview.conflicts?.length ?? 0);
-  document.getElementById('vault-migration-files').textContent = `${files} 个`;
-  document.getElementById('vault-migration-conflicts').textContent = `${conflicts} 个`;
-  document.getElementById('vault-migration-target').textContent = preview.targetVault?.vaultPath || preview.targetPath || preview.destinationPath || '已选择目标';
-  const notes = document.getElementById('vault-migration-notes');
-  notes.replaceChildren();
-  for (const note of preview.notes || preview.warnings || []) {
-    const item = document.createElement('li');
-    item.textContent = typeof note === 'string' ? note : (note.message || note.path || '需要确认的迁移项');
-    notes.appendChild(item);
+function showVaultConfirmation(status) {
+  const selection = status.selection || {};
+  vaultWorkflow = {
+    stage: 'confirming',
+    selectionId: String(selection.selectionId || ''),
+    pendingType: ''
+  };
+  document.getElementById('vault-selection-folder').textContent = selection.folderName || '所选文件夹';
+  document.getElementById('vault-confirmation-copy').textContent = status.message ||
+    '确认后只会补齐缺失的 Agent-wiki 必要结构，已有内容不会被覆盖。';
+  showHint('vault-selection-hint', '', 'warning', { persist: true });
+  const modal = document.getElementById('vault-confirmation-modal');
+  modal.hidden = false;
+  const button = document.getElementById('confirm-vault-selection');
+  button.disabled = !vaultWorkflow.selectionId;
+  requestAnimationFrame(() => button.focus({ preventScroll: true }));
+}
+
+function confirmVaultSelection() {
+  if (!vaultWorkflow.selectionId) return;
+  const sent = requestVaultLifecycle(
+    VAULT_MESSAGE_TYPES.SELECT_CONFIRM,
+    { selectionId: vaultWorkflow.selectionId },
+    '正在安全初始化所选文件夹'
+  );
+  if (sent) {
+    document.getElementById('confirm-vault-selection').disabled = true;
+    showHint('vault-selection-hint', '正在确认所选文件夹', 'warning', { persist: true });
   }
-  document.getElementById('vault-migration-summary').hidden = false;
-  document.getElementById('vault-candidate-select').disabled = true;
-  document.getElementById('vault-name').disabled = true;
-  vaultWorkflow.stage = 'preview';
-  vaultWorkflow.migrationId = String(status.migrationId || preview.migrationId || '');
-  const button = document.getElementById('confirm-vault-workflow');
-  button.textContent = '执行迁移';
-  button.disabled = !vaultWorkflow.migrationId || preview.canExecute === false;
-  showHint(
-    'vault-workflow-hint',
-    status.message || '迁移预览已生成，请确认后执行',
-    conflicts || preview.canExecute === false ? 'warning' : 'success',
-    { persist: true }
-  );
-}
-
-function finishVaultWorkflow(status, copy) {
-  const path = status.activeVault?.vaultPath || status.path || status.vaultPath || status.targetPath || '';
-  if (path) applyVaultStatus({ ok: true, state: 'ready', path, source: status.source || '知识库管理' });
-  else setStatus('vault', copy, 'online');
-  vaultWorkflow.stage = 'completed';
-  document.getElementById('confirm-vault-workflow').hidden = true;
-  document.getElementById('cancel-vault-workflow').textContent = '完成';
-  showHint('vault-workflow-hint', status.message || copy, 'success', { persist: true });
 }
 
 function applyVaultLifecycleStatus(status) {
   const state = String(status.state || status.status || '').toLowerCase();
-  const action = String(status.action || status.operation || '').toLowerCase();
-  const pendingType = vaultWorkflow.pendingType;
-  const candidates = normalizeVaultCandidates(status);
-  if (candidates.length) setVaultWorkflowCandidates(candidates);
+  const operation = String(status.operation || '').toLowerCase();
+  document.getElementById('select-knowledge-base').disabled = false;
 
-  if (
-    status.ok &&
-    status.activeVault?.vaultPath &&
-    !status.requiresUserAction &&
-    (state === 'reconnected' || (state === 'ready' && action !== 'scan'))
-  ) {
-    vaultWorkflow.pendingType = '';
-    finishVaultWorkflow(status, state === 'reconnected' ? '知识库已重新连接' : '知识库已连接');
-    return;
-  }
-
-  if (
-    action === 'scan' ||
-    (vaultWorkflow.stage === 'scanning' && vaultWorkflow.mode) ||
-    ['scan_ready', 'candidates_ready', 'ambiguous'].includes(state)
-  ) {
-    vaultWorkflow.stage = 'selecting';
-    vaultWorkflow.pendingType = '';
-    vaultWorkflow.pendingConfirmation = state === 'ambiguous' && vaultWorkflow.mode === 'switch';
-    document.getElementById('vault-confirmation').hidden = !vaultWorkflow.pendingConfirmation;
-    if (vaultWorkflow.pendingConfirmation) {
-      document.getElementById('vault-confirmation-copy').textContent = status.message || '检测到多个可能位置，请确认所选知识库。';
-      document.getElementById('confirm-vault-workflow').textContent = '确认候选并切换';
-    }
-    document.getElementById('vault-candidate-copy').textContent = candidates.length > 1
-      ? `找到 ${candidates.length} 个候选，请核对后继续。`
-      : candidates.length === 1 ? '已找到 1 个候选。' : '没有找到可用候选。';
-    showHint(
-      'vault-workflow-hint',
-      status.message || (candidates.length ? '请选择候选后继续' : '没有找到可用候选位置'),
-      candidates.length ? 'success' : 'warning',
-      { persist: true }
-    );
-    updateVaultWorkflowPrimary();
+  if (state === 'cancelled') {
+    vaultWorkflow = { stage: 'idle', selectionId: '', pendingType: '' };
+    showHint('vault-hint', status.message || '已取消选择，知识库保持不变。', 'warning', { persist: true });
     return;
   }
 
   if (state === 'confirmation_required') {
-    vaultWorkflow.stage = 'confirming';
-    vaultWorkflow.pendingType = '';
-    vaultWorkflow.pendingConfirmation = true;
-    document.getElementById('vault-confirmation').hidden = false;
-    document.getElementById('vault-confirmation-copy').textContent = status.message || '检测到歧义，请确认所选知识库。';
-    document.getElementById('confirm-vault-workflow').textContent = '确认切换';
-    updateVaultWorkflowPrimary();
+    showVaultConfirmation(status);
     return;
   }
 
-  if (
-    status.migration &&
-    ['migration_ready', 'migration_conflict', 'migration_stale'].includes(state)
-  ) {
-    vaultWorkflow.pendingType = '';
-    renderVaultMigrationPreview(status);
+  if (status.ok && status.activeVault?.vaultPath) {
+    applyVaultStatus({ ...status, state: 'ready' });
+    closeVaultConfirmation();
     return;
   }
 
-  if (['migration_completed', 'migration_executed', 'migrated'].includes(state)) {
-    vaultWorkflow.migrationId = String(status.migration?.migrationId || status.migrationId || vaultWorkflow.migrationId || '');
-    vaultWorkflow.rollbackAvailable = Boolean(status.migration?.rollbackAvailable);
-    vaultWorkflow.pendingType = '';
-    finishVaultWorkflow(status, '知识库迁移已完成');
-    document.getElementById('rollback-vault-migration').hidden = !vaultWorkflow.rollbackAvailable;
-    document.getElementById('rollback-vault-migration').disabled = !vaultWorkflow.rollbackAvailable;
-    return;
-  }
-
-  if (['migration_rolled_back', 'rolled_back'].includes(state)) {
-    vaultWorkflow.pendingType = '';
-    finishVaultWorkflow(status, '迁移已回退');
-    if (!status.activeVault?.vaultPath) {
-      applyVaultStatus({ state: 'first_use', message: status.message || '迁移已回退，请重新选择知识库。' });
+  if (operation === 'scan') {
+    if (state === 'selection_required' || state === 'ambiguous') {
+      applyVaultStatus(status);
     }
-    document.getElementById('rollback-vault-migration').hidden = true;
     return;
   }
 
-  if (['created', 'switched', 'ready'].includes(state) && action !== 'scan') {
-    vaultWorkflow.pendingType = '';
-    finishVaultWorkflow(status, state === 'created' ? '知识库已创建' : '知识库已切换');
-    return;
-  }
-
-  if (status.ok === false || ['failed', 'error', 'rejected'].includes(state)) {
-    vaultWorkflow.pendingType = '';
-    if (pendingType === VAULT_MESSAGE_TYPES.MIGRATION_EXECUTE) {
-      vaultWorkflow.stage = 'preview';
-      document.getElementById('confirm-vault-workflow').hidden = false;
-      document.getElementById('confirm-vault-workflow').textContent = '执行迁移';
-    } else if (pendingType === VAULT_MESSAGE_TYPES.MIGRATION_ROLLBACK) {
-      vaultWorkflow.stage = 'completed';
-      document.getElementById('confirm-vault-workflow').hidden = true;
-      document.getElementById('rollback-vault-migration').hidden = false;
-      document.getElementById('rollback-vault-migration').disabled = false;
-    } else {
-      vaultWorkflow.stage = 'selecting';
-    }
-    showHint('vault-workflow-hint', status.message || '知识库操作失败', 'error', { persist: true });
-    updateVaultWorkflowPrimary();
+  const message = status.message || '知识库选择失败，请重试。';
+  showHint('vault-hint', message, 'error', { persist: true });
+  if (!document.getElementById('vault-confirmation-modal').hidden) {
+    showHint('vault-selection-hint', message, 'error', { persist: true });
+    document.getElementById('confirm-vault-selection').disabled = false;
   }
 }
 
@@ -2385,6 +2355,10 @@ async function grabCookie() {
       pendingCookieNames: cookies.map(c => c.name).join(', '),
       pendingCookieGrabbedAt: grabbedAt
     });
+    setupState.cookie.configured = true;
+    setupState.cookie.pending = true;
+    setupState.cookie.verified = false;
+    setupState.cookie.checkState = 'pending';
     const sent = sendToAgent({
       type: 'cookie_update',
       platform: 'douyin',
@@ -2397,6 +2371,7 @@ async function grabCookie() {
       'warning',
       { persist: true }
     );
+    renderFirstRunGuide();
   } catch (err) {
     setStatus('cookie', '抓取失败', 'offline');
     showHint('cookie-hint', err.message || 'Cookie 抓取失败', 'error', { persist: true });
@@ -2413,55 +2388,90 @@ async function refreshCookieStatusFromStorage() {
     const pendingAt = new Date(pending.pendingCookieGrabbedAt || 0).getTime();
     const syncedAt = new Date(local.cookieSyncedAt || 0).getTime();
     if (!local.cookieSyncedAt || pendingAt >= syncedAt) {
+      setupState.cookie.configured = true;
+      setupState.cookie.pending = true;
+      setupState.cookie.verified = false;
+      setupState.cookie.checkState = 'pending';
       setStatus('cookie', '待同步', 'warning', formatDateTime(pending.pendingCookieGrabbedAt));
+      renderFirstRunGuide();
       return;
     }
   }
   if (local.cookieSyncedAt) {
-    setStatus('cookie', '已同步', 'online', formatDateTime(local.cookieSyncedAt));
+    setupState.cookie.configured = true;
+    setupState.cookie.pending = false;
+    if (!serviceCanVerify()) setupState.cookie.verified = false;
+    setStatus(
+      'cookie',
+      setupState.cookie.verified ? '已同步' : '已同步，待检查',
+      setupState.cookie.verified ? 'online' : 'warning',
+      formatDateTime(local.cookieSyncedAt)
+    );
     document.getElementById('cookie-settings-copy').textContent = `上次同步：${formatDateTime(local.cookieSyncedAt)}`;
+    renderFirstRunGuide();
     return;
   }
+  setupState.cookie.configured = false;
+  setupState.cookie.pending = false;
+  setupState.cookie.verified = false;
   setStatus('cookie', '未同步', isAgentConnected ? 'warning' : 'offline');
+  renderFirstRunGuide();
+}
+
+function invalidateServiceDependentStatuses() {
+  setupState.api.verified = false;
+  setupState.vault.verified = false;
+  setupState.cookie.verified = false;
+  setupState.github.verified = false;
+  setupState.api.checkState = 'unchecked';
+  setupState.vault.checkState = 'unchecked';
+  if (!setupState.cookie.pending) setupState.cookie.checkState = 'unchecked';
+  setStatus('api', setupState.api.configured ? '已配置，待检查' : '未配置', 'warning');
+  setStatus('vault', setupState.vault.configured ? '已配置，待检查' : '待识别', 'warning');
+  setStatus(
+    'cookie',
+    setupState.cookie.pending ? '已抓取，待同步' : setupState.cookie.configured ? '已同步，待检查' : '未同步',
+    'warning'
+  );
+  applyGithubStatus({
+    state: 'unavailable',
+    configured: githubIsConfigured,
+    authenticated: false
+  });
+  renderFirstRunGuide();
 }
 
 function updateConnectionStatus(connected) {
   isAgentConnected = connected;
   if (connected && !runtimeCompatibility) {
+    invalidateServiceDependentStatuses();
     setStatus('agent', '正在校验版本', 'warning');
     document.getElementById('agent-settings-copy').textContent = '本地服务已连接，正在校验版本';
-    applyGithubStatus({
-      state: 'checking',
-      configured: githubIsConfigured,
-      authenticated: false
-    });
   } else if (!connected) {
+    invalidateServiceDependentStatuses();
     setStatus('agent', '未连接', 'offline');
     document.getElementById('agent-settings-copy').textContent = '本地 Agent 未连接';
     document.getElementById('service-version').textContent = '待连接';
     document.getElementById('runtime-protocol-version').textContent = '待校验';
     document.getElementById('runtime-source-version').textContent = '待校验';
     showHint('runtime-version-hint', '', '');
-    applyGithubStatus({
-      state: 'unavailable',
-      configured: githubIsConfigured,
-      authenticated: false
-    });
   }
   refreshCookieStatusFromStorage();
+  renderFirstRunGuide();
 }
 
-function compactStatusText(kind, type) {
+function compactStatusText(kind, type, detail = '') {
   const status = type || 'warning';
   if (kind === 'cookie') {
     if (status === 'online') return '已同步';
     if (status === 'offline') return '未同步';
+    if (String(detail).includes('待检查')) return '待检查';
     return '待同步';
   }
   if (status === 'online') return '已连接';
   if (status === 'offline') return '未连接';
   if (kind === 'agent') return '检查中';
-  if (kind === 'vault') return '待识别';
+  if (kind === 'vault') return String(detail).includes('待检查') ? '待检查' : '待识别';
   return '待检查';
 }
 
@@ -2474,7 +2484,7 @@ function setStatus(kind, text, type, time) {
   if (dot) dot.className = `status-dot inline-dot ${normalized}`;
   if (menuDot) menuDot.className = `status-dot inline-dot ${normalized}`;
   if (label) {
-    label.textContent = compactStatusText(kind, normalized);
+    label.textContent = compactStatusText(kind, normalized, text);
     label.className = normalized;
   }
   if (menuLabel) {
@@ -2735,12 +2745,20 @@ function syncModelPresetFromInput() {
 document.addEventListener('DOMContentLoaded', async () => {
   initColorScheme();
   document.getElementById('extension-version').textContent = `v${EXTENSION_VERSION || '未知'}`;
+  document.getElementById('agent-start-command').textContent = AGENT_START_COMMAND;
   document.getElementById('open-settings').addEventListener('click', openSettingsIndex);
   document.getElementById('open-github').addEventListener('click', () => openGithubPage());
   document.getElementById('back-settings-index').addEventListener('click', closeSettingsDetailToIndex);
   document.getElementById('back-home-from-index').addEventListener('click', closeToHome);
   document.getElementById('back-home-from-github').addEventListener('click', closeGithubToHome);
   document.getElementById('status-tasks').addEventListener('click', () => openSettingsDetail('task-settings'));
+  bindClick('toggle-first-run', toggleFirstRunGuide);
+  document.getElementById('first-run-guide').addEventListener('click', event => {
+    const button = event.target.closest('[data-onboarding-action]');
+    if (button && !button.disabled) runOnboardingAction(button.dataset.onboardingAction);
+  });
+  bindClick('copy-agent-start-command', copyAgentStartCommand);
+  bindClick('retry-agent-connection', retryAgentConnection);
   document.querySelectorAll('.settings-card').forEach(button => {
     button.addEventListener('click', () => openSettingsDetail(button.dataset.target));
   });
@@ -2753,21 +2771,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('task-concurrency').addEventListener('change', updateVideoSettingsSummary);
   document.getElementById('chunk-concurrency').addEventListener('change', updateVideoSettingsSummary);
   document.getElementById('check-model').addEventListener('click', checkModelHealth);
-  bindClick('scan-knowledge-bases', () => openVaultWorkflow('switch'));
-  bindClick('create-knowledge-base', () => openVaultWorkflow('create'));
-  bindClick('switch-knowledge-base', () => openVaultWorkflow('switch'));
-  bindClick('migrate-knowledge-base', () => openVaultWorkflow('migrate'));
-  bindClick('close-vault-workflow', closeVaultWorkflow);
-  bindClick('cancel-vault-workflow', closeVaultWorkflow);
-  bindClick('confirm-vault-workflow', confirmVaultWorkflow);
-  bindClick('rollback-vault-migration', rollbackVaultMigration);
-  document.getElementById('vault-candidate-select').addEventListener('change', updateVaultWorkflowPrimary);
-  document.getElementById('vault-name').addEventListener('input', updateVaultWorkflowPrimary);
-  document.getElementById('vault-workflow-modal').addEventListener('click', event => {
-    if (event.target === event.currentTarget) closeVaultWorkflow();
+  bindClick('select-knowledge-base', selectVaultFolder);
+  bindClick('close-vault-confirmation', closeVaultConfirmation);
+  bindClick('cancel-vault-confirmation', closeVaultConfirmation);
+  bindClick('confirm-vault-selection', confirmVaultSelection);
+  document.getElementById('vault-confirmation-modal').addEventListener('click', event => {
+    if (event.target === event.currentTarget) closeVaultConfirmation();
   });
   document.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && !document.getElementById('vault-workflow-modal').hidden) closeVaultWorkflow();
+    if (event.key === 'Escape' && !document.getElementById('vault-confirmation-modal').hidden) closeVaultConfirmation();
   });
   document.getElementById('grab-cookie').addEventListener('click', grabCookie);
   bindClick('share-knowledge', submitDouyinIngestFromPopup);
@@ -2796,8 +2808,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
   await restorePopupRoute();
-  loadConfig();
-  refreshCookieStatusFromStorage();
+  await loadFirstRunPreference();
+  await loadConfig();
+  await refreshCookieStatusFromStorage();
   startDouyinPreviewLoop();
   connectWebSocket();
 });

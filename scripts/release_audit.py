@@ -383,6 +383,23 @@ def check_license_and_version(root: Path) -> tuple[list[Finding], str, tuple[str
     manifest_version = str(manifest.get("version", ""))
     if not VERSION.fullmatch(manifest_version):
         findings.append(Finding("version", "chrome-extension/manifest.json", None, "missing semantic version"))
+    else:
+        version_surfaces = (
+            ("README.md", f"当前版本为 **v{manifest_version}**"),
+            ("server/github_service.py", f'USER_AGENT = "Agent-wiki/{manifest_version}"'),
+            ("docs/websocket-protocol.md", f"当前产品版本：`{manifest_version}`"),
+        )
+        for relative, expected in version_surfaces:
+            path = root / relative
+            if path.is_file() and expected not in path.read_text(encoding="utf-8"):
+                findings.append(
+                    Finding(
+                        "version",
+                        relative,
+                        None,
+                        f"does not match manifest version {manifest_version}",
+                    )
+                )
 
     nearest_release_tag, exact_head_release_tags = release_tag_state(root)
     expected_tag = f"v{manifest_version}"

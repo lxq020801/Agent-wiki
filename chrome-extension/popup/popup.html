@@ -50,6 +50,51 @@
       <span class="entry-chevron" aria-hidden="true"></span>
     </button>
 
+    <section class="onboarding-panel" id="first-run-guide" aria-labelledby="first-run-title">
+      <div class="onboarding-head">
+        <div>
+          <h2 id="first-run-title">首次配置</h2>
+          <p id="first-run-summary">正在检查下一步</p>
+        </div>
+        <button class="secondary small onboarding-toggle" id="toggle-first-run" type="button" aria-expanded="true">收起</button>
+      </div>
+      <div class="onboarding-reminder" id="first-run-reminder" hidden>
+        <span class="status-dot inline-dot warning" id="first-run-reminder-dot"></span>
+        <span>
+          <b id="first-run-reminder-title">继续首次配置</b>
+          <small id="first-run-reminder-copy">正在检查下一步</small>
+        </span>
+        <button class="secondary small" id="first-run-next-action" type="button">处理</button>
+      </div>
+      <ol class="onboarding-steps" id="first-run-steps">
+        <li data-onboarding-step="agent">
+          <span class="onboarding-step-index">1</span>
+          <span class="onboarding-step-copy"><b>本地 Agent 服务</b><small id="onboarding-agent-state">未连接</small></span>
+          <button class="secondary small onboarding-step-action" type="button" data-onboarding-action="agent">处理</button>
+        </li>
+        <li data-onboarding-step="api">
+          <span class="onboarding-step-index">2</span>
+          <span class="onboarding-step-copy"><b>Ark API</b><small id="onboarding-api-state">未配置</small></span>
+          <button class="secondary small onboarding-step-action" type="button" data-onboarding-action="api">配置</button>
+        </li>
+        <li data-onboarding-step="vault">
+          <span class="onboarding-step-index">3</span>
+          <span class="onboarding-step-copy"><b>知识库</b><small id="onboarding-vault-state">未连接</small></span>
+          <button class="secondary small onboarding-step-action" type="button" data-onboarding-action="vault">选择</button>
+        </li>
+        <li data-onboarding-step="cookie">
+          <span class="onboarding-step-index">4</span>
+          <span class="onboarding-step-copy"><b>抖音 Cookie</b><small id="onboarding-cookie-state">未同步</small></span>
+          <button class="secondary small onboarding-step-action" type="button" data-onboarding-action="cookie">同步</button>
+        </li>
+        <li data-onboarding-step="github">
+          <span class="onboarding-step-index">5</span>
+          <span class="onboarding-step-copy"><b>GitHub <em>可选</em></b><small id="onboarding-github-state">未登录，不影响完成</small></span>
+          <button class="secondary small onboarding-step-action" type="button" data-onboarding-action="github">查看</button>
+        </li>
+      </ol>
+    </section>
+
     <button class="github-feature-entry" id="open-github" type="button">
       <span class="github-feature-mark" aria-hidden="true">
         <svg data-lucide-icon="github" viewBox="0 0 24 24">
@@ -139,6 +184,21 @@
         </div>
         <button class="secondary small" id="refresh-status" type="button">刷新</button>
       </div>
+      <div class="agent-recovery" id="agent-recovery">
+        <p>在 Agent-wiki 项目目录运行：</p>
+        <div class="command-row">
+          <code id="agent-start-command">./agent-wiki start</code>
+          <button class="secondary small icon-text-button" id="copy-agent-start-command" type="button" title="复制启动命令">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>复制</span>
+          </button>
+        </div>
+        <button class="secondary full-width icon-text-button" id="retry-agent-connection" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"></path><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"></path></svg>
+          <span>重试连接</span>
+        </button>
+        <div class="hint" id="agent-recovery-hint" role="status" aria-live="polite"></div>
+      </div>
       <dl class="runtime-details" aria-label="运行版本">
         <div><dt>扩展</dt><dd id="extension-version">待读取</dd></div>
         <div><dt>服务</dt><dd id="service-version">待连接</dd></div>
@@ -164,6 +224,16 @@
           <input type="password" id="api-key" placeholder="Ark API Key">
           <button class="toggle-btn" id="toggle-key" type="button" aria-pressed="false">显示</button>
         </div>
+        <p class="api-key-help">
+          <a class="api-key-link icon-text-button" id="ark-api-key-link" href="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey" target="_blank" rel="noopener noreferrer" aria-label="点这里获取火山方舟 API Key（在新标签页打开）">
+            <span>点这里获取火山方舟 API Key</span>
+            <svg data-lucide-icon="external-link" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M15 3h6v6"></path>
+              <path d="M10 14 21 3"></path>
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+            </svg>
+          </a>
+        </p>
       </div>
       <div class="field">
         <label for="endpoint-url">Endpoint URL</label>
@@ -236,24 +306,10 @@
         <p>管理本地 Markdown 知识资产的存放位置。</p>
       </div>
       <div class="vault-current" aria-live="polite">
-        <div class="vault-current-head">
-          <span>当前知识库</span>
-          <button class="compact-icon-button" id="scan-knowledge-bases" type="button" aria-label="扫描知识库" title="扫描知识库">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"></path>
-              <path d="M3 21v-5h5"></path>
-              <path d="M3 12A9 9 0 0 1 18.5 5.8L21 8"></path>
-              <path d="M21 3v5h-5"></path>
-            </svg>
-          </button>
-        </div>
+        <span>当前知识库</span>
         <strong id="vault-current-path">尚未连接</strong>
       </div>
-      <div class="knowledge-base-actions">
-        <button class="primary" id="create-knowledge-base" type="button">新建知识库</button>
-        <button class="secondary" id="switch-knowledge-base" type="button">切换知识库</button>
-        <button class="secondary" id="migrate-knowledge-base" type="button">迁移现有知识库</button>
-      </div>
+      <button class="primary full-width" id="select-knowledge-base" type="button">选择知识库</button>
       <div class="hint persistent" id="vault-hint"></div>
     </section>
 
@@ -365,14 +421,14 @@
     <div class="hint persistent" id="github-hint" role="status" aria-live="polite"></div>
   </main>
 
-  <div class="modal-backdrop" id="vault-workflow-modal" hidden>
-    <section class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="vault-workflow-title" aria-describedby="vault-workflow-copy">
+  <div class="modal-backdrop" id="vault-confirmation-modal" hidden>
+    <section class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="vault-confirmation-title" aria-describedby="vault-confirmation-copy">
       <header class="modal-head">
         <div>
-          <h2 id="vault-workflow-title">知识库</h2>
-          <p id="vault-workflow-copy">正在准备</p>
+          <h2 id="vault-confirmation-title">确认使用此文件夹</h2>
+          <p id="vault-confirmation-copy">确认后只会补齐缺失的 Agent-wiki 必要结构。</p>
         </div>
-        <button class="compact-icon-button" id="close-vault-workflow" type="button" aria-label="关闭" title="关闭">
+        <button class="compact-icon-button" id="close-vault-confirmation" type="button" aria-label="关闭" title="关闭">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M18 6 6 18"></path>
             <path d="m6 6 12 12"></path>
@@ -381,38 +437,16 @@
       </header>
 
       <div class="modal-body">
-        <div class="field" id="vault-candidate-field">
-          <label for="vault-candidate-select" id="vault-candidate-label">保存位置</label>
-          <select id="vault-candidate-select" disabled>
-            <option value="">正在扫描候选位置</option>
-          </select>
-          <p class="microcopy" id="vault-candidate-copy">候选位置由本地 Agent 扫描提供。</p>
+        <div class="vault-confirmation">
+          <strong id="vault-selection-folder">所选文件夹</strong>
+          <p>不会复制、迁移、删除或覆盖任何已有内容，也不会自动启用版本控制。</p>
         </div>
-
-        <div class="field" id="vault-name-field">
-          <label for="vault-name">知识库名称</label>
-          <input type="text" id="vault-name" maxlength="64" autocomplete="off" placeholder="例如：我的知识库">
-        </div>
-
-        <div class="vault-confirmation" id="vault-confirmation" hidden>
-          <strong>需要确认候选</strong>
-          <p id="vault-confirmation-copy">检测到多个可能位置，请确认所选知识库。</p>
-        </div>
-
-        <div class="vault-migration-summary" id="vault-migration-summary" hidden>
-          <div><span>迁移文件</span><strong id="vault-migration-files">待计算</strong></div>
-          <div><span>冲突</span><strong id="vault-migration-conflicts">待计算</strong></div>
-          <div><span>目标</span><strong id="vault-migration-target">待确认</strong></div>
-          <ul id="vault-migration-notes"></ul>
-        </div>
-
-        <div class="hint persistent" id="vault-workflow-hint" role="status" aria-live="polite"></div>
+        <div class="hint persistent" id="vault-selection-hint" role="status" aria-live="polite"></div>
       </div>
 
       <footer class="modal-actions">
-        <button class="secondary" id="cancel-vault-workflow" type="button">取消</button>
-        <button class="secondary" id="rollback-vault-migration" type="button" hidden>回退迁移</button>
-        <button class="primary" id="confirm-vault-workflow" type="button">继续</button>
+        <button class="secondary" id="cancel-vault-confirmation" type="button">取消</button>
+        <button class="primary" id="confirm-vault-selection" type="button">确认使用</button>
       </footer>
     </section>
   </div>

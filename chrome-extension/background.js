@@ -38,6 +38,7 @@ let pendingModelHealthCheck = false;
 let pendingModelConfigSync = false;
 let pendingTaskRequests = new Map();
 let runtimeCompatibility = null;
+let vaultScanRequestedForConnection = false;
 
 function debugLog(...args) {
   if (DEBUG_LOGS) console.log(...args);
@@ -194,9 +195,6 @@ function buildAgentConfig(config) {
     endpoint,
     arkEndpoint: endpoint
   };
-  if (config.vaultPath) {
-    data.vaultPath = config.vaultPath;
-  }
   return data;
 }
 
@@ -217,8 +215,7 @@ async function storedAgentConfig() {
     'videoStrategyModel',
     'taskConcurrency',
     'serverTaskConcurrency',
-    'videoChunkConcurrency',
-    'vaultPath'
+    'videoChunkConcurrency'
   ]);
   return buildAgentConfig(config);
 }
@@ -248,6 +245,7 @@ function connectWebSocket() {
       debugLog('[Librarian BG] WebSocket 已连接');
       clearTimeout(reconnectTimer);
       runtimeCompatibility = null;
+      vaultScanRequestedForConnection = false;
 
       socket.send(JSON.stringify(withOperationContext(
         RuntimeVersion.buildHandshake('agent-wiki-background')
@@ -267,6 +265,7 @@ function connectWebSocket() {
       debugLog('[Librarian BG] WebSocket 已断开，3秒后重连');
       ws = null;
       runtimeCompatibility = null;
+      vaultScanRequestedForConnection = false;
       reconnectTimer = setTimeout(connectWebSocket, 3000);
     };
 
@@ -875,12 +874,29 @@ function handleAgentMessage(msg) {
         chrome.storage.local.set({ vaultPath: msg.status.path });
       }
       break;
+
+    case 'vault_lifecycle_status': {
+      const result = msg.result || msg.status || {};
+      const path = result.activeVault?.vaultPath || '';
+      if (path && result.ok) {
+        chrome.storage.local.set({ vaultPath: path });
+      } else if (result.state === 'selection_required') {
+        chrome.storage.local.set({ vaultPath: '' });
+      }
+      break;
+    }
       
     case 'agent_ready':
     case 'handshake_ack': {
       const compatibility = applyRuntimeCompatibility(msg);
       debugLog('[Librarian BG] Agent 版本状态:', compatibility.state);
       if (compatibility.canOperate) {
+        if (msg.type === 'handshake_ack' && !vaultScanRequestedForConnection) {
+          vaultScanRequestedForConnection = sendToAgent({
+            type: 'vault_scan',
+            data: { source: 'extension_handshake' }
+          });
+        }
         if (pendingModelConfigSync) {
           sendModelConfigAndHealthCheck();
         } else if (pendingModelHealthCheck) {

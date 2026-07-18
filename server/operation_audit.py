@@ -121,9 +121,9 @@ AUDIT_COVERAGE_MATRIX: dict[int, dict[str, Any]] = {
         "stages": ("github_auth_start_completed", "github_stars_request_completed", "batch_item_completed", "autoStar", "github_refresh_confirm_completed"),
     },
     9: {
-        "title": "知识库扫描、新建、切换、迁移和回退。",
+        "title": "知识库自动扫描、文件夹选择、安全初始化和兼容生命周期操作。",
         "modules": ("server/websocket_server.py", "install/vault_lifecycle.py"),
-        "stages": ("vault_scan", "vault_create", "vault_switch", "vault_migration_preview", "vault_migration_execute", "vault_migration_rollback", "vault_lifecycle_completed"),
+        "stages": ("vault_scan", "vault_select_folder", "vault_select_confirm", "vault_create", "vault_switch", "vault_migration_preview", "vault_migration_execute", "vault_migration_rollback", "vault_lifecycle_completed"),
     },
 }
 
