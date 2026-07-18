@@ -49,6 +49,27 @@ for (const id of settingsDetailIds) {
   assert.match(html, new RegExp(`class="settings-group detail-section" id="${id}"`));
 }
 
+const apiSettingsSection = html.match(/<section class="settings-group detail-section" id="api-settings"[\s\S]*?<\/section>/)?.[0] || '';
+const arkApiKeyLink = apiSettingsSection.match(/<a class="api-key-link icon-text-button" id="ark-api-key-link"[^>]*>/)?.[0] || '';
+assert.match(
+  arkApiKeyLink,
+  /href="https:\/\/console\.volcengine\.com\/ark\/region:ark\+cn-beijing\/apiKey"/,
+  'API settings must link directly to the official Ark API Key page'
+);
+assert.match(arkApiKeyLink, /target="_blank"/);
+assert.match(arkApiKeyLink, /rel="noopener noreferrer"/);
+assert.match(arkApiKeyLink, /aria-label="点这里获取火山方舟 API Key（在新标签页打开）"/);
+assert.doesNotMatch(arkApiKeyLink, /onclick=|data-(?:key|value|action)=/);
+assert.match(apiSettingsSection, />点这里获取火山方舟 API Key</);
+assert.match(apiSettingsSection, /data-lucide-icon="external-link"[\s\S]*?aria-hidden="true"/);
+
+const videoSettingsSection = html.match(/<section class="settings-group detail-section" id="video-settings"[\s\S]*?<\/section>/)?.[0] || '';
+assert.match(videoSettingsSection, /id="analysis-model-preset" value="lite"/);
+assert.match(videoSettingsSection, /data-value="lite" data-model-id="doubao-seed-2-0-lite-260428"/);
+assert.match(videoSettingsSection, /data-value="mini" data-model-id="doubao-seed-2-0-mini-260428"/);
+assert.match(videoSettingsSection, /id="task-concurrency" value="2"/);
+assert.match(videoSettingsSection, /id="chunk-concurrency" value="2"/);
+
 for (const id of [
   'select-knowledge-base',
   'vault-confirmation-modal',
@@ -118,6 +139,13 @@ assert.match(css, /\.view\s*\{[\s\S]*?overflow-y:\s*auto/);
 assert.match(css, /\.task-head\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto/);
 assert.match(css, /\.task-head strong\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
 assert.match(css, /button\.primary,[\s\S]*?button\.secondary\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
+const apiKeyLinkRule = css.match(/\.api-key-link\s*\{([^}]*)\}/)?.[1] || '';
+assert.match(apiKeyLinkRule, /display:\s*inline-flex/);
+assert.match(apiKeyLinkRule, /max-width:\s*100%/);
+assert.match(apiKeyLinkRule, /min-width:\s*0/);
+assert.match(apiKeyLinkRule, /overflow-wrap:\s*anywhere/);
+assert.match(apiKeyLinkRule, /color:\s*var\(--primary\)/);
+assert.match(css, /\.api-key-link:focus-visible\s*\{[\s\S]*?box-shadow:\s*0 0 0 3px var\(--focus\)/);
 const derivedTitleRule = css.match(/\.derived-head strong\s*\{([^}]*)\}/)?.[1] || '';
 assert.match(derivedTitleRule, /flex:\s*1 1 0/);
 assert.match(derivedTitleRule, /overflow-wrap:\s*anywhere/);
@@ -125,6 +153,7 @@ assert.match(derivedTitleRule, /white-space:\s*normal/);
 assert.doesNotMatch(derivedTitleRule, /overflow:\s*hidden|text-overflow:\s*ellipsis|white-space:\s*nowrap/);
 assert.match(css, /\.derived-actions\s*\{[^}]*flex-wrap:\s*wrap/);
 assert.match(visualMock, /mock-account-with-an-intentionally-very-long-login-name/);
+assert.match(visualMock, /scenario === 'api'[\s\S]*?openSettingsDetail\('api-settings'/);
 assert.match(visualMock, /超长派生候选名称也必须稳定换行且不挤压确认与忽略按钮/);
 assert.match(visualMock, /scenario === 'header-long-home' \|\| scenario === 'header-long-settings'/);
 assert.match(visualMock, /等待浏览器同步较长状态/);

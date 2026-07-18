@@ -30,6 +30,11 @@
 
     frame.addEventListener('load', () => {
       const popup = frame.contentWindow;
+      if (scenario === 'api') {
+        popup.openSettingsDetail('api-settings', { persist: false, focus: false });
+        return;
+      }
+
       if (scenario === 'header-long-home' || scenario === 'header-long-settings') {
         if (scenario === 'header-long-settings') {
           popup.openSettingsIndex({ persist: false, focus: false });

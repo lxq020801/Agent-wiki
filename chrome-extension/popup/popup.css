@@ -834,6 +834,44 @@ button:disabled {
   margin-bottom: 12px;
 }
 
+.api-key-help {
+  display: flex;
+  min-width: 0;
+  margin-top: 7px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.api-key-link {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  gap: 5px;
+  color: var(--primary);
+  font-weight: 650;
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.api-key-link span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.api-key-link:hover,
+.api-key-link:focus-visible {
+  outline: none;
+  color: var(--primary-hover);
+  text-decoration-thickness: 2px;
+}
+
+.api-key-link:focus-visible {
+  border-radius: 3px;
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
 label {
   display: block;
   margin-bottom: 6px;
