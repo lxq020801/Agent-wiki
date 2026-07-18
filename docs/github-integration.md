@@ -34,9 +34,17 @@ python3.11 server/launcher.py restart
 
 - Keychain service：`com.agent-wiki.github`
 - Keychain account：`github-oauth-token`
+- `security add-generic-password` 的末尾 `-w` 会提示输入并确认密码；服务通过 stdin 提供两次相同内容，避免 token 出现在进程参数中。
+- 服务必须在写入后使用 `security find-generic-password -w` 读回同一个 token，再用读回值请求 `GET /user`。只有写入成功、读回完全一致且账号验证成功后，状态才会返回 `authenticated=true` 和账号信息。
 - 注销会删除该 Keychain 项。
 - GitHub API 返回 `401` 时会删除失效 token，并要求重新登录。
 - Device code 和完整授权响应只存在于本地服务内存，不写运行文件。
+
+授权流程会把非敏感状态写入 `github/authorization.json`。后台轮询即使发生在扩展弹窗关闭后，最终失败也会记录 `state=failed` 和 `lastAuthorizationError`；错误只包含 `code`、面向用户的 `message`、失败 `stage` 和时间，不保存 token、device code、Cookie 或 GitHub 完整响应。新的授权、取消、成功或注销会更新该状态。
+
+### Keychain 持久化故障根因
+
+旧实现向末尾裸 `-w` 的 `security add-generic-password` stdin 只写入一次 token。macOS `security` 实际要求连续输入密码和确认密码；单行输入会先发生确认不匹配，随后可能在 EOF 下写入空密码却返回退出码 `0`。服务当时没有读回验证，仍用内存中的 token 请求 `/user`，所以弹窗会短暂显示正确账号；后续真实状态检查从 Keychain 读到空值后才变成未连接。当前实现以写后读回和 `/user` 验证共同阻断这条假成功路径。
 
 ## 仓库、Stars 与刷新
 
@@ -55,7 +63,8 @@ python3.11 server/launcher.py restart
 ```text
 ~/.agent-wiki/github/
 ├── settings.json       # autoStar 等非敏感设置
-└── repositories.json   # repository ID、owner/repo、资产路径和刷新快照
+├── repositories.json   # repository ID、owner/repo、资产路径和刷新快照
+└── authorization.json  # 非敏感授权状态与最后失败阶段
 ```
 
 GitHub 首次写入、Stars 导入和确认刷新只写本次资产与 `index.md`，不会执行 `git init`、`git add` 或 `git commit`。核心派生执行器在 GitHub 项目资产与索引成功写入后调用 `server.github_service.register_derived_repository(...)`；该钩子登记 repository ID/owner/repo，并在开关开启时执行非阻断自动 Star。

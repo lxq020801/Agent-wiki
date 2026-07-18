@@ -1,5 +1,5 @@
 // popup.js - Agent-wiki control console
-// 首页只负责提交拆解任务；设置页负责 API、Cookie、Vault 与拆解偏好。
+// 首页提供正式功能入口；设置页只负责连接、凭据、知识库与拆解偏好。
 
 const RuntimeVersion = globalThis.AgentWikiRuntime;
 const EXTENSION_VERSION = RuntimeVersion.extensionVersion();
@@ -22,6 +22,8 @@ const DEFAULT_PROVIDER = 'doubao';
 const DEFAULT_MODEL_PRESET = 'lite';
 const DEFAULT_TASK_CONCURRENCY = 2;
 const DEFAULT_CHUNK_CONCURRENCY = 2;
+const POPUP_ROUTE_STORAGE_KEY = 'popupRoute';
+const GITHUB_ROUTE = 'github';
 const TRUSTED_ARK_HOSTS = new Set(['ark.cn-beijing.volces.com']);
 const SETTINGS_DETAIL_TITLES = {
   'agent-settings': 'Agent 连接',
@@ -29,7 +31,6 @@ const SETTINGS_DETAIL_TITLES = {
   'video-settings': '模型与并发',
   'vault-settings': '知识库',
   'cookie-settings': '抖音 Cookie',
-  'github-settings': 'GitHub',
   'task-settings': '任务状态'
 };
 const PENDING_COOKIE_KEYS = [
@@ -69,6 +70,7 @@ let githubImportBatch = null;
 let githubRefresh = null;
 let githubIsConfigured = false;
 let githubIsAuthenticated = false;
+let githubValidationRequestedForConnection = false;
 
 function debugLog(...args) {
   if (DEBUG_LOGS) console.log(...args);
@@ -284,6 +286,7 @@ function connectWebSocket() {
     ws.onopen = () => {
       runtimeCompatibility = null;
       runtimeSyncStarted = false;
+      githubValidationRequestedForConnection = false;
       updateConnectionStatus(true);
       ws.send(JSON.stringify(RuntimeVersion.buildHandshake('agent-wiki-extension')));
       requestStatus();
@@ -299,6 +302,7 @@ function connectWebSocket() {
     ws.onclose = () => {
       runtimeCompatibility = null;
       runtimeSyncStarted = false;
+      githubValidationRequestedForConnection = false;
       updateConnectionStatus(false);
       ws = null;
       stopStatusPolling();
@@ -343,8 +347,22 @@ function requestTaskStatus() {
   sendToAgent({ type: 'task_status_request' });
 }
 
-function requestGithubStatus() {
-  return sendToAgent({ type: 'github_status_request', requestId: `github-status-${Date.now()}` });
+function requestGithubStatus({ validate = false } = {}) {
+  return sendToAgent({
+    type: 'github_status_request',
+    requestId: `github-status-${Date.now()}`,
+    ...(validate ? { validate: true } : {})
+  });
+}
+
+function requestGithubValidationAfterHandshake(compatibility) {
+  if (
+    githubValidationRequestedForConnection ||
+    !compatibility?.canOperate ||
+    document.body.dataset.view !== 'github-view'
+  ) return false;
+  githubValidationRequestedForConnection = true;
+  return requestGithubStatus({ validate: true });
 }
 
 function derivedActionKey(taskId, candidateId) {
@@ -417,6 +435,30 @@ function transientStorage() {
   return chrome.storage.session || chrome.storage.local;
 }
 
+function popupRouteStorage() {
+  return typeof chrome === 'undefined' ? null : chrome.storage?.session || null;
+}
+
+async function persistGithubRoute() {
+  const storage = popupRouteStorage();
+  if (!storage) return;
+  try {
+    await storage.set({ [POPUP_ROUTE_STORAGE_KEY]: GITHUB_ROUTE });
+  } catch (err) {
+    debugLog('[Agent-wiki] 无法保存 popup route:', err);
+  }
+}
+
+async function clearPopupRoute() {
+  const storage = popupRouteStorage();
+  if (!storage) return;
+  try {
+    await storage.remove(POPUP_ROUTE_STORAGE_KEY);
+  } catch (err) {
+    debugLog('[Agent-wiki] 无法清除 popup route:', err);
+  }
+}
+
 async function flushPendingSync() {
   await sendConfigToAgent({ silent: true, requireApiKey: false });
   const pending = await transientStorage().get(PENDING_COOKIE_KEYS);
@@ -438,6 +480,7 @@ function handleAgentMessage(msg) {
       updateConnectionStatus(true);
       const compatibility = applyRuntimeCompatibility(msg);
       requestStatus();
+      requestGithubValidationAfterHandshake(compatibility);
       if (compatibility.canOperate && !runtimeSyncStarted) {
         runtimeSyncStarted = true;
         flushPendingSync();
@@ -655,31 +698,36 @@ function applyGithubStatus(status) {
   githubIsAuthenticated = authenticated;
   const account = status.account || {};
   const login = account.login || '';
-  const summary = document.getElementById('settings-github-summary');
-  const dot = document.getElementById('settings-github-dot');
+  const homeSummary = document.getElementById('home-github-summary');
+  const homeDot = document.getElementById('home-github-dot');
+  const accountDot = document.getElementById('github-account-dot');
   const copy = document.getElementById('github-account-copy');
   const loginButton = document.getElementById('github-login');
   const logoutButton = document.getElementById('github-logout');
 
   if (authenticated) {
-    summary.textContent = login ? `@${login}` : '已登录';
-    summary.className = 'online';
-    dot.className = 'status-dot inline-dot online';
-    copy.textContent = login ? `已登录 @${login}` : 'GitHub 已登录';
+    homeSummary.textContent = login ? `@${login}` : '已登录';
+    homeSummary.title = homeSummary.textContent;
+    homeDot.className = 'status-dot inline-dot online';
+    accountDot.className = 'status-dot inline-dot online';
+    copy.textContent = login ? `@${login}` : '已登录';
   } else if (!configured) {
-    summary.textContent = '缺少 client ID';
-    summary.className = 'offline';
-    dot.className = 'status-dot inline-dot offline';
-    copy.textContent = 'GitHub App 尚未配置';
+    homeSummary.textContent = '未登录';
+    homeSummary.title = '未登录';
+    homeDot.className = 'status-dot inline-dot offline';
+    accountDot.className = 'status-dot inline-dot offline';
+    copy.textContent = '未登录 · GitHub App 尚未配置';
   } else if (status.state === 'unchecked') {
-    summary.textContent = '待检查';
-    summary.className = 'warning';
-    dot.className = 'status-dot inline-dot warning';
+    homeSummary.textContent = '未登录';
+    homeSummary.title = '未登录';
+    homeDot.className = 'status-dot inline-dot warning';
+    accountDot.className = 'status-dot inline-dot warning';
     copy.textContent = '打开页面后检查 GitHub 登录状态';
   } else {
-    summary.textContent = '未登录';
-    summary.className = 'warning';
-    dot.className = 'status-dot inline-dot warning';
+    homeSummary.textContent = '未登录';
+    homeSummary.title = '未登录';
+    homeDot.className = 'status-dot inline-dot warning';
+    accountDot.className = 'status-dot inline-dot warning';
     copy.textContent = '尚未登录 GitHub';
   }
 
@@ -740,7 +788,8 @@ function showGithubAuthorization(result) {
   document.getElementById('github-login').disabled = true;
 }
 
-function startGithubAuthorization() {
+async function startGithubAuthorization() {
+  await persistGithubRoute();
   const button = document.getElementById('github-login');
   button.disabled = true;
   showHint('github-hint', '正在向 GitHub 请求设备授权码', 'warning', { persist: true });
@@ -1862,7 +1911,7 @@ function updateSystemSummary() {
 
 function setView(viewId) {
   document.body.dataset.view = viewId;
-  ['home-view', 'settings-index-view', 'settings-detail-view'].forEach(id => {
+  ['home-view', 'settings-index-view', 'settings-detail-view', 'github-view'].forEach(id => {
     const view = document.getElementById(id);
     if (!view) return;
     const active = id === viewId;
@@ -1897,19 +1946,46 @@ function openSettingsDetail(targetId) {
   const title = target.dataset.title || SETTINGS_DETAIL_TITLES[target.id] || '设置';
   document.getElementById('settings-detail-title').textContent = title;
   setView('settings-detail-view');
-  if (target.id === 'github-settings') requestGithubStatus();
   requestAnimationFrame(() => target.focus({ preventScroll: true }));
+}
+
+function openGithubPage({ persist = true, focus = true } = {}) {
+  lastSettingsTrigger = document.activeElement;
+  hideAllDetailSections();
+  setView('github-view');
+  requestGithubStatus();
+  if (persist) void persistGithubRoute();
+  if (focus) requestAnimationFrame(() => document.getElementById('github-view')?.focus({ preventScroll: true }));
+}
+
+async function restorePopupRoute() {
+  const storage = popupRouteStorage();
+  if (!storage) return;
+  try {
+    const stored = await storage.get(POPUP_ROUTE_STORAGE_KEY);
+    if (stored[POPUP_ROUTE_STORAGE_KEY] === GITHUB_ROUTE) {
+      openGithubPage({ persist: false, focus: false });
+    }
+  } catch (err) {
+    debugLog('[Agent-wiki] 无法恢复 popup route:', err);
+  }
 }
 
 function closeToHome() {
   hideAllDetailSections();
   setView('home-view');
+  void clearPopupRoute();
   const triggerIsHiddenMenu = lastSettingsTrigger?.closest?.('#settings-index-view');
   if (lastSettingsTrigger && !triggerIsHiddenMenu && typeof lastSettingsTrigger.focus === 'function') {
     lastSettingsTrigger.focus();
   } else {
     document.getElementById('open-settings').focus();
   }
+}
+
+function closeGithubToHome() {
+  lastSettingsTrigger = document.getElementById('open-github');
+  closeToHome();
 }
 
 function updateVideoSettingsSummary() {
@@ -2040,7 +2116,7 @@ function bindGithubControls() {
     else githubSelected.delete(key);
     updateGithubSelection();
   });
-  document.getElementById('github-settings').addEventListener('click', event => {
+  document.getElementById('github-view').addEventListener('click', event => {
     const button = event.target.closest('.github-refresh-check');
     if (button) checkGithubRefresh(button.closest('.github-repo-row'));
   });
@@ -2051,11 +2127,13 @@ function syncModelPresetFromInput() {
   updateVideoSettingsSummary();
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('extension-version').textContent = `v${EXTENSION_VERSION || '未知'}`;
   document.getElementById('open-settings').addEventListener('click', openSettingsIndex);
+  document.getElementById('open-github').addEventListener('click', () => openGithubPage());
   document.getElementById('back-home').addEventListener('click', closeToHome);
   document.getElementById('back-home-from-index').addEventListener('click', closeToHome);
+  document.getElementById('back-home-from-github').addEventListener('click', closeGithubToHome);
   document.querySelectorAll('.status-chip').forEach(button => {
     button.addEventListener('click', () => openSettingsDetail(button.dataset.target));
   });
@@ -2100,6 +2178,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateSystemSummary();
     return;
   }
+  await restorePopupRoute();
   loadConfig();
   refreshCookieStatusFromStorage();
   startDouyinPreviewLoop();

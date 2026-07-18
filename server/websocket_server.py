@@ -999,7 +999,6 @@ class LibrarianServer:
                     })
                     delay = min(60, max(5, int(exc.retry_after or (delay * 2))))
                     continue
-                await asyncio.to_thread(self.github_service.cancel_authorization, flow_id)
                 await self.broadcast({
                     'type': 'github_error',
                     'result': error,

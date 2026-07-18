@@ -111,7 +111,8 @@ h1 {
 }
 
 body[data-view="settings-index-view"] #open-settings,
-body[data-view="settings-detail-view"] #open-settings {
+body[data-view="settings-detail-view"] #open-settings,
+body[data-view="github-view"] #open-settings {
   visibility: hidden;
   pointer-events: none;
 }
@@ -135,6 +136,97 @@ body[data-view="settings-detail-view"] #open-settings {
 
 #home-view {
   gap: 11px;
+}
+
+.github-feature-entry {
+  position: relative;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  min-height: 58px;
+  gap: 9px;
+  padding: 8px 28px 8px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--radius-card);
+  background: #181d24;
+  color: var(--text);
+  text-align: left;
+}
+
+.github-feature-entry::after {
+  position: absolute;
+  top: 50%;
+  right: 11px;
+  width: 7px;
+  height: 7px;
+  border-top: 1.5px solid var(--muted);
+  border-right: 1.5px solid var(--muted);
+  content: "";
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.github-feature-entry:hover,
+.github-feature-entry:focus-visible {
+  outline: none;
+  border-color: var(--primary);
+  background: var(--panel-hover);
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
+.github-feature-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: #f0f3f6;
+  color: #11151b;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.github-feature-copy,
+.github-feature-account {
+  min-width: 0;
+}
+
+.github-feature-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.github-feature-copy b {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.github-feature-copy small {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.github-feature-account {
+  display: flex;
+  align-items: center;
+  max-width: 92px;
+  gap: 5px;
+  color: var(--text-secondary);
+}
+
+.github-feature-account em {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-grid {
@@ -846,7 +938,59 @@ textarea:focus {
   display: block;
 }
 
+#github-view {
+  gap: 0;
+}
+
+.github-account-area {
+  padding-bottom: 2px;
+}
+
+.github-account-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 40px;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.github-account-identity {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 8px;
+}
+
+.github-account-head > button {
+  min-width: 46px;
+  flex: 0 0 auto;
+}
+
+.github-account-identity > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.github-account-label {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.github-account-identity strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .github-auth-actions {
+  grid-template-columns: 1fr;
   margin-bottom: 10px;
 }
 
