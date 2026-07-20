@@ -28,6 +28,8 @@ if str(SCRIPTS) not in sys.path:
 import ingest  # noqa: E402
 from config_loader import Config  # noqa: E402
 
+OWNER_MARKER = ingest._TASK_CACHE_OWNER_MARKER
+
 
 @dataclass
 class FakeVideoMeta:
@@ -100,6 +102,16 @@ def _config(tmp: Path, vault: Path, runtime_name: str = "runtime") -> Config:
     )
 
 
+def _make_owned_dir(root: Path, task_id: str, *files: str) -> Path:
+    """造一个带有效 owner marker 的任务目录。"""
+    candidate = root / task_id
+    candidate.mkdir(parents=True)
+    (candidate / OWNER_MARKER).write_text(task_id, encoding="utf-8")
+    for name in files:
+        (candidate / name).write_bytes(b"data")
+    return candidate
+
+
 class FakeStatusWriter:
     def __init__(self) -> None:
         self.updates: list[dict[str, Any]] = []
@@ -111,34 +123,112 @@ class FakeStatusWriter:
         pass
 
 
-class TaskCacheNameTests(unittest.TestCase):
-    def test_sanitizes_to_single_level_name(self) -> None:
-        self.assertEqual(ingest._task_cache_dir_name("20260720-101530-ab12"), "20260720-101530-ab12")
-        self.assertNotIn("/", ingest._task_cache_dir_name("../escape"))
-        self.assertNotIn("..", ingest._task_cache_dir_name(".."))
-        self.assertTrue(ingest._task_cache_dir_name("").startswith("task-"))
-        self.assertTrue(ingest._task_cache_dir_name("..").startswith("task-"))
+class TaskCacheIdTests(unittest.TestCase):
+    def test_valid_ids_accepted(self) -> None:
+        for task_id in ("20260720-101530-ab12", "task-1", "ULID01ABC.def_2"):
+            self.assertTrue(ingest._is_valid_task_cache_id(task_id), task_id)
+            root = Path("/tmp/agent-wiki-test-cache")
+            candidate = ingest.task_cache_dir(root, task_id)
+            self.assertEqual(candidate.parent, root)
+            self.assertEqual(candidate.name, task_id)
 
-    def test_task_cache_dir_is_direct_child(self) -> None:
-        root = Path("/tmp/agent-wiki-test-cache")
-        candidate = ingest.task_cache_dir(root, "task-1")
-        self.assertEqual(candidate.parent, root)
-        self.assertEqual(candidate.name, "task-1")
+    def test_invalid_ids_rejected_without_sanitized_leak(self) -> None:
+        for task_id in ("", "../escape", "..", "a/b", ".hidden", "-lead", "bad id", ".." + "/"):
+            self.assertFalse(ingest._is_valid_task_cache_id(task_id), task_id)
+            with self.assertRaises(ValueError, msg=task_id):
+                ingest.task_cache_dir(Path("/tmp/agent-wiki-test-cache"), task_id)
 
 
-class CleanupSafetyTests(unittest.TestCase):
-    """cleanup_task_cache 只删本任务目录，保护其余一切。"""
+class CreateTaskCacheTests(unittest.TestCase):
+    def test_creates_dir_with_private_owner_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "cache" / "videos"
+            candidate = ingest.create_task_cache(root, "task-1")
+            self.assertEqual(candidate, root / "task-1")
+            self.assertTrue(candidate.is_dir())
+            marker = candidate / OWNER_MARKER
+            self.assertTrue(marker.is_file())
+            self.assertFalse(marker.is_symlink())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "task-1")
 
-    def test_protects_other_tasks_symlinks_and_plain_files(self) -> None:
+    def test_invalid_task_id_creates_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "cache" / "videos"
+            with self.assertRaises(ValueError):
+                ingest.create_task_cache(root, "../evil")
+            # 不创建消毒后的泄漏目录，也不创建 cache_root
+            self.assertFalse(root.exists())
+            self.assertEqual(list(Path(d).rglob("*")), [])
+
+    def test_preexisting_dir_without_marker_is_reused_nor_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "cache" / "videos"
+            foreign = root / "task-1"
+            foreign.mkdir(parents=True)
+            (foreign / "foreign.mp4").write_bytes(b"not mine")
+            with self.assertRaises(ValueError):
+                ingest.create_task_cache(root, "task-1")
+            self.assertEqual((foreign / "foreign.mp4").read_bytes(), b"not mine")
+
+    def test_preexisting_dir_with_forged_marker_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "cache" / "videos"
+            foreign = root / "task-1"
+            foreign.mkdir(parents=True)
+            (foreign / OWNER_MARKER).write_text("other-task", encoding="utf-8")
+            (foreign / "foreign.mp4").write_bytes(b"not mine")
+            with self.assertRaises(ValueError):
+                ingest.create_task_cache(root, "task-1")
+            self.assertTrue((foreign / "foreign.mp4").is_file())
+
+    def test_stale_owned_dir_from_same_task_is_recreated(self) -> None:
+        """同 task_id 重试/上次 SIGKILL 遗留：所有权已验证，清理后重建。"""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "cache" / "videos"
+            stale = _make_owned_dir(root, "task-1", "stale.mp4.part")
+            candidate = ingest.create_task_cache(root, "task-1")
+            self.assertEqual(candidate, stale)
+            self.assertFalse((candidate / "stale.mp4.part").exists())
+            self.assertEqual((candidate / OWNER_MARKER).read_text(encoding="utf-8"), "task-1")
+
+    def test_symlink_cache_root_rejected_and_target_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            real_root = Path(d) / "real" / "videos"
+            real_root.mkdir(parents=True)
+            (real_root / "keep.txt").write_text("keep", encoding="utf-8")
+            link_root = Path(d) / "link" / "videos"
+            link_root.parent.mkdir()
+            link_root.symlink_to(real_root, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                ingest.create_task_cache(link_root, "task-1")
+            self.assertEqual((real_root / "keep.txt").read_text(encoding="utf-8"), "keep")
+            self.assertFalse((real_root / "task-1").exists())
+
+    def test_symlink_same_name_dir_is_not_followed(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             root = Path(d) / "cache" / "videos"
             root.mkdir(parents=True)
-            task_a = root / "task-a"
-            task_b = root / "task-b"
-            task_a.mkdir()
-            (task_a / "a.mp4").write_bytes(b"a")
-            task_b.mkdir()
-            (task_b / "b.mp4").write_bytes(b"b")
+            outside = Path(d) / "precious"
+            outside.mkdir()
+            (outside / "keep.txt").write_text("keep", encoding="utf-8")
+            (root / "task-1").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                ingest.create_task_cache(root, "task-1")
+            self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep")
+
+
+class CleanupSafetyTests(unittest.TestCase):
+    """cleanup_task_cache 只删带有效 marker 的本任务目录，保护其余一切。"""
+
+    def test_deletes_only_owned_dir_and_protects_rest(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "cache" / "videos"
+            root.mkdir(parents=True)
+            task_a = _make_owned_dir(root, "task-a", "a.mp4")
+            task_b = _make_owned_dir(root, "task-b", "b.mp4")
+            foreign = root / "task-foreign"  # 预存同名风格目录，无 marker
+            foreign.mkdir()
+            (foreign / "f.mp4").write_bytes(b"f")
             plain_file = root / "task-file"
             plain_file.write_bytes(b"not a dir")
 
@@ -148,16 +238,20 @@ class CleanupSafetyTests(unittest.TestCase):
             link = root / "task-link"
             link.symlink_to(outside, target_is_directory=True)
 
-            # symlink 目标不跟随、不删除
+            # 无 marker 的预存目录不删除
+            ingest.cleanup_task_cache(root, "task-foreign")
+            self.assertTrue((foreign / "f.mp4").is_file())
+
+            # symlink 候选不跟随、不删除
             ingest.cleanup_task_cache(root, "task-link")
             self.assertTrue(link.is_symlink())
             self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep")
 
-            # 普通文件不是本任务创建的目录，不动
+            # 普通文件不是本任务目录，不动
             ingest.cleanup_task_cache(root, "task-file")
             self.assertTrue(plain_file.is_file())
 
-            # 非常规 task_id 不删除任何内容
+            # 非法 task_id 不删除任何内容
             ingest.cleanup_task_cache(root, "../task-b")
             self.assertTrue((task_b / "b.mp4").is_file())
 
@@ -171,6 +265,54 @@ class CleanupSafetyTests(unittest.TestCase):
             ingest.cleanup_task_cache(root, "task-a")
             self.assertTrue(root.is_dir())
 
+    def test_forged_missing_and_symlink_marker_not_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "cache" / "videos"
+            root.mkdir(parents=True)
+
+            # marker 内容不符（伪造）
+            forged = root / "task-forged"
+            forged.mkdir()
+            (forged / OWNER_MARKER).write_text("someone-else", encoding="utf-8")
+            (forged / "v.mp4").write_bytes(b"v")
+
+            # 缺 marker
+            missing = root / "task-missing"
+            missing.mkdir()
+            (missing / "v.mp4").write_bytes(b"v")
+
+            # marker 是 symlink（即使指向内容正确的文件）
+            real_marker = Path(d) / "real-marker"
+            real_marker.write_text("task-symlinked", encoding="utf-8")
+            symlinked = root / "task-symlinked"
+            symlinked.mkdir()
+            (symlinked / OWNER_MARKER).symlink_to(real_marker)
+            (symlinked / "v.mp4").write_bytes(b"v")
+
+            for task_id in ("task-forged", "task-missing", "task-symlinked"):
+                ingest.cleanup_task_cache(root, task_id)
+                self.assertTrue((root / task_id / "v.mp4").is_file(), task_id)
+
+            # 内容正确的普通文件 marker 可以删除
+            owned = _make_owned_dir(root, "task-ok", "v.mp4")
+            ingest.cleanup_task_cache(root, "task-ok")
+            self.assertFalse(owned.exists())
+
+    def test_symlink_cache_root_not_followed(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            real_root = Path(d) / "real" / "videos"
+            real_root.mkdir(parents=True)
+            owned = _make_owned_dir(real_root, "task-1", "v.mp4")
+            link_root = Path(d) / "link" / "videos"
+            link_root.parent.mkdir()
+            link_root.symlink_to(real_root, target_is_directory=True)
+
+            ingest.cleanup_task_cache(link_root, "task-1")
+            # 不跟随 root symlink：目标目录与内容都不受影响
+            self.assertTrue(link_root.is_symlink())
+            self.assertTrue((owned / "v.mp4").is_file())
+            self.assertTrue((owned / OWNER_MARKER).is_file())
+
     def test_video_cleanup_never_touches_image_cache(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             cache = Path(d) / "cache"
@@ -179,9 +321,7 @@ class CleanupSafetyTests(unittest.TestCase):
             videos.mkdir(parents=True)
             images.mkdir(parents=True)
             (images / "01.jpg").write_bytes(b"img")
-            task_dir = videos / "task-x"
-            task_dir.mkdir()
-            (task_dir / "v.mp4").write_bytes(b"v")
+            task_dir = _make_owned_dir(videos, "task-x", "v.mp4")
 
             ingest.cleanup_task_cache(videos, "task-x")
             self.assertFalse(task_dir.exists())
@@ -191,7 +331,7 @@ class CleanupSafetyTests(unittest.TestCase):
 class MainLifecycleTests(unittest.TestCase):
     """main() 在成功/失败/异常/取消/并发下都清理本任务缓存目录。"""
 
-    def _run_main(self, tmp: Path, fake_run_task, expect_raises=None):
+    def _run_main(self, tmp: Path, fake_run_task, expect_raises=None, argv=None):
         vault = tmp / "vault"
         vault.mkdir(exist_ok=True)
         cfg = _config(tmp, vault)
@@ -207,9 +347,9 @@ class MainLifecycleTests(unittest.TestCase):
         ):
             if expect_raises is not None:
                 with self.assertRaises(expect_raises):
-                    ingest.main(["--url", "https://v.douyin.com/test/"])
+                    ingest.main(argv or ["--url", "https://v.douyin.com/test/"])
                 return captured, None
-            code = ingest.main(["--url", "https://v.douyin.com/test/"])
+            code = ingest.main(argv or ["--url", "https://v.douyin.com/test/"])
         return captured, code
 
     def test_success_cleans_only_own_task_cache(self) -> None:
@@ -224,6 +364,11 @@ class MainLifecycleTests(unittest.TestCase):
                 cache_dir = kwargs["cache_dir"]
                 self.assertEqual(cache_dir.parent, cache_root)
                 self.assertEqual(kwargs["image_cache_dir"], tmp / "runtime" / "cache" / "images")
+                # 进入任务时目录已带本任务 owner marker
+                self.assertEqual(
+                    (cache_dir / OWNER_MARKER).read_text(encoding="utf-8"),
+                    kwargs["task_id"],
+                )
                 (cache_dir / "video.mp4").write_bytes(b"fake-video")
                 return {"vault_path": str(tmp / "vault" / "asset.md")}
 
@@ -316,6 +461,71 @@ class MainLifecycleTests(unittest.TestCase):
                 self.assertFalse(cache_dir.exists(), task_id)
             self.assertTrue(cache_root.is_dir())
 
+    def _write_task_file(self, tmp: Path, task_id: str) -> Path:
+        inbox = tmp / "runtime" / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        task_file = inbox / f"{_status_safe(task_id)}.json"
+        import json
+        task_file.write_text(
+            json.dumps({"id": task_id, "url": "https://v.douyin.com/test/"}),
+            encoding="utf-8",
+        )
+        return task_file
+
+    def test_invalid_task_id_creates_nothing_and_leaks_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cache_root = tmp / "runtime" / "cache" / "videos"
+            task_file = self._write_task_file(tmp, "bad/id")
+
+            async def fake_run_task(**kwargs):
+                raise AssertionError("非法 task_id 不得进入任务执行")
+
+            _captured, code = self._run_main(tmp, fake_run_task, argv=["--task", str(task_file)])
+            self.assertEqual(code, 2)
+            # 不创建消毒后的泄漏目录
+            self.assertFalse(cache_root.exists() and any(cache_root.iterdir()))
+            # 任务文件进 failed/，status 用安全文件名记录 task_invalid
+            self.assertFalse(task_file.exists())
+            self.assertTrue((tmp / "runtime" / "failed" / task_file.name).is_file())
+            status = (tmp / "runtime" / "status" / "bad-id.json").read_text(encoding="utf-8")
+            self.assertIn("task_invalid", status)
+
+    def test_preexisting_unmarked_dir_not_reused_not_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cache_root = tmp / "runtime" / "cache" / "videos"
+            foreign = cache_root / "fixed-task-1"
+            foreign.mkdir(parents=True)
+            (foreign / "foreign.mp4").write_bytes(b"not mine")
+            task_file = self._write_task_file(tmp, "fixed-task-1")
+
+            async def fake_run_task(**kwargs):
+                raise AssertionError("无所有权标记的同名目录不得被复用")
+
+            _captured, code = self._run_main(tmp, fake_run_task, argv=["--task", str(task_file)])
+            self.assertEqual(code, 2)
+            self.assertEqual((foreign / "foreign.mp4").read_bytes(), b"not mine")
+            self.assertFalse((foreign / OWNER_MARKER).exists())
+
+    def test_retry_recreates_stale_owned_dir(self) -> None:
+        """同 task_id 重试：带有效 marker 的遗留目录清理重建，任务正常完成。"""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cache_root = tmp / "runtime" / "cache" / "videos"
+            _make_owned_dir(cache_root, "fixed-task-2", "stale.mp4.part")
+            task_file = self._write_task_file(tmp, "fixed-task-2")
+
+            async def fake_run_task(**kwargs):
+                cache_dir = kwargs["cache_dir"]
+                self.assertFalse((cache_dir / "stale.mp4.part").exists())
+                (cache_dir / "video.mp4").write_bytes(b"fake-video")
+                return {"vault_path": str(tmp / "vault" / "asset.md")}
+
+            captured, code = self._run_main(tmp, fake_run_task, argv=["--task", str(task_file)])
+            self.assertEqual(code, 0)
+            self.assertFalse(captured["cache_dir"].exists())
+
 
 class ImagePipelineCacheTests(unittest.TestCase):
     """图文链路：显式 image_cache_dir 生效，且不被视频缓存清理影响。"""
@@ -326,8 +536,7 @@ class ImagePipelineCacheTests(unittest.TestCase):
             vault = tmp / "vault"
             vault.mkdir()
             cfg = _config(tmp, vault)
-            video_cache = tmp / "runtime" / "cache" / "videos" / "image-task"
-            video_cache.mkdir(parents=True)
+            video_cache = ingest.create_task_cache(tmp / "runtime" / "cache" / "videos", "image-task")
             image_cache = tmp / "runtime" / "cache" / "images"
             meta = FakeImageMeta()
             image_paths = [tmp / "01.jpg", tmp / "02.jpg"]
@@ -392,6 +601,71 @@ class ImagePipelineCacheTests(unittest.TestCase):
             self.assertTrue(image_cache.is_dir() or not image_cache.exists())
 
 
+class ServerFallbackCleanupTests(unittest.TestCase):
+    """websocket_server 的 SIGKILL 兜底清理与 ingest 规则一致。"""
+
+    def test_safe_remove_task_video_cache(self) -> None:
+        sys.path.insert(0, str(ROOT))
+        from server.websocket_server import _safe_remove_task_video_cache
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "cache" / "videos"
+            root.mkdir(parents=True)
+            task = _make_owned_dir(root, "task-1", "v.mp4")
+            other = _make_owned_dir(root, "task-2", "v.mp4")
+            unmarked = root / "task-3"
+            unmarked.mkdir()
+            (unmarked / "v.mp4").write_bytes(b"v")
+            forged = root / "task-4"
+            forged.mkdir()
+            (forged / OWNER_MARKER).write_text("forged", encoding="utf-8")
+            (forged / "v.mp4").write_bytes(b"v")
+
+            outside = Path(d) / "precious"
+            outside.mkdir()
+            (outside / "keep.txt").write_text("keep", encoding="utf-8")
+            link = root / "task-link"
+            link.symlink_to(outside, target_is_directory=True)
+
+            _safe_remove_task_video_cache(root, "task-link")
+            self.assertTrue(link.is_symlink())
+            self.assertTrue((outside / "keep.txt").is_file())
+
+            _safe_remove_task_video_cache(root, "../task-2")
+            self.assertTrue((other / "v.mp4").is_file())
+
+            # 无 marker / 伪造 marker 不删除
+            _safe_remove_task_video_cache(root, "task-3")
+            self.assertTrue((unmarked / "v.mp4").is_file())
+            _safe_remove_task_video_cache(root, "task-4")
+            self.assertTrue((forged / "v.mp4").is_file())
+
+            _safe_remove_task_video_cache(root, "task-1")
+            self.assertFalse(task.exists())
+            self.assertTrue((other / "v.mp4").is_file())
+            self.assertTrue(root.is_dir())
+
+            # 不存在的目录是 no-op
+            _safe_remove_task_video_cache(root, "task-1")
+            self.assertTrue(root.is_dir())
+
+    def test_safe_remove_symlink_cache_root_not_followed(self) -> None:
+        sys.path.insert(0, str(ROOT))
+        from server.websocket_server import _safe_remove_task_video_cache
+
+        with tempfile.TemporaryDirectory() as d:
+            real_root = Path(d) / "real" / "videos"
+            real_root.mkdir(parents=True)
+            owned = _make_owned_dir(real_root, "task-1", "v.mp4")
+            link_root = Path(d) / "link" / "videos"
+            link_root.parent.mkdir()
+            link_root.symlink_to(real_root, target_is_directory=True)
+
+            _safe_remove_task_video_cache(link_root, "task-1")
+            self.assertTrue(link_root.is_symlink())
+            self.assertTrue((owned / "v.mp4").is_file())
+
+
 class VideoVaultWriteTests(unittest.TestCase):
     """视频入库：不复制 mp4 进 vault、Markdown 无原始媒体 embed、无 Git。"""
 
@@ -447,44 +721,8 @@ class VideoVaultWriteTests(unittest.TestCase):
         self.assertIn("原始媒体", image_template)
 
 
-class ServerFallbackCleanupTests(unittest.TestCase):
-    """websocket_server 的 SIGKILL 兜底清理与 ingest 规则一致。"""
-
-    def test_safe_remove_task_video_cache(self) -> None:
-        sys.path.insert(0, str(ROOT))
-        from server.websocket_server import _safe_remove_task_video_cache
-
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d) / "cache" / "videos"
-            root.mkdir(parents=True)
-            task = root / "task-1"
-            task.mkdir()
-            (task / "v.mp4").write_bytes(b"v")
-            other = root / "task-2"
-            other.mkdir()
-            (other / "v.mp4").write_bytes(b"v")
-
-            outside = Path(d) / "precious"
-            outside.mkdir()
-            (outside / "keep.txt").write_text("keep", encoding="utf-8")
-            link = root / "task-link"
-            link.symlink_to(outside, target_is_directory=True)
-
-            _safe_remove_task_video_cache(root, "task-link")
-            self.assertTrue(link.is_symlink())
-            self.assertTrue((outside / "keep.txt").is_file())
-
-            _safe_remove_task_video_cache(root, "../task-2")
-            self.assertTrue((other / "v.mp4").is_file())
-
-            _safe_remove_task_video_cache(root, "task-1")
-            self.assertFalse(task.exists())
-            self.assertTrue((other / "v.mp4").is_file())
-            self.assertTrue(root.is_dir())
-
-            # 不存在的目录是 no-op
-            _safe_remove_task_video_cache(root, "task-1")
-            self.assertTrue(root.is_dir())
+def _status_safe(task_id: str) -> str:
+    return ingest._status_safe_task_id(task_id)
 
 
 def main() -> int:
