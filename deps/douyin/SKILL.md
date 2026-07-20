@@ -15,7 +15,7 @@ download, analysis, vault writes, index updates, and status.
 
 | Module | Responsibility |
 |---|---|
-| `scripts/ingest.py` | Orchestrate download, analysis, source-note/raw-media write, and index update |
+| `scripts/ingest.py` | Orchestrate download, analysis, source-note write, image raw-media write, and index update; video cache is task-private (`cache/videos/<task_id>/`) and removed after the run |
 | `scripts/downloader.py` | Resolve Douyin URL, inject Cookie in memory, download mp4 |
 | `scripts/analyzer.py` | Choose Ark video input path, call Responses API, return analysis text |
 | `scripts/config_loader.py` | Load `~/.agent-wiki/config.toml` |

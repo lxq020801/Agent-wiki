@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import subprocess
 import tempfile
@@ -503,6 +504,29 @@ def _json_file(path):
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _safe_remove_task_video_cache(cache_root, task_id):
+    """删除任务私有视频缓存目录 cache/videos/<task_id>/。
+
+    ingest 子进程正常退出（含 SIGTERM）时已自行清理；这里兜底 SIGKILL 等
+    无法自清理的场景，目录不存在时是 no-op。安全规则与
+    ingest.cleanup_task_cache 一致：只删 cache_root 直接子级、不跟随
+    symlink、非常规 task_id 不动、不影响其他任务目录。
+    """
+    try:
+        raw_id = str(task_id or '')
+        if not raw_id or re.sub(r'[^A-Za-z0-9._-]+', '-', raw_id).strip('-.') != raw_id:
+            return
+        root = Path(cache_root).resolve()
+        candidate = Path(cache_root) / raw_id
+        if candidate.is_symlink() or not candidate.exists() or not candidate.is_dir():
+            return
+        if candidate.resolve().parent != root:
+            return
+        shutil.rmtree(candidate)
+    except OSError:
+        pass
 
 
 def _write_json_atomic(path, payload):
@@ -2743,6 +2767,7 @@ class LibrarianServer:
             log(f"[Server] 任务执行失败: {task_id} {type(exc).__name__}")
         finally:
             self.task_processes.pop(task_id, None)
+            _safe_remove_task_video_cache(self.runtime_root / 'cache' / 'videos', task_id)
             self.running_task_ids.discard(task_id)
             self.current_task_id = sorted(self.running_task_ids)[0] if self.running_task_ids else None
 
