@@ -125,7 +125,7 @@ class FakeStatusWriter:
 
 class TaskCacheIdTests(unittest.TestCase):
     def test_valid_ids_accepted(self) -> None:
-        for task_id in ("20260720-101530-ab12", "task-1", "ULID01ABC.def_2"):
+        for task_id in ("20260720-101530-ab12", "task-1", "ULID01ABC.def_2", "a.b.c"):
             self.assertTrue(ingest._is_valid_task_cache_id(task_id), task_id)
             root = Path("/tmp/agent-wiki-test-cache")
             candidate = ingest.task_cache_dir(root, task_id)
@@ -133,7 +133,7 @@ class TaskCacheIdTests(unittest.TestCase):
             self.assertEqual(candidate.name, task_id)
 
     def test_invalid_ids_rejected_without_sanitized_leak(self) -> None:
-        for task_id in ("", "../escape", "..", "a/b", ".hidden", "-lead", "bad id", ".." + "/"):
+        for task_id in ("", "../escape", "..", "a..b", "a/b", ".hidden", "-lead", "bad id", ".." + "/"):
             self.assertFalse(ingest._is_valid_task_cache_id(task_id), task_id)
             with self.assertRaises(ValueError, msg=task_id):
                 ingest.task_cache_dir(Path("/tmp/agent-wiki-test-cache"), task_id)
@@ -216,6 +216,27 @@ class CreateTaskCacheTests(unittest.TestCase):
                 ingest.create_task_cache(root, "task-1")
             self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep")
 
+    def test_marker_creation_failure_leaves_no_unmarked_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "cache" / "videos"
+            real_open = os.open
+
+            def flaky_open(path, flags, mode=0o777):
+                if str(path).endswith(OWNER_MARKER):
+                    raise OSError("mock marker open failure")
+                return real_open(path, flags, mode)
+
+            with mock.patch.object(os, "open", flaky_open):
+                with self.assertRaisesRegex(OSError, "mock marker open failure"):
+                    ingest.create_task_cache(root, "task-1")
+            # 不留无 marker 的空目录
+            self.assertFalse((root / "task-1").exists())
+            # 失败后仍可正常创建
+            candidate = ingest.create_task_cache(root, "task-1")
+            self.assertEqual(
+                (candidate / OWNER_MARKER).read_text(encoding="utf-8"), "task-1",
+            )
+
 
 class CleanupSafetyTests(unittest.TestCase):
     """cleanup_task_cache 只删带有效 marker 的本任务目录，保护其余一切。"""
@@ -254,6 +275,11 @@ class CleanupSafetyTests(unittest.TestCase):
             # 非法 task_id 不删除任何内容
             ingest.cleanup_task_cache(root, "../task-b")
             self.assertTrue((task_b / "b.mp4").is_file())
+
+            # 含 '..' 的 id 一律拒绝，即使目录带 marker
+            dotted = _make_owned_dir(root, "a..b", "v.mp4")
+            ingest.cleanup_task_cache(root, "a..b")
+            self.assertTrue((dotted / "v.mp4").is_file())
 
             # 正常删除本任务目录，其他任务不受影响
             ingest.cleanup_task_cache(root, "task-a")
@@ -461,16 +487,47 @@ class MainLifecycleTests(unittest.TestCase):
                 self.assertFalse(cache_dir.exists(), task_id)
             self.assertTrue(cache_root.is_dir())
 
-    def _write_task_file(self, tmp: Path, task_id: str) -> Path:
+    def _write_task_file(self, tmp: Path, task_id: str, **overrides) -> Path:
         inbox = tmp / "runtime" / "inbox"
         inbox.mkdir(parents=True, exist_ok=True)
         task_file = inbox / f"{_status_safe(task_id)}.json"
         import json
-        task_file.write_text(
-            json.dumps({"id": task_id, "url": "https://v.douyin.com/test/"}),
-            encoding="utf-8",
-        )
+        payload = {"id": task_id, "url": "https://v.douyin.com/test/"}
+        payload.update(overrides)
+        if payload.get("url") is None:
+            payload.pop("url")
+        task_file.write_text(json.dumps(payload), encoding="utf-8")
         return task_file
+
+    def test_missing_url_leaves_no_cache_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cache_root = tmp / "runtime" / "cache" / "videos"
+            task_file = self._write_task_file(tmp, "no-url-task", url=None)
+
+            async def fake_run_task(**kwargs):
+                raise AssertionError("缺 url 的任务不得进入执行")
+
+            _captured, code = self._run_main(tmp, fake_run_task, argv=["--task", str(task_file)])
+            self.assertEqual(code, 2)
+            self.assertFalse((cache_root / "no-url-task").exists())
+            self.assertFalse(cache_root.exists() and any(cache_root.iterdir()))
+
+    def test_invalid_ingest_intent_leaves_no_cache_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cache_root = tmp / "runtime" / "cache" / "videos"
+            task_file = self._write_task_file(
+                tmp, "bad-intent-task", ingest_intent="viral_breakdown",
+            )
+
+            async def fake_run_task(**kwargs):
+                raise AssertionError("非法 ingest_intent 的任务不得进入执行")
+
+            _captured, code = self._run_main(tmp, fake_run_task, argv=["--task", str(task_file)])
+            self.assertEqual(code, 2)
+            self.assertFalse((cache_root / "bad-intent-task").exists())
+            self.assertFalse(cache_root.exists() and any(cache_root.iterdir()))
 
     def test_invalid_task_id_creates_nothing_and_leaks_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -633,6 +690,11 @@ class ServerFallbackCleanupTests(unittest.TestCase):
 
             _safe_remove_task_video_cache(root, "../task-2")
             self.assertTrue((other / "v.mp4").is_file())
+
+            # 含 '..' 的 id 一律拒绝
+            dotted = _make_owned_dir(root, "a..b", "v.mp4")
+            _safe_remove_task_video_cache(root, "a..b")
+            self.assertTrue((dotted / "v.mp4").is_file())
 
             # 无 marker / 伪造 marker 不删除
             _safe_remove_task_video_cache(root, "task-3")

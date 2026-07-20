@@ -424,7 +424,8 @@ _TASK_CACHE_OWNER_MARKER = ".agent-wiki-task-owner"
 
 def _is_valid_task_cache_id(task_id: str) -> bool:
     """合法 task_id：字母数字开头，只含 [A-Za-z0-9._-]，不含分隔符和 `..`。"""
-    return bool(_TASK_CACHE_ID_RE.fullmatch(str(task_id or "")))
+    raw = str(task_id or "")
+    return bool(_TASK_CACHE_ID_RE.fullmatch(raw)) and ".." not in raw
 
 
 def _status_safe_task_id(task_id: str) -> str:
@@ -454,8 +455,13 @@ def _has_valid_owner_marker(candidate: Path, task_id: str) -> bool:
         return False
     if not stat.S_ISREG(mst.st_mode):  # symlink / 伪造为目录都不算
         return False
+    # lstat 后再用 O_NOFOLLOW 打开，缩小 lstat→open 之间的 symlink swap 窗口
     try:
-        with open(marker, encoding="utf-8") as f:  # lstat 已确认是普通文件
+        fd = os.open(marker, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, encoding="utf-8") as f:
             return f.read().strip() == str(task_id)
     except OSError:
         return False
@@ -486,15 +492,25 @@ def create_task_cache(cache_root: Path, task_id: str) -> Path:
         shutil.rmtree(candidate)  # 同任务遗留，所有权已验证
         candidate.mkdir()
     marker = candidate / _TASK_CACHE_OWNER_MARKER
-    fd = os.open(
-        marker,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
     try:
-        os.write(fd, str(task_id).encode("utf-8"))
-    finally:
-        os.close(fd)
+        fd = os.open(
+            marker,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            os.write(fd, str(task_id).encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError:
+        # marker 建不出来就不能留下无 marker 的空目录（cleanup 永远无法识别）。
+        # 目录是我们刚创建的，只安全移除自己产生的内容。
+        try:
+            marker.unlink(missing_ok=True)
+            candidate.rmdir()  # 只在仍为空时成功；有意外内容则保留现场
+        except OSError:
+            pass
+        raise
     return candidate
 
 
@@ -1662,20 +1678,6 @@ def main(argv: list[str] | None = None) -> int:
     base_dir = config.bridge_root
     status_dir = base_dir / "status"
     cache_root = base_dir / "cache" / "videos"
-    try:
-        cache_dir = create_task_cache(cache_root, task_id)
-    except ValueError as e:
-        # 非法 task_id、cache_root 是 symlink、同名目录无本任务所有权标记：
-        # 不复用、不删除、不创建泄漏目录。
-        write_terminal(_status_safe_task_id(task_id), status_dir, {
-            "ok": False, "stage": "task_invalid",
-            "error": str(e),
-        })
-        if task_file:
-            _archive_task(task_file, base_dir, ok=False)
-        print(f"✗ {e}", file=sys.stderr)
-        return 2
-    image_cache_dir = base_dir / "cache" / "images"
 
     # ── 2. 确定 url / quality / ingest_intent ──
     if task_data is not None:
@@ -1711,6 +1713,22 @@ def main(argv: list[str] | None = None) -> int:
             _archive_task(task_file, base_dir, ok=False)
         print(f"✗ {e}", file=sys.stderr)
         return 2
+
+    # ── 2b. 所有无下载前置校验通过后才创建任务私有缓存目录 ──
+    try:
+        cache_dir = create_task_cache(cache_root, task_id)
+    except (ValueError, OSError) as e:
+        # 非法 task_id、cache_root 是 symlink、同名目录无本任务所有权标记、
+        # marker 创建失败：不复用、不删除、不创建泄漏目录。
+        write_terminal(_status_safe_task_id(task_id), status_dir, {
+            "ok": False, "stage": "task_invalid",
+            "error": str(e),
+        })
+        if task_file:
+            _archive_task(task_file, base_dir, ok=False)
+        print(f"✗ {e}", file=sys.stderr)
+        return 2
+    image_cache_dir = base_dir / "cache" / "images"
 
     # ── 2. 跑 ──
     sw = StatusWriter(

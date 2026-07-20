@@ -522,7 +522,7 @@ def _safe_remove_task_video_cache(cache_root, task_id):
     """
     try:
         raw_id = str(task_id or '')
-        if not _TASK_VIDEO_CACHE_ID_RE.fullmatch(raw_id):
+        if not _TASK_VIDEO_CACHE_ID_RE.fullmatch(raw_id) or '..' in raw_id:
             return
         root = Path(cache_root)
         if root.is_symlink() or not root.is_dir():
@@ -541,8 +541,13 @@ def _safe_remove_task_video_cache(cache_root, task_id):
             return
         if not stat.S_ISREG(mst.st_mode):
             return
+        # lstat 后再用 O_NOFOLLOW 打开，缩小 lstat→open 之间的 symlink swap 窗口
         try:
-            with open(marker, encoding='utf-8') as f:  # lstat 已确认是普通文件
+            fd = os.open(marker, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        except OSError:
+            return
+        try:
+            with os.fdopen(fd, encoding='utf-8') as f:
                 if f.read().strip() != raw_id:
                     return
         except OSError:
