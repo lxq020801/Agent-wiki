@@ -28,8 +28,8 @@
 ```
 vault/
 ├── index.md                  ← 知识库总索引，每次写入后必须更新
-├── raw/                      ← 原始抓取物（视频字幕、网页HTML、GitHub README）
-│   ├── videos/  images/  web/  github/
+├── raw/                      ← 原始抓取物（图文图片、网页HTML、GitHub README）
+│   ├── images/  web/  github/
 ├── 知识资产/                  ← agent 产出的结构化笔记（正式产出区）
 │   ├── 知识入库/  GitHub项目/  网页剪藏/  代码模块/
 ├── 系统记录/                  ← 可选的人工维护区；普通入库不会夹带写入规则或候选文件
@@ -38,6 +38,7 @@ vault/
 ```
 
 > `raw/` 是原始证据层，agent 只能新增、不得修改已有文件。`知识资产/` 是正式产出。`系统记录/` 存放管理数据。
+> 视频文件不进入 `raw/`：抖音视频只下载到运行时的任务私有缓存目录（`cache/videos/<task_id>/`），任务结束（成功、失败或取消）即删除；视频资产通过 `source_url`、`source_id` 等元数据追溯原始内容。
 
 ---
 

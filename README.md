@@ -43,7 +43,7 @@ Chrome 扩展
         |
         v
 Obsidian 知识库文件夹
-  Markdown 来源资产 / 原始媒体 / index.md
+  Markdown 来源资产 / 来源图片 / index.md
 ```
 
 - **Chrome 扩展**是本地控制台，不直接下载、分析或写知识库。它提供抖音 Cookie 同步、Ark 配置、系统文件夹选择、任务状态、GitHub 登录与导入入口，并自动跟随系统深色或浅色外观。

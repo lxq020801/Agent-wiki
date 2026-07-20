@@ -76,6 +76,14 @@ jobs:
           NO_PROXY: 127.0.0.1,localhost,::1
         run: python tests/test_douyin_image_post_static.py
 
+      - name: Run video cache lifecycle checks
+        env:
+          ALL_PROXY: http://127.0.0.1:9
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          NO_PROXY: 127.0.0.1,localhost,::1
+        run: python tests/test_video_cache_lifecycle.py
+
       - name: Run runtime manager checks
         env:
           ALL_PROXY: http://127.0.0.1:9

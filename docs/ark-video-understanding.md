@@ -4,7 +4,7 @@
 
 ## 主链路
 
-1. 下载抖音视频到本地 mp4。
+1. 下载抖音视频到任务私有缓存目录 `cache/videos/<task_id>/`；任务结束（成功、失败或取消）即删除，不复制进知识库，资产通过 `source_url` 等元数据追溯原始内容。
 2. 通过普通 Ark Files API 上传：
    - `POST /api/v3/files`
    - `purpose = user_data`

@@ -52,8 +52,7 @@ vault/
 ├── SCHEMA.md                 ← 当前结构和字段契约
 ├── index.md                  ← 知识库总索引
 ├── templates/                ← 来源模板与资产模板的 Markdown 骨架
-├── raw/                      ← 原始抓取物
-│   ├── videos/
+├── raw/                      ← 原始抓取物（视频不入库，见 SCHEMA.md）
 │   ├── images/
 │   ├── web/
 │   └── github/

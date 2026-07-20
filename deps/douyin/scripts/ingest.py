@@ -14,11 +14,12 @@ Supported lower-level modes:
 Flow:
   1. 加载 config（失败 -> status 报错退出）
   2. 创建 StatusWriter
-  3. download（vendor + cookie 注入）
+  3. download（vendor + cookie 注入，视频写入任务私有目录 cache/videos/<task_id>/）
   4. analyze（Ark Files + Responses）
-  5. 写 SCHEMA Markdown + 更新 index.md
+  5. 写 SCHEMA Markdown + 更新 index.md（视频不复制进 vault，只保留 source_url 等元数据）
   6. task-file 模式归档到 archive/ 或 failed/
   7. 终态 status.json
+  8. 成功、失败、SIGTERM/取消均删除本任务的 cache/videos/<task_id>/（不跟随 symlink，不影响其他任务）
 """
 from __future__ import annotations
 
@@ -28,7 +29,10 @@ import json
 import os
 import re
 import shutil
+import signal
+import stat
 import sys
+import threading
 import time
 import traceback
 import uuid
@@ -409,6 +413,150 @@ def _make_task_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
 
 
+# ─────────────────────────────────────────────────────────────────
+# 任务私有视频缓存
+# ─────────────────────────────────────────────────────────────────
+
+_TASK_CACHE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_TASK_CACHE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_TASK_CACHE_OWNER_MARKER = ".agent-wiki-task-owner"
+
+
+def _is_valid_task_cache_id(task_id: str) -> bool:
+    """合法 task_id：字母数字开头，只含 [A-Za-z0-9._-]，不含分隔符和 `..`。"""
+    raw = str(task_id or "")
+    return bool(_TASK_CACHE_ID_RE.fullmatch(raw)) and ".." not in raw
+
+
+def _status_safe_task_id(task_id: str) -> str:
+    """写 status 文件名用的安全 id（不用于缓存目录命名）。"""
+    return _TASK_CACHE_NAME_RE.sub("-", str(task_id or "")).strip("-.") or "invalid-task"
+
+
+def task_cache_dir(cache_root: Path, task_id: str) -> Path:
+    """任务私有视频缓存目录路径；非法 task_id 直接拒绝，不做消毒。"""
+    if not _is_valid_task_cache_id(task_id):
+        raise ValueError(f"非法 task_id，拒绝用于缓存目录: {task_id!r}")
+    return Path(cache_root) / str(task_id)
+
+
+def _has_valid_owner_marker(candidate: Path, task_id: str) -> bool:
+    """lstat 不跟随语义核验目录归属：普通目录 + 普通文件 marker + 内容等于 task_id。"""
+    try:
+        st = os.lstat(candidate)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(st.st_mode):  # symlink / 普通文件都不是本任务目录
+        return False
+    marker = candidate / _TASK_CACHE_OWNER_MARKER
+    try:
+        mst = os.lstat(marker)
+    except OSError:
+        return False
+    if not stat.S_ISREG(mst.st_mode):  # symlink / 伪造为目录都不算
+        return False
+    # lstat 后再用 O_NOFOLLOW 打开，缩小 lstat→open 之间的 symlink swap 窗口
+    try:
+        fd = os.open(marker, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, encoding="utf-8") as f:
+            return f.read().strip() == str(task_id)
+    except OSError:
+        return False
+
+
+def create_task_cache(cache_root: Path, task_id: str) -> Path:
+    """创建任务私有缓存目录并写入私有 owner marker（O_EXCL + O_NOFOLLOW）。
+
+    所有权语义：
+    - 非法 task_id 直接 ValueError，不创建任何目录（也不消毒后泄漏目录）；
+    - cache_root 是 symlink 时拒绝，不跟随到运行目录之外；
+    - 同名目录已存在：仅当它带本任务有效 owner marker（同 task_id 重试、
+      上次被 SIGKILL 的遗留）才清理重建；无标记或标记不符直接 ValueError，
+      既不复用也不删除。
+    """
+    candidate = task_cache_dir(cache_root, task_id)  # 非法 id 在这里拒绝
+    root = Path(cache_root)
+    if root.is_symlink():
+        raise ValueError(f"任务缓存根目录不得是 symlink: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        candidate.mkdir()
+    except FileExistsError:
+        if not _has_valid_owner_marker(candidate, str(task_id)):
+            raise ValueError(
+                f"任务缓存目录已存在且没有本任务所有权标记，拒绝复用: {candidate}"
+            ) from None
+        shutil.rmtree(candidate)  # 同任务遗留，所有权已验证
+        candidate.mkdir()
+    marker = candidate / _TASK_CACHE_OWNER_MARKER
+    try:
+        fd = os.open(
+            marker,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            os.write(fd, str(task_id).encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError:
+        # marker 建不出来就不能留下无 marker 的空目录（cleanup 永远无法识别）。
+        # 目录是我们刚创建的，只安全移除自己产生的内容。
+        try:
+            marker.unlink(missing_ok=True)
+            candidate.rmdir()  # 只在仍为空时成功；有意外内容则保留现场
+        except OSError:
+            pass
+        raise
+    return candidate
+
+
+def cleanup_task_cache(cache_root: Path, task_id: str) -> None:
+    """安全删除任务私有缓存目录：只删除带有效 owner marker 的本任务目录。
+
+    - 非法 task_id 不删除任何内容；
+    - cache_root 是 symlink 时不跟随、不删除；
+    - 目录缺失、是 symlink/普通文件、缺 marker、marker 是 symlink 或内容
+      不符（伪造）时一律不动；
+    - 其他任务目录、cache_root 本身及其余内容一律不触碰。
+    """
+    try:
+        raw_id = str(task_id or "")
+        if not _is_valid_task_cache_id(raw_id):
+            return
+        root = Path(cache_root)
+        if root.is_symlink() or not root.is_dir():
+            return
+        candidate = root / raw_id
+        if not _has_valid_owner_marker(candidate, raw_id):
+            return
+        shutil.rmtree(candidate)
+    except OSError as e:
+        print(f"⚠ 任务缓存清理失败（不影响任务结果）: {e}", file=sys.stderr)
+
+
+class _SigTermReceived(KeyboardInterrupt):
+    """SIGTERM 转为可捕获异常，让 finally 里的缓存清理能执行。"""
+
+
+def _install_sigterm_handler():
+    """在主线程把 SIGTERM 转成 _SigTermReceived；返回原 handler 供恢复。"""
+    if threading.current_thread() is not threading.main_thread():
+        return None
+    def _handler(signum, frame):
+        raise _SigTermReceived(f"收到信号 {signum}，任务被取消")
+    return signal.signal(signal.SIGTERM, _handler)
+
+
+def _restore_sigterm_handler(previous) -> None:
+    if previous is None or threading.current_thread() is not threading.main_thread():
+        return
+    signal.signal(signal.SIGTERM, previous)
+
+
 def _load_task(task_file: Path) -> dict[str, Any]:
     """加载 inbox JSON。"""
     if not task_file.exists():
@@ -470,10 +618,6 @@ aweme_id: "{aweme_id}"
 {concise}
 
 ## 完整内容整理
-
-### 原始媒体
-
-![[{video_path}]]
 
 {complete}
 
@@ -763,7 +907,11 @@ def _write_to_vault_locked(
     derived_decision: dict[str, Any] | None = None,
     task_id: str = "",
 ) -> tuple[Path, str]:
-    """把拆解结果写到 vault；Git 由用户或外部备份工具管理。"""
+    """把拆解结果写到 vault；Git 由用户或外部备份工具管理。
+
+    视频文件只存在于任务私有缓存目录，任务结束后删除；不复制进 vault，
+    Markdown 通过 source_url 等元数据追溯原始内容。
+    """
     ingest_intent = normalize_ingest_intent(ingest_intent)
     profile = _intent_profile(ingest_intent)
     source_media = "douyin_video"
@@ -773,21 +921,6 @@ def _write_to_vault_locked(
     sections = _source_sections_from_analysis(result.text, meta.title)
     tags = _tags_for_asset(ingest_intent, source_media, f"{meta.title}\n{result.text}")
     _ensure_vault_structure(config.vault_path)
-
-    # 视频文件搬进 vault（如果不在 vault 内）
-    raw_dir = config.vault_path / "raw" / "videos"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-
-    if config.vault_path not in video_path.parents:
-        target_video = raw_dir / video_path.name
-        if not target_video.exists():
-            shutil.copy2(video_path, target_video)
-        vault_video_path = target_video
-    else:
-        vault_video_path = video_path
-
-    # 计算 video_path 相对 vault 的引用
-    rel_video = vault_video_path.relative_to(config.vault_path)
 
     # Markdown 输出位置
     md_dir = config.vault_path / _purpose_relative_dir(ingest_intent)
@@ -826,7 +959,6 @@ def _write_to_vault_locked(
         author_escaped=_yaml_escape(meta.author or ""),
         date_iso=date_iso,
         duration_sec_fmt=_format_duration(meta.duration_sec),
-        video_path=str(rel_video),
         source_title_quote=_source_title_quote(meta.title),
         concise=sections["concise"],
         complete=sections["complete"],
@@ -1036,8 +1168,14 @@ async def run_task(
     config: Config,
     sw: StatusWriter,
     cache_dir: Path,
+    image_cache_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """执行一个任务，返回最终 state 摘要。"""
+    """执行一个任务，返回最终 state 摘要。
+
+    cache_dir 是任务私有视频缓存目录（cache/videos/<task_id>/），任务结束
+    后由调用方删除；image_cache_dir 是图文图片缓存目录，默认保持历史位置
+    cache_dir.parent / "images"。
+    """
     ingest_intent = normalize_ingest_intent(ingest_intent)
     profile = _intent_profile(ingest_intent)
 
@@ -1090,7 +1228,7 @@ async def run_task(
 
             image_paths = await download_images(
                 meta,
-                cache_dir.parent / "images",
+                image_cache_dir if image_cache_dir is not None else cache_dir.parent / "images",
                 progress_cb=img_progress,
             )
             sw.update(
@@ -1539,8 +1677,7 @@ def main(argv: list[str] | None = None) -> int:
 
     base_dir = config.bridge_root
     status_dir = base_dir / "status"
-    cache_dir = base_dir / "cache" / "videos"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_root = base_dir / "cache" / "videos"
 
     # ── 2. 确定 url / quality / ingest_intent ──
     if task_data is not None:
@@ -1577,6 +1714,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"✗ {e}", file=sys.stderr)
         return 2
 
+    # ── 2b. 所有无下载前置校验通过后才创建任务私有缓存目录 ──
+    try:
+        cache_dir = create_task_cache(cache_root, task_id)
+    except (ValueError, OSError) as e:
+        # 非法 task_id、cache_root 是 symlink、同名目录无本任务所有权标记、
+        # marker 创建失败：不复用、不删除、不创建泄漏目录。
+        write_terminal(_status_safe_task_id(task_id), status_dir, {
+            "ok": False, "stage": "task_invalid",
+            "error": str(e),
+        })
+        if task_file:
+            _archive_task(task_file, base_dir, ok=False)
+        print(f"✗ {e}", file=sys.stderr)
+        return 2
+    image_cache_dir = base_dir / "cache" / "images"
+
     # ── 2. 跑 ──
     sw = StatusWriter(
         task_id,
@@ -1604,42 +1757,50 @@ def main(argv: list[str] | None = None) -> int:
         **task_meta,
     )
 
+    previous_sigterm = _install_sigterm_handler()
     try:
-        summary = asyncio.run(run_task(
-            task_id=task_id, url=url, quality=quality,
-            ingest_intent=ingest_intent,
-            config=config, sw=sw, cache_dir=cache_dir,
-        ))
-    except IngestError as e:
-        sw.update(
-            stage="failed", ok=False,
-            error=str(e), error_kind=e.kind,
-            hint=e.hint, recoverable=e.recoverable,
-        )
-        if task_file:
-            _archive_task(task_file, base_dir, ok=False)
-        print(f"✗ [{e.kind}] {e}" + (f"\n  hint: {e.hint}" if e.hint else ""),
-              file=sys.stderr)
-        return 1
-    except Exception as e:
-        sw.update(
-            stage="failed", ok=False,
-            error=f"{type(e).__name__}: {e}",
-            error_kind="unexpected",
-            traceback=traceback.format_exc(),
-        )
-        if task_file:
-            _archive_task(task_file, base_dir, ok=False)
-        print(f"✗ Unexpected: {type(e).__name__}: {e}", file=sys.stderr)
-        traceback.print_exc()
-        return 1
+        try:
+            summary = asyncio.run(run_task(
+                task_id=task_id, url=url, quality=quality,
+                ingest_intent=ingest_intent,
+                config=config, sw=sw, cache_dir=cache_dir,
+                image_cache_dir=image_cache_dir,
+            ))
+        except IngestError as e:
+            sw.update(
+                stage="failed", ok=False,
+                error=str(e), error_kind=e.kind,
+                hint=e.hint, recoverable=e.recoverable,
+            )
+            if task_file:
+                _archive_task(task_file, base_dir, ok=False)
+            print(f"✗ [{e.kind}] {e}" + (f"\n  hint: {e.hint}" if e.hint else ""),
+                  file=sys.stderr)
+            return 1
+        except Exception as e:
+            sw.update(
+                stage="failed", ok=False,
+                error=f"{type(e).__name__}: {e}",
+                error_kind="unexpected",
+                traceback=traceback.format_exc(),
+            )
+            if task_file:
+                _archive_task(task_file, base_dir, ok=False)
+            print(f"✗ Unexpected: {type(e).__name__}: {e}", file=sys.stderr)
+            traceback.print_exc()
+            return 1
 
-    sw.update(stage="done", ok=True, **summary)
-    if task_file:
-        _archive_task(task_file, base_dir, ok=True)
+        sw.update(stage="done", ok=True, **summary)
+        if task_file:
+            _archive_task(task_file, base_dir, ok=True)
 
-    print(f"✓ done: {summary['vault_path']}")
-    return 0
+        print(f"✓ done: {summary['vault_path']}")
+        return 0
+    finally:
+        _restore_sigterm_handler(previous_sigterm)
+        # 成功、失败、KeyboardInterrupt/SIGTERM 取消都走到这里：
+        # 只删除本任务的私有缓存目录，不影响其他任务。
+        cleanup_task_cache(cache_root, task_id)
 
 
 if __name__ == "__main__":

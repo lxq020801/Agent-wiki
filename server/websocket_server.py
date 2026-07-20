@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import stat
 import sys
 import subprocess
 import tempfile
@@ -503,6 +505,56 @@ def _json_file(path):
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+_TASK_VIDEO_CACHE_ID_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
+_TASK_VIDEO_CACHE_OWNER_MARKER = '.agent-wiki-task-owner'
+
+
+def _safe_remove_task_video_cache(cache_root, task_id):
+    """删除任务私有视频缓存目录 cache/videos/<task_id>/。
+
+    ingest 子进程正常退出（含 SIGTERM）时已自行清理；这里兜底 SIGKILL 等
+    无法自清理的场景，目录不存在时是 no-op。安全规则与 ingest 侧一致：
+    只删带有效 owner marker 的本任务目录；非法 task_id、cache_root 是
+    symlink、候选目录是 symlink/普通文件、marker 缺失/是 symlink/内容
+    不符（伪造）时一律不动，不影响其他任务目录。
+    """
+    try:
+        raw_id = str(task_id or '')
+        if not _TASK_VIDEO_CACHE_ID_RE.fullmatch(raw_id) or '..' in raw_id:
+            return
+        root = Path(cache_root)
+        if root.is_symlink() or not root.is_dir():
+            return
+        candidate = root / raw_id
+        try:
+            st = os.lstat(candidate)
+        except OSError:
+            return
+        if not stat.S_ISDIR(st.st_mode):
+            return
+        marker = candidate / _TASK_VIDEO_CACHE_OWNER_MARKER
+        try:
+            mst = os.lstat(marker)
+        except OSError:
+            return
+        if not stat.S_ISREG(mst.st_mode):
+            return
+        # lstat 后再用 O_NOFOLLOW 打开，缩小 lstat→open 之间的 symlink swap 窗口
+        try:
+            fd = os.open(marker, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        except OSError:
+            return
+        try:
+            with os.fdopen(fd, encoding='utf-8') as f:
+                if f.read().strip() != raw_id:
+                    return
+        except OSError:
+            return
+        shutil.rmtree(candidate)
+    except OSError:
+        pass
 
 
 def _write_json_atomic(path, payload):
@@ -2743,6 +2795,7 @@ class LibrarianServer:
             log(f"[Server] 任务执行失败: {task_id} {type(exc).__name__}")
         finally:
             self.task_processes.pop(task_id, None)
+            _safe_remove_task_video_cache(self.runtime_root / 'cache' / 'videos', task_id)
             self.running_task_ids.discard(task_id)
             self.current_task_id = sorted(self.running_task_ids)[0] if self.running_task_ids else None
 
