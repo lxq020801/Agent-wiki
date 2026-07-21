@@ -42,8 +42,9 @@ for (const [id, label] of Object.entries({
 }
 assert.doesNotMatch(html, /system-summary|系统就绪/);
 assert.match(html, /<button class="task-activity-entry" id="status-tasks"/);
-assert.match(html, /id="back-home-from-index"[^>]*>← 首页</);
-assert.match(html, /id="back-settings-index"[^>]*>← 设置</);
+for (const backId of ['back-home-from-index', 'back-settings-index', 'back-home-from-github']) {
+  assert.match(html, new RegExp(`id="${backId}"[^>]*>← 返回<`), '返回按钮统一显示“返回”');
+}
 for (const id of settingsDetailIds) {
   assert.match(html, new RegExp(`class="settings-card"[^>]+data-target="${id}"`));
   assert.match(html, new RegExp(`class="settings-group detail-section" id="${id}"`));
