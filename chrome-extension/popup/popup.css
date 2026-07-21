@@ -497,6 +497,13 @@ body[data-view="github-view"] #open-settings {
   overflow-wrap: anywhere;
 }
 
+.onboarding-toggle {
+  flex: 0 0 auto;
+  min-height: 28px !important;
+  padding: 0 8px !important;
+  font-size: 11px !important;
+}
+
 .onboarding-steps {
   display: flex;
   flex-direction: column;
@@ -826,6 +833,13 @@ button.small {
 button:disabled {
   cursor: not-allowed;
   opacity: 0.58;
+}
+
+button.primary:disabled {
+  border-color: var(--border);
+  background: var(--panel-hover);
+  color: var(--text-secondary);
+  opacity: 1;
 }
 
 .field {

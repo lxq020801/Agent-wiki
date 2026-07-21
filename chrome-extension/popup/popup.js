@@ -92,6 +92,7 @@ const pendingDerivedActions = new Map();
 let githubAuthFlow = null;
 let githubStars = [];
 let githubStarsAutoLoaded = false;
+let firstRunWizardCollapsed = true;
 let githubStarsPage = 0;
 let githubStarsHasNext = false;
 let githubSelected = new Set();
@@ -227,6 +228,13 @@ function renderFirstRunGuide() {
   document.getElementById('first-run-summary').textContent = summary;
 
   if (guide && typeof guide.querySelector === 'function') {
+    const stepsList = document.getElementById('first-run-steps');
+    const toggle = document.getElementById('toggle-first-run');
+    if (stepsList) stepsList.hidden = firstRunWizardCollapsed;
+    if (toggle) {
+      toggle.textContent = firstRunWizardCollapsed ? '展开' : '收起';
+      toggle.setAttribute('aria-expanded', firstRunWizardCollapsed ? 'false' : 'true');
+    }
     for (const step of steps) {
       const row = guide.querySelector(`[data-onboarding-step="${step.id}"]`);
       const state = document.getElementById(`onboarding-${step.id}-state`);
@@ -255,6 +263,11 @@ function renderFirstRunGuide() {
       action.textContent = next.action;
     }
   }
+}
+
+function toggleFirstRunWizard() {
+  firstRunWizardCollapsed = !firstRunWizardCollapsed;
+  renderFirstRunGuide();
 }
 
 function runOnboardingAction(action) {
@@ -1097,7 +1110,7 @@ function applyGithubStatus(status) {
   } else if (status.message && !authenticated && !githubAuthFlow) {
     showHint('github-hint', status.message, configured ? 'warning' : 'error', { persist: true });
   } else if (authenticated && !githubAuthFlow) {
-    showHint('github-hint', login ? `GitHub 已连接：@${login}` : 'GitHub 已连接', 'success', { persist: true });
+    showHint('github-hint', login ? `GitHub 已连接：@${login}` : 'GitHub 已连接', 'success');
   }
   renderFirstRunGuide();
 }
@@ -2457,6 +2470,7 @@ function updateConnectionStatus(connected) {
 
 function compactStatusText(kind, type, detail = '') {
   const status = type || 'warning';
+  if (kind === 'tasks') return String(detail || '').trim() || '暂无任务';
   if (kind === 'cookie') {
     if (status === 'online') return '已同步';
     if (status === 'offline') return '未同步';
@@ -2579,6 +2593,10 @@ function closeToHome() {
 }
 
 function closeSettingsDetailToIndex({ focus = true } = {}) {
+  if (lastSettingsTrigger?.closest?.('#home-view')) {
+    closeToHome();
+    return;
+  }
   const trigger = lastSettingsTrigger?.closest?.('#settings-index-view') ? lastSettingsTrigger : null;
   openSettingsIndex({ focus: false });
   if (!focus) return;
@@ -2755,6 +2773,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
   }
+  bindClick('toggle-first-run', toggleFirstRunWizard);
   bindClick('copy-agent-start-command', copyAgentStartCommand);
   bindClick('retry-agent-connection', retryAgentConnection);
   document.querySelectorAll('.settings-card').forEach(button => {
