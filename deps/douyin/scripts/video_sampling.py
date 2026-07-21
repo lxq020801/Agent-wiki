@@ -30,6 +30,10 @@ _FRAME_BYTES = _FRAME_WIDTH * _FRAME_HEIGHT
 _PRESCAN_FPS = 1.0
 _PRESCAN_MAX_COVERAGE_SEC = 600.0
 _PRESCAN_TIMEOUT_SEC = 30.0
+# 预扫描要完整解码视频，耗时随时长线性增长；
+# 实测约 10x 实时速度，给 5 倍余量取 0.5，上限 10 分钟。
+_PRESCAN_TIMEOUT_PER_DURATION = 0.5
+_PRESCAN_TIMEOUT_MAX_SEC = 600.0
 _CHANGE_POINT_SCORE = 0.045
 _CHANGE_POINT_PIXEL_RATIO = 0.12
 
@@ -119,6 +123,15 @@ def _failed_prescan(
     }
 
 
+def prescan_timeout_for_duration(duration_sec: float) -> float:
+    """按视频时长计算预扫描超时：基础 30 秒，再随时长线性放宽。"""
+    duration = max(0.0, float(duration_sec))
+    return min(
+        _PRESCAN_TIMEOUT_MAX_SEC,
+        max(_PRESCAN_TIMEOUT_SEC, duration * _PRESCAN_TIMEOUT_PER_DURATION),
+    )
+
+
 def prescan_video(
     video_path: Path,
     duration_sec: float,
@@ -126,11 +139,13 @@ def prescan_video(
     ffmpeg_path: str = "ffmpeg",
     thumbnail_dir: Optional[Path] = None,
     runner: Callable[..., Any] = subprocess.run,
-    timeout_sec: float = _PRESCAN_TIMEOUT_SEC,
+    timeout_sec: Optional[float] = None,
 ) -> dict[str, Any]:
     """Decode up to ten minutes at 1 FPS and measure grayscale frame changes."""
     started = time.perf_counter()
     duration = float(duration_sec)
+    if timeout_sec is None:
+        timeout_sec = prescan_timeout_for_duration(duration)
     if duration <= 0:
         return _failed_prescan(
             duration_sec=duration,

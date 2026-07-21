@@ -2030,6 +2030,30 @@ def test_local_prescan_writes_reproduction_evidence(tmp: Path) -> None:
     assert "fps=1" in calls[0][0][calls[0][0].index("-vf") + 1]
 
 
+def test_prescan_timeout_scales_with_duration() -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import video_sampling
+
+    assert video_sampling.prescan_timeout_for_duration(0) == 30.0
+    assert video_sampling.prescan_timeout_for_duration(30) == 30.0
+    assert video_sampling.prescan_timeout_for_duration(51.5) == 30.0
+    assert video_sampling.prescan_timeout_for_duration(569.5) == 284.75
+    assert video_sampling.prescan_timeout_for_duration(3600) == 600.0
+
+    calls = []
+
+    def fake_runner(command, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(returncode=0, stdout=bytes(96 * 54), stderr=b"")
+
+    video_sampling.prescan_video(Path("fake.mp4"), 569.5, runner=fake_runner)
+    assert calls[0]["timeout"] == 284.75
+    video_sampling.prescan_video(Path("fake.mp4"), 120.0, runner=fake_runner)
+    assert calls[1]["timeout"] == 60.0
+
+
 def test_analyzer_uses_adaptive_sampling_and_persists_provider_facts(tmp: Path) -> None:
     import asyncio
     import sys
