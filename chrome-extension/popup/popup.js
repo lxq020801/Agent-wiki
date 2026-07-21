@@ -23,7 +23,6 @@ const DEFAULT_MODEL_PRESET = 'lite';
 const DEFAULT_TASK_CONCURRENCY = 2;
 const DEFAULT_CHUNK_CONCURRENCY = 2;
 const POPUP_ROUTE_STORAGE_KEY = 'popupRoute';
-const FIRST_RUN_COLLAPSED_STORAGE_KEY = 'firstRunGuideCollapsed';
 const AGENT_START_COMMAND = './agent-wiki start';
 const LEGACY_GITHUB_ROUTE = 'github';
 const POPUP_VIEWS = Object.freeze({
@@ -92,6 +91,7 @@ let colorSchemeMedia = null;
 const pendingDerivedActions = new Map();
 let githubAuthFlow = null;
 let githubStars = [];
+let githubStarsAutoLoaded = false;
 let githubStarsPage = 0;
 let githubStarsHasNext = false;
 let githubSelected = new Set();
@@ -103,7 +103,6 @@ let githubRefresh = null;
 let githubIsConfigured = false;
 let githubIsAuthenticated = false;
 let githubValidationRequestedForConnection = false;
-let firstRunCollapsed = false;
 const setupState = {
   api: { configured: false, verified: false, checkState: 'unchecked' },
   vault: { configured: false, verified: false, checkState: 'unchecked' },
@@ -218,7 +217,6 @@ function onboardingStepViews() {
 
 function renderFirstRunGuide() {
   const guide = document.getElementById('first-run-guide');
-  if (!guide || typeof guide.querySelector !== 'function') return;
   const steps = onboardingStepViews();
   const required = steps.filter(step => !step.optional);
   const next = required.find(step => !step.ready) || null;
@@ -228,51 +226,35 @@ function renderFirstRunGuide() {
     : `下一步：${next.label}`;
   document.getElementById('first-run-summary').textContent = summary;
 
-  for (const step of steps) {
-    const row = guide.querySelector(`[data-onboarding-step="${step.id}"]`);
-    const state = document.getElementById(`onboarding-${step.id}-state`);
-    const action = row?.querySelector('.onboarding-step-action');
-    row?.classList.toggle('complete', step.ready);
-    if (state) state.textContent = step.state;
-    if (action) {
-      action.textContent = step.ready ? '完成' : step.action;
-      action.disabled = step.ready;
-      action.setAttribute('aria-label', `${step.action}${step.label}`);
+  if (guide && typeof guide.querySelector === 'function') {
+    for (const step of steps) {
+      const row = guide.querySelector(`[data-onboarding-step="${step.id}"]`);
+      const state = document.getElementById(`onboarding-${step.id}-state`);
+      const action = row?.querySelector('.onboarding-step-action');
+      row?.classList.toggle('complete', step.ready);
+      if (state) state.textContent = step.state;
+      if (action) {
+        action.textContent = step.ready ? '完成' : step.action;
+        action.disabled = step.ready;
+        action.setAttribute('aria-label', `${step.action}${step.label}`);
+      }
     }
   }
 
-  const list = document.getElementById('first-run-steps');
   const reminder = document.getElementById('first-run-reminder');
-  const toggle = document.getElementById('toggle-first-run');
-  list.hidden = firstRunCollapsed;
-  reminder.hidden = !firstRunCollapsed;
-  toggle.textContent = firstRunCollapsed ? '展开' : '收起';
-  toggle.setAttribute('aria-expanded', firstRunCollapsed ? 'false' : 'true');
-  if (firstRunCollapsed) {
-    document.getElementById('first-run-reminder-dot').className =
-      `status-dot inline-dot ${requiredComplete ? 'online' : 'warning'}`;
-    document.getElementById('first-run-reminder-title').textContent =
-      requiredComplete ? '首次配置已完成' : `待完成：${next.label}`;
-    document.getElementById('first-run-reminder-copy').textContent =
-      requiredComplete ? 'GitHub 为可选项' : next.state;
-    const action = document.getElementById('first-run-next-action');
-    action.hidden = requiredComplete;
-    action.disabled = requiredComplete;
-    action.dataset.onboardingAction = next?.id || '';
-    action.textContent = next?.action || '处理';
+  if (reminder) {
+    reminder.hidden = requiredComplete;
+    if (!requiredComplete) {
+      document.getElementById('first-run-reminder-dot').className = 'status-dot inline-dot warning';
+      document.getElementById('first-run-reminder-title').textContent = `待完成：${next.label}`;
+      document.getElementById('first-run-reminder-copy').textContent = next.state;
+      const action = document.getElementById('first-run-next-action');
+      action.hidden = false;
+      action.disabled = false;
+      action.dataset.onboardingAction = next.id;
+      action.textContent = next.action;
+    }
   }
-}
-
-async function loadFirstRunPreference() {
-  const stored = await chrome.storage.local.get([FIRST_RUN_COLLAPSED_STORAGE_KEY]);
-  firstRunCollapsed = stored[FIRST_RUN_COLLAPSED_STORAGE_KEY] === true;
-  renderFirstRunGuide();
-}
-
-async function toggleFirstRunGuide() {
-  firstRunCollapsed = !firstRunCollapsed;
-  renderFirstRunGuide();
-  await chrome.storage.local.set({ [FIRST_RUN_COLLAPSED_STORAGE_KEY]: firstRunCollapsed });
 }
 
 function runOnboardingAction(action) {
@@ -1092,10 +1074,17 @@ function applyGithubStatus(status) {
   }
   if (authenticated) {
     clearGithubAuthFlow();
-  } else if (status.activeAuthorization?.flowId) {
-    showGithubAuthorization(status.activeAuthorization);
-  } else if (githubAuthFlow) {
-    clearGithubAuthFlow();
+    if (!githubStarsAutoLoaded) {
+      githubStarsAutoLoaded = true;
+      loadGithubStars({ auto: true });
+    }
+  } else {
+    githubStarsAutoLoaded = false;
+    if (status.activeAuthorization?.flowId) {
+      showGithubAuthorization(status.activeAuthorization);
+    } else if (githubAuthFlow) {
+      clearGithubAuthFlow();
+    }
   }
 
   if (pending && !githubAuthFlow) {
@@ -1228,15 +1217,20 @@ function saveGithubAutoStar() {
   showHint('github-hint', autoStar ? '已开启资产创建后自动 Star' : '已关闭自动 Star', 'success');
 }
 
-function loadGithubStars({ append = false } = {}) {
+function loadGithubStars({ append = false, auto = false } = {}) {
   const page = append ? githubStarsPage + 1 : 1;
   const button = append ? document.getElementById('github-load-more-stars') : document.getElementById('github-load-stars');
+  if (!append) {
+    document.getElementById('github-stars-list').replaceChildren(
+      makeEmptyGithubRow(auto ? '正在自动读取你的 Stars' : '正在读取你的 Stars')
+    );
+  }
   button.disabled = true;
   button.textContent = '读取中';
-  if (!append) document.getElementById('github-stars-list').replaceChildren(makeEmptyGithubRow('正在读取你的 Stars'));
   if (!sendToAgent({ type: GITHUB_MESSAGE_TYPES.STARS_REQUEST, page, perPage: 50 })) {
     button.disabled = false;
     button.textContent = append ? '加载更多' : '读取';
+    if (auto) githubStarsAutoLoaded = false;
     showHint('github-hint', runtimeUnavailableMessage(), 'error', { persist: true });
   }
 }
@@ -1532,6 +1526,7 @@ function applyGithubError(result) {
     button.disabled = false;
     button.textContent = '检查更新';
   });
+  if (String(result.requestType || '') === GITHUB_MESSAGE_TYPES.STARS_REQUEST) githubStarsAutoLoaded = false;
   const isAuthError = String(result.requestType || '').startsWith('github_auth');
   if (
     isAuthError &&
@@ -2752,11 +2747,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('back-home-from-index').addEventListener('click', closeToHome);
   document.getElementById('back-home-from-github').addEventListener('click', closeGithubToHome);
   document.getElementById('status-tasks').addEventListener('click', () => openSettingsDetail('task-settings'));
-  bindClick('toggle-first-run', toggleFirstRunGuide);
-  document.getElementById('first-run-guide').addEventListener('click', event => {
-    const button = event.target.closest('[data-onboarding-action]');
-    if (button && !button.disabled) runOnboardingAction(button.dataset.onboardingAction);
-  });
+  for (const onboardingRoot of ['first-run-guide', 'first-run-reminder']) {
+    document.getElementById(onboardingRoot)?.addEventListener('click', event => {
+      const button = event.target.closest('[data-onboarding-action]');
+      if (button && !button.disabled && button.dataset.onboardingAction) {
+        runOnboardingAction(button.dataset.onboardingAction);
+      }
+    });
+  }
   bindClick('copy-agent-start-command', copyAgentStartCommand);
   bindClick('retry-agent-connection', retryAgentConnection);
   document.querySelectorAll('.settings-card').forEach(button => {
@@ -2808,7 +2806,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
   await restorePopupRoute();
-  await loadFirstRunPreference();
+  renderFirstRunGuide();
   await loadConfig();
   await refreshCookieStatusFromStorage();
   startDouyinPreviewLoop();

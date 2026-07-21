@@ -43,7 +43,9 @@ assert.doesNotMatch(html, /class="settings-card"[^>]*data-target="github-setting
 assert.doesNotMatch(html, /id="github-settings"/);
 const settingsIndexMarkup = html.slice(html.indexOf('id="settings-index-view"'), html.indexOf('id="settings-detail-view"'));
 const settingsDetailMarkup = html.slice(html.indexOf('id="settings-detail-view"'), html.indexOf('id="github-view"'));
-assert.doesNotMatch(settingsIndexMarkup, /GitHub|github/i);
+// 配置向导仅展示 GitHub 可选状态并跳转独立 GitHub 页面；设置页仍不得包含 GitHub 配置入口
+const settingsIndexWithoutWizard = settingsIndexMarkup.replace(/<section class="onboarding-panel"[\s\S]*?<\/section>/, '');
+assert.doesNotMatch(settingsIndexWithoutWizard, /GitHub|github/i);
 assert.doesNotMatch(settingsDetailMarkup, /github-stars-tool/);
 
 for (const type of [
@@ -105,7 +107,8 @@ const behaviorContext = vm.createContext({
   console: { log() {}, error() {} },
   document: {
     body: { dataset: { view: 'home-view' } },
-    addEventListener() {}
+    addEventListener() {},
+    createElement() { return { className: '', textContent: '' }; }
   },
   setTimeout,
   clearTimeout,
@@ -141,6 +144,7 @@ const githubElements = new Proxy({}, {
         indeterminate: false,
         max: 0,
         value: 0,
+        dataset: {},
         replaceChildren() {},
         appendChild() {}
       };
@@ -161,6 +165,15 @@ vm.runInContext(`handleAgentMessage({
 assert.equal(githubElements['home-github-summary'].textContent, '@existing-user');
 assert.equal(githubElements['home-github-dot'].className, 'status-dot inline-dot online');
 assert.equal(githubElements['github-account-copy'].textContent, '@existing-user');
+const starsRequests = () => sentMessages.filter(message => message.type === 'github_stars_request');
+assert.equal(starsRequests().length, 1, 'authenticated status must auto-load Stars once');
+assert.equal(starsRequests()[0].page, 1);
+
+vm.runInContext(`handleAgentMessage({
+  type: 'github_status',
+  result: { configured: true, authenticated: true, account: { login: 'existing-user' } }
+})`, behaviorContext);
+assert.equal(starsRequests().length, 1, 'repeated authenticated status must not reload Stars automatically');
 
 vm.runInContext(`handleAgentMessage({
   type: 'github_status',
@@ -178,6 +191,14 @@ vm.runInContext(`applyGithubStatus({
 })`, behaviorContext);
 assert.equal(githubElements['home-github-summary'].textContent, '待检查');
 assert.equal(githubElements['github-account-copy'].textContent, 'Agent 未连接，暂无法检查 GitHub');
+
+vm.runInContext(`applyGithubStatus({
+  configured: true,
+  authenticated: true,
+  state: 'ready',
+  account: { login: 'existing-user' }
+})`, behaviorContext);
+assert.equal(starsRequests().length, 2, 're-authentication after logout must auto-load Stars again');
 
 sentMessages.length = 0;
 vm.runInContext(`requestGithubImportStatus('batch-restore')`, behaviorContext);

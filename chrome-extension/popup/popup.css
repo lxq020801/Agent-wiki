@@ -497,13 +497,6 @@ body[data-view="github-view"] #open-settings {
   overflow-wrap: anywhere;
 }
 
-.onboarding-toggle {
-  flex: 0 0 auto;
-  min-height: 28px !important;
-  padding: 0 8px !important;
-  font-size: 11px !important;
-}
-
 .onboarding-steps {
   display: flex;
   flex-direction: column;
@@ -593,9 +586,14 @@ body[data-view="github-view"] #open-settings {
 }
 
 .onboarding-reminder {
-  margin-top: 7px;
-  padding-top: 7px;
-  border-top: 1px solid var(--hairline-border);
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+}
+
+#settings-index-view .onboarding-panel {
+  margin-bottom: 10px;
 }
 
 .entry-chevron {

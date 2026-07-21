@@ -12,8 +12,10 @@ const js = fs.readFileSync(path.join(root, 'chrome-extension/popup/popup.js'), '
 
 for (const id of [
   'first-run-guide',
-  'toggle-first-run',
   'first-run-reminder',
+  'first-run-reminder-dot',
+  'first-run-reminder-title',
+  'first-run-reminder-copy',
   'first-run-next-action',
   'agent-start-command',
   'copy-agent-start-command',
@@ -21,6 +23,9 @@ for (const id of [
 ]) {
   assert.match(html, new RegExp(`id="${id}"`), `missing first-run control: ${id}`);
 }
+assert.match(html, /<main class="view" id="settings-index-view"[\s\S]*?data-onboarding-panel/, '配置向导必须位于设置首页');
+assert.match(html, /<main class="view active" id="home-view">[\s\S]*?id="first-run-reminder"[\s\S]*?id="open-github"/, '首页只保留紧凑提醒条');
+assert.doesNotMatch(html + js, /toggle-first-run|firstRunGuideCollapsed/, '折叠机制已移除');
 for (const step of ['agent', 'api', 'vault', 'cookie', 'github']) {
   assert.match(html, new RegExp(`data-onboarding-step="${step}"`));
   assert.match(html, new RegExp(`data-onboarding-action="${step}"`));
@@ -91,7 +96,8 @@ async function main() {
             textContent: '',
             title: '',
             hidden: false,
-            disabled: false
+            disabled: false,
+            dataset: {}
           };
         }
         return elements[id];
@@ -121,12 +127,20 @@ async function main() {
   assert.equal(requiredReady.filter(step => !step.optional).every(step => step.ready), true);
   assert.equal(requiredReady.at(-1).ready, false, 'GitHub must not block first-run completion');
 
-  vm.runInContext('renderFirstRunGuide = () => {};', context);
-  await vm.runInContext('toggleFirstRunGuide()', context);
-  assert.equal(stored.firstRunGuideCollapsed, true);
-  await vm.runInContext('toggleFirstRunGuide()', context);
-  assert.equal(stored.firstRunGuideCollapsed, false);
-  assert.deepEqual(Object.keys(stored), ['firstRunGuideCollapsed']);
+  const reminderState = () => JSON.parse(vm.runInContext(`JSON.stringify({
+    hidden: document.getElementById('first-run-reminder').hidden,
+    title: document.getElementById('first-run-reminder-title').textContent
+  })`, context));
+  vm.runInContext('renderFirstRunGuide()', context);
+  assert.equal(reminderState().hidden, true, '首次配置完成后首页不再展示引导提醒');
+
+  vm.runInContext(`
+    setupState.cookie = { configured: false, pending: false, verified: false };
+    renderFirstRunGuide();
+  `, context);
+  const reminder = reminderState();
+  assert.equal(reminder.hidden, false, '未完成时首页显示紧凑提醒');
+  assert.equal(reminder.title, '待完成：抖音 Cookie');
 
   context.statusCalls = statusCalls;
   vm.runInContext(`
