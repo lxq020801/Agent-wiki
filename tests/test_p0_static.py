@@ -2030,6 +2030,64 @@ def test_local_prescan_writes_reproduction_evidence(tmp: Path) -> None:
     assert "fps=1" in calls[0][0][calls[0][0].index("-vf") + 1]
 
 
+def test_repack_analysis_plan_merges_same_fps_segments() -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import analyzer
+
+    plan = []
+    start = 0.0
+    for index in range(1, 19):
+        end = min(4120.0, start + 240.0)
+        plan.append({
+            "part_index": index,
+            "start_sec": round(start, 3),
+            "end_sec": round(end, 3),
+            "overlap_sec": 0.0 if index == 1 else 10.0,
+        })
+        start += 230.0
+    strategy = {
+        "chunks": [
+            {"part_index": i, "recommended_fps": 2.0, "lite_brief": f"第{i}段", "confidence": 0.9}
+            for i in range(1, 19)
+        ]
+    }
+    new_plan, new_chunks, changed = analyzer._repack_analysis_plan(plan, strategy)
+    assert changed is True
+    assert len(new_plan) == 7, new_plan
+    assert len(new_chunks) == 7
+    for item in new_plan:
+        assert float(item["end_sec"]) - float(item["start_sec"]) <= 600.0 + 1e-6
+    assert new_plan[0]["overlap_sec"] == 0.0
+    assert all(c["recommended_fps"] == 2.0 for c in new_chunks)
+    assert "第1段" in new_chunks[0]["lite_brief"] and "第6段" in new_chunks[0]["lite_brief"]
+
+    # 相邻不同 fps 不合并；5fps 段按 250 秒上限切
+    mixed = {
+        "chunks": [
+            {"part_index": 1, "recommended_fps": 5.0, "lite_brief": "a", "confidence": 0.9},
+            {"part_index": 2, "recommended_fps": 5.0, "lite_brief": "b", "confidence": 0.9},
+            {"part_index": 3, "recommended_fps": 2.0, "lite_brief": "c", "confidence": 0.8},
+        ]
+    }
+    plan3 = [dict(item) for item in plan[:3]]
+    new_plan3, new_chunks3, changed3 = analyzer._repack_analysis_plan(plan3, mixed)
+    assert changed3 is True
+    fps_by_part = {c["part_index"]: c["recommended_fps"] for c in new_chunks3}
+    assert sorted(fps_by_part.values()) == [2.0, 5.0, 5.0]
+    for item in new_plan3:
+        fps = fps_by_part[item["part_index"]]
+        assert (float(item["end_sec"]) - float(item["start_sec"])) * fps <= 1250 + 1e-6
+
+    # 无变化时原样返回，不触发重切
+    single = [{"part_index": 1, "start_sec": 0.0, "end_sec": 200.0, "overlap_sec": 0.0}]
+    single_strategy = {"chunks": [{"part_index": 1, "recommended_fps": 5.0, "lite_brief": "x", "confidence": 0.9}]}
+    same_plan, same_chunks, same_changed = analyzer._repack_analysis_plan(single, single_strategy)
+    assert same_changed is False
+    assert same_plan is single
+
+
 def test_prescan_timeout_scales_with_duration() -> None:
     import sys
 

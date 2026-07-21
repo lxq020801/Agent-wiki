@@ -102,9 +102,13 @@ The WebSocket control server writes:
   and a `lite_brief` for the main analyzer model; fps is for visual/OCR/action
   risk, while high concept density should be handled in the Lite prompt rather
   than automatically raising fps. Then
-  240s chunks with 10s overlap are uploaded/analyzed independently at `2-5fps`
-  by the main analyzer model with default 2-way concurrency, configurable from
-  1 to 4. Invalid JSON, missing segments, or missing required fields may be
+  240s chunks with 10s overlap are used as the strategy granularity; before
+  the precision pass, adjacent same-fps segments are merged into frame-budget
+  sized analysis chunks (`1250/fps` seconds, max 600s, 10s overlap) and
+  uploaded/analyzed independently at `2-5fps` by the main analyzer model with
+  default 2-way concurrency, configurable from 1 to 4. Ark compresses frames so
+  that per-call video tokens stay roughly constant, so packing each chunk to
+  the frame budget cuts cost proportionally to chunk count. Invalid JSON, missing segments, or missing required fields may be
   repaired once by the same strategy model via `previous_response_id`; structural
   fallback and fps adjustment are tracked separately. Text-only Responses then
   synthesizes the final asset body from the overview and chunk results.

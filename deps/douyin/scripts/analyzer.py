@@ -18,7 +18,8 @@ analyzer.py — 火山方舟视频拆解
   ⑤ Files API 默认托管空间支持 ≤512MB；超过 512MB P0 直接失败
   ⑥ file_id 模式必须等 file.status == "active" 才能分析
   ⑦ file_id 模式同一视频换 quality 必须重新上传
-  ⑧ 超 10 分钟先做 2fps 全片/分片概览规划，再按 240s 分片用 2-5fps 精拆
+  ⑧ 超 10 分钟先做 2fps 全片/分片概览规划（策略粒度 240s），
+     精拆前把相邻同 fps 分段按帧预算合并装满（1250÷fps 秒，最长 600s）再上传
 
 公共契约：
     analyze_video(video_path, prompt, *, config, quality="quality",
@@ -794,6 +795,93 @@ def _chunk_plan(
         start += stride
         index += 1
     return plan
+
+
+_ANALYSIS_CHUNK_MAX_LEN_SEC = 600.0
+
+
+def _repack_analysis_plan(
+    chunk_plan: list[dict[str, Any]],
+    strategy: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """把相邻同 fps 的 240s 策略分段合并成"装满帧预算"的分析分段。
+
+    每段目标长度 = min(安全帧数 / fps, _ANALYSIS_CHUNK_MAX_LEN_SEC)；
+    分段边界保留 10 秒重叠。返回 (新分段计划, 新策略分段, 是否有变化)。
+    """
+    strategy_chunks = {
+        int(item["part_index"]): item
+        for item in (strategy.get("chunks") or [])
+        if isinstance(item, dict) and item.get("part_index") is not None
+    }
+    if not strategy_chunks:
+        return chunk_plan, list(strategy.get("chunks") or []), False
+
+    groups: list[list[Any]] = []  # [fps, [plan_items], [strategy_items]]
+    for plan_item in chunk_plan:
+        part_index = int(plan_item["part_index"])
+        strategy_item = strategy_chunks.get(part_index)
+        if strategy_item is None:
+            return chunk_plan, list(strategy.get("chunks") or []), False
+        fps = max(_LONG_CHUNK_FPS_MIN, min(
+            _LONG_CHUNK_FPS_MAX,
+            float(strategy_item.get("recommended_fps") or _LONG_CHUNK_FPS_MAX),
+        ))
+        if groups and abs(groups[-1][0] - fps) < 1e-6:
+            groups[-1][1].append(plan_item)
+            groups[-1][2].append(strategy_item)
+        else:
+            groups.append([fps, [plan_item], [strategy_item]])
+
+    new_plan: list[dict[str, Any]] = []
+    new_chunks: list[dict[str, Any]] = []
+    part = 1
+    for fps, plan_items, strategy_items in groups:
+        seg_start = float(plan_items[0]["start_sec"])
+        seg_end = float(plan_items[-1]["end_sec"])
+        max_len = min(_FRAMES_SAFE_TARGET / fps, _ANALYSIS_CHUNK_MAX_LEN_SEC)
+        stride = max_len - _CHUNK_OVERLAP_SEC
+        brief = " ".join(
+            text for text in (
+                str(item.get("lite_brief") or "").strip() for item in strategy_items
+            ) if text
+        )
+        confidences = [
+            float(item["confidence"]) for item in strategy_items
+            if item.get("confidence") is not None
+        ]
+        group_strategy = {
+            **dict(strategy_items[0]),
+            "recommended_fps": fps,
+            "lite_brief": brief,
+            "confidence": min(confidences) if confidences else None,
+        }
+        start = seg_start
+        while start < seg_end - 1e-6:
+            end = min(seg_end, start + max_len)
+            new_plan.append({
+                "part_index": part,
+                "start_sec": round(start, 3),
+                "end_sec": round(end, 3),
+                "overlap_sec": 0.0 if part == 1 else _CHUNK_OVERLAP_SEC,
+            })
+            new_chunks.append({**group_strategy, "part_index": part})
+            if end >= seg_end - 1e-6:
+                break
+            start += stride
+            part += 1
+
+    changed = not (
+        len(new_plan) == len(chunk_plan)
+        and all(
+            float(a["start_sec"]) == float(b["start_sec"])
+            and float(a["end_sec"]) == float(b["end_sec"])
+            for a, b in zip(new_plan, chunk_plan)
+        )
+    )
+    if not changed:
+        return chunk_plan, list(strategy.get("chunks") or []), False
+    return new_plan, new_chunks, True
 
 
 def _prompt_hash(prompt: str) -> str:
@@ -2183,6 +2271,27 @@ async def analyze_video_many(
                 mode=sampling_mode,
                 prescan=prescan,
             )
+            repacked_plan, repacked_chunks, repack_changed = _repack_analysis_plan(
+                chunk_plan, strategy
+            )
+            if repack_changed:
+                strategy["analysis_plan_repacked"] = {
+                    "original_chunk_count": len(chunk_plan),
+                    "repacked_chunk_count": len(repacked_plan),
+                    "rule": "merge adjacent same-fps segments up to safe frame budget",
+                }
+                chunk_plan = repacked_plan
+                strategy["chunks"] = repacked_chunks
+                chunk_paths = await asyncio.to_thread(
+                    _split_video_for_chunks,
+                    video_path,
+                    chunk_plan,
+                    Path(tmpdir) / "analysis-chunks",
+                )
+                await _call_progress(on_progress, "chunking_repacked", {
+                    "chunk_count": len(chunk_plan),
+                    "rule": "frame_budget_packing",
+                })
             _add_artifact(
                 audit_files,
                 "sampling.chunk_strategy",
