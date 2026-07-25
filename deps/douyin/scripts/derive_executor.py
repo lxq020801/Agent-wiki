@@ -865,7 +865,10 @@ def _github_repo_payload(owner: str, repo: str) -> tuple[dict[str, Any], str]:
 
 def _keywords(text: str) -> set[str]:
     words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u4e00-\u9fff]{2,}", text.lower())
-    stop = {"github", "project", "official", "documentation", "api", "视频", "项目", "工具", "官方", "文档"}
+    stop = {
+        "github", "project", "repository", "repo", "official", "documentation", "api", "open", "source",
+        "视频", "项目", "工具", "官方", "文档",
+    }
     keywords = {word for word in words if word not in stop}
     for pattern, concepts in GITHUB_CONTEXT_CONCEPTS:
         if pattern.search(text):
@@ -883,6 +886,7 @@ def _score_repo_match(candidate: dict[str, Any], repo: dict[str, Any], readme: s
         " ".join(str(x) for x in candidate.get("evidence") or []),
         str(candidate.get("searchQuery") or candidate.get("search_query") or ""),
     ]).lower()
+    description = str(repo.get("description") or "").lower()
     haystack = " ".join([
         str(repo.get("full_name") or ""),
         str(repo.get("name") or ""),
@@ -916,6 +920,8 @@ def _score_repo_match(candidate: dict[str, Any], repo: dict[str, Any], readme: s
         score += 3
     overlap = _keywords(context) & _keywords(haystack)
     score += min(4, len(overlap))
+    description_overlap = _keywords(context) & _keywords(description)
+    score += min(3, len(description_overlap))
     if repo.get("stargazers_count", 0) >= 100:
         score += 1
     if repo.get("archived") is True:

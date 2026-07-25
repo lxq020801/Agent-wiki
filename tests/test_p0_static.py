@@ -895,7 +895,11 @@ def test_derive_executor_uses_context_to_disambiguate_same_name_repository() -> 
         if "search/repositories" in url:
             return {"items": [deployment, fulfillment]}
         if url.endswith("/readme"):
-            text = "Self-hosted deployment platform" if "/oblien/" in url else "Commerce fulfillment service"
+            text = (
+                "Self-hosted deployment platform"
+                if "/oblien/" in url
+                else "Commerce fulfillment platform with self-hosted deployment support"
+            )
             return {"content": base64.b64encode(text.encode()).decode()}
         return deployment if "/oblien/" in url else fulfillment
 
