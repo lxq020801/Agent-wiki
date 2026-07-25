@@ -78,8 +78,6 @@ class DouyinImagePostStaticTests(unittest.TestCase):
             ark_api_key="dummy-key",
             ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
             analyzer_model="doubao-seed-2-0-lite-260428",
-            analyzer_fallback="doubao-seed-2-0-mini-260428",
-            strategy_model="doubao-seed-2-0-mini-260428",
             default_quality="quality",
             balanced_target_frames=240,
             quality_target_frames=1250,
@@ -341,7 +339,6 @@ class DouyinImagePostStaticTests(unittest.TestCase):
             "targetUrl": "https://example.com/docs/image-api",
             "decision": "candidate",
             "status": "candidate",
-            "score": 81,
             "reason": "图文里出现可复用接口，需要核验官方文档。",
         }]
         self.assertEqual(len(summary["derived_tasks"]), 1)
@@ -416,12 +413,12 @@ class DouyinImagePostStaticTests(unittest.TestCase):
             self.assertIn("## 简洁概括", text)
             self.assertIn("## 完整内容整理", text)
             self.assertIn("## AI 分析", text)
-            self.assertIn("### 派生状态（系统）", text)
+            self.assertNotIn("派生状态", text)
             self.assertEqual(re.findall(r"^##\s+", text, re.MULTILINE), ["## ", "## ", "## "])
             self.assertNotIn("derived_candidate_record:", text)
             self.assertNotIn("derived_candidate_ids:", text)
             self.assertNotIn("target_type:", text.split("---", 2)[1])
-            self.assertIn("[Image Write API](https://example.com/docs/image-write-api)", text)
+            self.assertNotIn("Image Write API", text)
 
             index_text = (cfg.vault_path / "index.md").read_text(encoding="utf-8")
             self.assertIn("[[", index_text)

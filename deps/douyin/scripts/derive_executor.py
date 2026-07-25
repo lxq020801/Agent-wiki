@@ -34,7 +34,6 @@ from ingest import (
     _asset_title,
     _content_tags,
     _ensure_vault_structure,
-    mark_derived_candidate_executed,
     _schema_asset_id,
     _slug_for_vault,
     _summary_from_text,
@@ -1592,13 +1591,6 @@ def _link_existing_target_locked(
     touched.extend(_link_parent_child(parent_path, existing_path, title, relation))
     touched.extend(_link_child_back_to_parent(parent_path, existing_path, parent_link, relation))
     child_link = _asset_link(existing_path, title)
-    touched.extend(mark_derived_candidate_executed(
-        parent_path,
-        candidate_name=str(candidate.get("name") or target.title),
-        child_link=child_link,
-        candidate_type=str(candidate.get("targetType") or candidate.get("target_type") or target.kind),
-        candidate_url=str(candidate.get("targetUrl") or candidate.get("target_url") or target.url),
-    ))
     return {
         "path": existing_path,
         "title": title,
@@ -1869,13 +1861,6 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
             parent_touched = _link_parent_child(parent_path, md_path, title, relation)
             touched.extend(parent_touched)
             child_link = _asset_link(md_path, title)
-            touched.extend(mark_derived_candidate_executed(
-                parent_path,
-                candidate_name=str(candidate.get("name") or target.title),
-                child_link=child_link,
-                candidate_type=str(candidate.get("targetType") or candidate.get("target_type") or target.kind),
-                candidate_url=str(candidate.get("targetUrl") or candidate.get("target_url") or target.url),
-            ))
     if raced_existing:
         return _finish_existing_target(
             task=task,

@@ -1,9 +1,9 @@
 """
-derive_strategy.py — turn model-discovered primary subjects into candidates.
+derive_strategy.py — turn model-discovered objects into internal candidates.
 
-The derivation layer is intentionally selective by subject role rather than by
-count: all genuinely primary objects may survive, while incidental mentions
-stay in the source note or audit trail.
+Candidate visibility and execution are based on structural validity, target
+safety, resolution, and deduplication. Legacy score, confidence, and subject-role
+fields remain audit metadata only and do not gate the user-facing task list.
 """
 from __future__ import annotations
 
@@ -594,22 +594,19 @@ def _decision_from_score(
     downgrade_flags: list[str],
     existing_status: str,
 ) -> tuple[str, list[str]]:
-    reject_reasons: list[str] = []
     if existing_status != "new":
         return "candidate", ["existing_asset"]
-    if score < CANDIDATE_THRESHOLD:
-        return "reject", ["score_below_candidate_threshold"]
-    required = {
-        "evidence_strength": 4,
-        "asset_fit": 3,
-        "ambiguity_inverse": 3,
-        "cost_risk_inverse": 3,
-        "novelty": 3,
+    invalid_flags = {
+        "missing_name_and_url",
+        "url_contains_credentials",
+        "non_https_target_url",
+        "local_target_url",
+        "private_target_url",
+        "missing_target_host",
+        "invalid_target_url",
     }
-    for key, minimum in required.items():
-        if scores.get(key, 0) < minimum:
-            downgrade_flags.append(f"{key}_below_{minimum}")
-    return "candidate", reject_reasons
+    reasons = sorted(invalid_flags & set(downgrade_flags))
+    return ("reject", reasons) if reasons else ("candidate", [])
 
 
 def _subject_role(raw: dict[str, Any], scores: dict[str, int], context: str) -> str:
@@ -629,97 +626,32 @@ def _subject_role(raw: dict[str, Any], scores: dict[str, int], context: str) -> 
     return "unspecified"
 
 
-def _is_primary_subject(item: dict[str, Any]) -> bool:
-    return str(item.get("subject_role") or "") == "primary"
-
-
-def _derivation_noise_reasons(item: dict[str, Any]) -> list[str]:
-    reasons: list[str] = []
-    if not _is_primary_subject(item):
-        reasons.append("object_not_primary_subject")
-    return sorted(set(reasons))
-
-
 def _visible_block_reasons(item: dict[str, Any]) -> list[str]:
-    """Return reasons a candidate should stay in audit only.
-
-    The model may produce broad follow-up ideas. This gate keeps the user-facing
-    list focused on derivations that are clearly useful and directly executable.
-    """
+    """Only malformed or unsafe candidates stay in audit instead of the task list."""
     if item.get("decision") != "candidate":
         return ["not_candidate"]
     if (item.get("dedupe") or {}).get("status") != "new":
         return []
 
     target_type = str(item.get("target_type") or "")
-    scores = item.get("scores") if isinstance(item.get("scores"), dict) else {}
-    score = int(item.get("score") or 0)
-    confidence = float(item.get("confidence") or 0.0)
     downgrade_flags = set(item.get("downgrade_flags") or [])
     reasons: list[str] = []
 
-    if score < VISIBLE_SCORE_THRESHOLD:
-        reasons.append("score_below_visible_threshold")
-    if confidence < VISIBLE_CONFIDENCE_THRESHOLD:
-        reasons.append("confidence_below_visible_threshold")
-
-    required_scores = {
-        "knowledge_value": 4,
-        "parent_dependency": 4,
-        "evidence_strength": 4,
-        "actionability": 4,
-        "asset_fit": 4,
-        "ambiguity_inverse": 3,
-    }
-    for key, minimum in required_scores.items():
-        if int(scores.get(key) or 0) < minimum:
-            reasons.append(f"{key}_below_visible_{minimum}")
-
     if target_type not in ALLOWED_TARGET_TYPES:
         reasons.append("target_type_not_allowed")
-    elif target_type in {"official_doc", "web_research"} and not item.get("target_url"):
-        reasons.append("target_url_required_for_visible_candidate")
     elif target_type == "github_project" and not (item.get("target_url") or item.get("name")):
         reasons.append("github_name_or_url_required")
 
     blocking_flags = {
-        "uncertain_evidence",
         "missing_name_and_url",
-        "missing_explicit_url",
-        "missing_explicit_source",
         "url_contains_credentials",
         "non_https_target_url",
         "local_target_url",
         "private_target_url",
         "missing_target_host",
         "invalid_target_url",
-        "evidence_strength_below_4",
-        "asset_fit_below_3",
-        "ambiguity_inverse_below_3",
-        "cost_risk_inverse_below_3",
-        "novelty_below_3",
     }
     reasons.extend(sorted(blocking_flags & downgrade_flags))
-
-    if target_type in {"official_doc", "web_research"} and "requires_confirmation" in downgrade_flags:
-        reasons.append("manual_review_only_candidate_suppressed")
-    reasons.extend(_derivation_noise_reasons(item))
-
-    github_resolution_allowed = (
-        target_type == "github_project"
-        and bool(item.get("name"))
-        and _is_primary_subject(item)
-        and int(scores.get("evidence_strength") or 0) >= 4
-        and int(scores.get("parent_dependency") or 0) >= 4
-        and int(scores.get("ambiguity_inverse") or 0) >= 3
-        and score >= VISIBLE_SCORE_THRESHOLD
-        and confidence >= VISIBLE_CONFIDENCE_THRESHOLD
-    )
-    if github_resolution_allowed:
-        reasons = [
-            reason for reason in reasons
-            if reason not in {"target_resolution_required", "requires_confirmation"}
-        ]
 
     return sorted(set(reasons))
 
@@ -887,10 +819,6 @@ def _auto_block_reasons(item: dict[str, Any]) -> list[str]:
         reasons.append("not_candidate")
     if item.get("execution_status") not in {"candidate", "auto_ready"}:
         reasons.append(f"status_{item.get('execution_status') or 'unknown'}")
-    if int(item.get("score") or 0) < AUTO_SCORE_THRESHOLD:
-        reasons.append("score_below_auto_threshold")
-    if float(item.get("confidence") or 0.0) < AUTO_CONFIDENCE_THRESHOLD:
-        reasons.append("confidence_below_auto_threshold")
     if item.get("dedupe", {}).get("status") != "new":
         reasons.append("dedupe_not_new")
     if item.get("lineage_depth") not in (None, 1):
@@ -898,27 +826,9 @@ def _auto_block_reasons(item: dict[str, Any]) -> list[str]:
     target_type = str(item.get("target_type") or "")
     if target_type not in ALLOWED_TARGET_TYPES:
         reasons.append("target_type_not_allowed")
-    if target_type != "github_project":
-        reasons.append("manual_review_required_for_target_type")
-    scores = item.get("scores") if isinstance(item.get("scores"), dict) else {}
-    github_high_confidence_auto = (
-        target_type == "github_project"
-        and int(item.get("score") or 0) >= 90
-        and float(item.get("confidence") or 0.0) >= AUTO_CONFIDENCE_THRESHOLD
-        and int(scores.get("evidence_strength") or 0) >= 4
-        and int(scores.get("ambiguity_inverse") or 0) >= 3
-        and bool(item.get("target_url") or item.get("name"))
-    )
     downgrade_flags = set(item.get("downgrade_flags") or [])
-    for flag in sorted(downgrade_flags):
-        if re.search(r"_below_\d+$", flag):
-            reasons.append(flag)
     blocking_flags = {
-        "requires_confirmation",
-        "uncertain_evidence",
         "missing_name_and_url",
-        "missing_explicit_url",
-        "missing_explicit_source",
         "url_contains_credentials",
         "non_https_target_url",
         "local_target_url",
@@ -927,13 +837,13 @@ def _auto_block_reasons(item: dict[str, Any]) -> list[str]:
         "invalid_target_url",
     }
     for flag in sorted(blocking_flags & downgrade_flags):
-        if flag == "requires_confirmation" and github_high_confidence_auto:
-            continue
         reasons.append(flag)
-    if target_type in {"official_doc", "web_research"} and not item.get("target_url"):
+    if target_type != "github_project" and not item.get("target_url"):
         reasons.append("target_url_required")
     if target_type == "github_project" and not (item.get("target_url") or item.get("name")):
         reasons.append("github_name_or_url_required")
+    if target_type != "github_project" and "requires_confirmation" in downgrade_flags:
+        reasons.append("requires_confirmation")
     return sorted(set(reasons))
 
 
@@ -959,7 +869,7 @@ def derive_tasks_from_analysis(
     vault_path: Path,
     task_id: str = "",
 ) -> dict[str, Any]:
-    """Return derivation decisions for every qualifying primary subject."""
+    """Return derivation decisions for every structurally valid candidate."""
     if ingest_intent != "knowledge_ingest":
         return {
             "enabled": False,
@@ -1062,8 +972,8 @@ def derive_tasks_from_analysis(
     )
     _add_artifact(
         audit_files,
-        "derive_scored_retained_candidates",
-        _write_audit_json(audit_root, "04-scored-retained-candidates.json", {
+        "derive_retained_candidates",
+        _write_audit_json(audit_root, "04-retained-candidates.json", {
             "source": source,
             "retained": retained,
             "suppressed": suppressed_items,
@@ -1144,8 +1054,6 @@ def public_derived_tasks(decision: dict[str, Any]) -> list[dict[str, Any]]:
             "candidateStatus": item.get("execution_status"),
             "autoEligible": item.get("auto_eligible") is True,
             "autoBlockReasons": item.get("auto_block_reasons") or [],
-            "score": item.get("score"),
-            "confidence": item.get("confidence"),
             "reason": item.get("reason"),
             "evidence": evidence,
             "acceptanceCriteria": acceptance,

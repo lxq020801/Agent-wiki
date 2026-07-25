@@ -9,7 +9,7 @@
 - 格式：JSON text message
 - Origin：允许 Chrome 扩展和本地无 Origin 测试客户端；拒绝普通网页 Origin
 - 敏感信息：服务端状态响应不得返回 API Key、Cookie、Bearer token
-- 当前产品版本：`0.4.5`
+- 当前产品版本：`0.4.6`
 - 当前协议版本：`1`
 
 连接建立后可以先读取状态，但配置、Cookie、模型检查、入库和派生操作必须通过版本握手。新服务会拒绝旧扩展的写操作；新扩展连接缺少完整运行身份的旧服务时，只保留状态诊断并暂停同步与入库。
@@ -43,7 +43,7 @@
   "type": "handshake",
   "client": "agent-wiki-extension",
   "product": "agent-wiki",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "protocolVersion": 1
 }
 ```
@@ -62,7 +62,7 @@
 
 同步模型配置。当前扩展不再发送 `vaultPath`；旧客户端即使携带该字段，服务端也不会据此选择或改写知识库。
 扩展不发送质量档；服务端固定 `[analysis].default_quality = "quality"`。
-`videoAnalysis.strategyModel` 是可选字段，缺省使用 `doubao-seed-2-0-mini-260428`。
+所有视频理解使用 `videoAnalysis.analyzerModel`。旧客户端携带的 `strategyModel` 会被无声忽略。
 `server.taskConcurrency` 控制任务队列同时处理多少个入库任务，范围 `1-4`，缺省为 `2`。
 `videoAnalysis.chunkConcurrency` 控制单个长视频内几个切片并发分析，范围 `1-4`，缺省为 `2`。
 Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 Agent Plan endpoint；非法地址必须返回 `config_rejected`，不能静默回退。
@@ -79,7 +79,6 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
     "videoAnalysis": {
       "modelPreset": "lite",
       "analyzerModel": "doubao-seed-2-0-lite-260428",
-      "strategyModel": "doubao-seed-2-0-mini-260428",
       "chunkConcurrency": 2
     },
     "server": {
@@ -89,7 +88,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 }
 ```
 
-旧版 flat 字段仍兼容读取：`provider/apiKey/model/strategyModel/taskConcurrency/serverTaskConcurrency/videoChunkConcurrency/endpoint`。
+旧版 flat 字段仍兼容读取：`provider/apiKey/model/taskConcurrency/serverTaskConcurrency/videoChunkConcurrency/endpoint`。历史 `strategyModel` 仅容忍输入，不再生效或写回。
 
 ### `vault_discover`（旧扩展兼容）
 
@@ -128,7 +127,6 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
     "videoAnalysis": {
       "modelPreset": "lite",
       "analyzerModel": "doubao-seed-2-0-lite-260428",
-      "strategyModel": "doubao-seed-2-0-mini-260428",
       "chunkConcurrency": 2
     },
     "server": {
@@ -164,15 +162,9 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 
 抖音任务固定使用 `ingest_intent: knowledge_ingest`：直接写入 `知识资产/`，生成一份 `knowledge_asset` 来源笔记。该字段由服务端写入任务和状态，扩展不再发送可选入库意图。
 
-视频超过 10 分钟时，执行层会先做全片概览，再自动切片精拆，并在任务进度中出现：
+所选 FPS 导致预估帧数超过 `1250` 时，执行层会使用同一 FPS 机械切片，并在任务进度中出现：
 
 - `chunking_plan`
-- `overview_uploading`
-- `overview_uploaded`
-- `analyzing_overview`
-- `repairing_overview_strategy`
-- `overview_strategy_repaired`
-- `overview_strategy_decided`
 - `chunk_uploading`
 - `chunk_uploaded`
 - `analyzing_chunk`
@@ -181,13 +173,11 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 - `synthesizing_done`
 - `derived_candidates_ready`
 
-长视频状态会额外带：
+切片状态会额外带：
 
 - `audit_artifacts`：本次任务的审计产物目录和文件索引，实际文件位于 `~/.agent-wiki/run-artifacts/{task_id}/`
-- `overview_strategy_decided.fps_plan[].validation_fallback`：JSON/结构问题导致的兜底
-- `overview_strategy_decided.fps_plan[].fps_adjusted`：程序根据置信度、安全帧数或视觉证据规则调整 fps
-- `overview_strategy_decided.fps_plan[].lite_brief`：mini 给 Lite 的本段精拆说明摘要
-- `chunk_progress[*].chunk_done.artifact`：Lite 分片输出文件
+- `sampling.chunk_plan`：机械切片计划，包含全局 FPS、帧数安全目标、重叠时长和真实切片边界
+- `chunk_progress[*].chunk_done.artifact`：当前分析模型的切片输出文件
 
 ```json
 {
@@ -271,11 +261,11 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 ```json
 {
   "type": "agent_ready",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "protocolVersion": 1,
   "runtime": {
     "product": "agent-wiki",
-    "productVersion": "0.4.5",
+    "productVersion": "0.4.6",
     "protocolVersion": 1,
     "sourceRevision": "3c7ea9e0158a",
     "buildId": "src-0123456789abcdef",
@@ -319,7 +309,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
   "type": "handshake_ack",
   "runtime": {
     "product": "agent-wiki",
-    "productVersion": "0.4.5",
+    "productVersion": "0.4.6",
     "protocolVersion": 1,
     "sourceRevision": "3c7ea9e0158a",
     "buildId": "src-0123456789abcdef",
@@ -329,7 +319,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
     "state": "compatible",
     "canOperate": true,
     "message": "扩展、服务与协议版本一致。",
-    "clientVersion": "0.4.5",
+    "clientVersion": "0.4.6",
     "clientProtocolVersion": 1
   }
 }
@@ -345,8 +335,8 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 {
   "type": "protocol_rejected",
   "reason": "version_mismatch",
-  "message": "扩展 v0.0.9 与服务 v0.4.5 不一致。",
-  "runtime": { "product": "agent-wiki", "productVersion": "0.4.5", "protocolVersion": 1 }
+  "message": "扩展 v0.0.9 与服务 v0.4.6 不一致。",
+  "runtime": { "product": "agent-wiki", "productVersion": "0.4.6", "protocolVersion": 1 }
 }
 ```
 
@@ -360,7 +350,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
   "status": {
     "runtime": {
       "product": "agent-wiki",
-      "productVersion": "0.4.5",
+      "productVersion": "0.4.6",
       "protocolVersion": 1,
       "sourceRevision": "3c7ea9e0158a",
       "buildId": "src-0123456789abcdef",
@@ -371,7 +361,6 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
     "videoAnalysis": {
       "modelPreset": "lite",
       "analyzerModel": "doubao-seed-2-0-lite-260428",
-      "strategyModel": "doubao-seed-2-0-mini-260428",
       "chunkConcurrency": 2
     },
     "cookie": { "state": "ready", "platform": "douyin" },

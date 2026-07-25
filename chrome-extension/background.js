@@ -14,8 +14,7 @@ const DEBUG_LOGS = false;
 const PROVIDERS = {
   doubao: {
     endpoint: 'https://ark.cn-beijing.volces.com/api/v3',
-    model: 'doubao-seed-2-0-lite-260428',
-    strategyModel: 'doubao-seed-2-0-mini-260428'
+    model: 'doubao-seed-2-0-lite-260428'
   }
 };
 const DEFAULT_PROVIDER = 'doubao';
@@ -62,7 +61,7 @@ function normalizeProvider(value) {
 }
 
 function providerStorageKeys(value) {
-  return { apiKey: 'arkApiKey', model: 'arkModel', strategyModel: 'arkStrategyModel' };
+  return { apiKey: 'arkApiKey', model: 'arkModel' };
 }
 
 function normalizeTaskConcurrency(value) {
@@ -143,25 +142,12 @@ function readStoredModel(source, provider) {
   return legacy || MODEL_PRESETS[preset] || MODEL_PRESETS[DEFAULT_MODEL_PRESET];
 }
 
-function readStoredStrategyModel(source, provider) {
-  const keys = providerStorageKeys(provider);
-  const providerValue = ownValue(source, keys.strategyModel);
-  const defaultStrategy = PROVIDERS[provider].strategyModel;
-  if (providerValue !== undefined && providerValue !== null) {
-    const value = String(providerValue).trim();
-    return value === defaultStrategy ? value : defaultStrategy;
-  }
-  const legacy = String(source.strategyModel || source.videoStrategyModel || '').trim();
-  return legacy === defaultStrategy ? legacy : defaultStrategy;
-}
-
 function buildAgentConfig(config) {
   const provider = normalizeProvider(config.llmProvider || config.provider);
   const defaults = PROVIDERS[provider];
   const keys = providerStorageKeys(provider);
   const apiKey = readStoredApiKey(config, provider);
   const model = readStoredModel(config, provider) || defaults.model;
-  const strategyModel = readStoredStrategyModel(config, provider) || defaults.strategyModel;
   const modelPreset = presetFromModel(model);
   const endpoint = normalizeEndpoint(config.arkEndpoint || config.endpoint, provider);
   const taskConcurrency = normalizeTaskConcurrency(config.serverTaskConcurrency || config.taskConcurrency || config.task_concurrency);
@@ -175,7 +161,6 @@ function buildAgentConfig(config) {
     videoAnalysis: {
       modelPreset,
       analyzerModel: model,
-      strategyModel,
       chunkConcurrency
     },
     server: {
@@ -187,8 +172,6 @@ function buildAgentConfig(config) {
     [keys.apiKey]: apiKey,
     model,
     [keys.model]: model,
-    strategyModel,
-    [keys.strategyModel]: strategyModel,
     taskConcurrency,
     serverTaskConcurrency: taskConcurrency,
     videoChunkConcurrency: chunkConcurrency,
@@ -210,9 +193,6 @@ async function storedAgentConfig() {
     'arkModel',
     'videoAnalysisModelPreset',
     'videoAnalysisModel',
-    'strategyModel',
-    'arkStrategyModel',
-    'videoStrategyModel',
     'taskConcurrency',
     'serverTaskConcurrency',
     'videoChunkConcurrency'
@@ -843,7 +823,6 @@ function handleAgentMessage(msg) {
           ...(modelStatus.endpoint ? { arkEndpoint: modelStatus.endpoint } : {}),
           ...(videoStatus.modelPreset ? { videoAnalysisModelPreset: videoStatus.modelPreset } : {}),
           ...(videoStatus.analyzerModel ? { videoAnalysisModel: videoStatus.analyzerModel } : {}),
-          ...(videoStatus.strategyModel ? { videoStrategyModel: videoStatus.strategyModel } : {}),
           ...(videoStatus.chunkConcurrency ? { videoChunkConcurrency: normalizeChunkConcurrency(videoStatus.chunkConcurrency) } : {})
         });
       }

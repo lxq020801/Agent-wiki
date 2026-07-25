@@ -10,7 +10,6 @@ const PROVIDERS = {
     label: '字节跳动',
     shortLabel: '字节跳动方舟 API',
     endpoint: 'https://ark.cn-beijing.volces.com/api/v3',
-    strategyModel: 'doubao-seed-2-0-mini-260428',
     keyPlaceholder: 'Ark API Key'
   }
 };
@@ -383,8 +382,7 @@ function normalizeEndpoint(value, provider) {
 function providerStorageKeys() {
   return {
     apiKey: 'arkApiKey',
-    model: 'arkModel',
-    strategyModel: 'arkStrategyModel'
+    model: 'arkModel'
   };
 }
 
@@ -421,14 +419,6 @@ function readStoredModelId(source) {
   return MODEL_PRESETS[preset] || MODEL_PRESETS[DEFAULT_MODEL_PRESET];
 }
 
-function readStoredStrategyModel(source) {
-  const keys = providerStorageKeys();
-  const configured = String(source.videoStrategyModel || source[keys.strategyModel] || source.strategyModel || '').trim();
-  return configured === providerInfo(DEFAULT_PROVIDER).strategyModel
-    ? configured
-    : providerInfo(DEFAULT_PROVIDER).strategyModel;
-}
-
 function setControlValue(id, value, { notify = false } = {}) {
   const input = document.getElementById(id);
   if (!input) return;
@@ -450,7 +440,6 @@ function selectedVideoConfig() {
   return {
     modelPreset: preset,
     analyzerModel,
-    strategyModel: providerInfo(DEFAULT_PROVIDER).strategyModel,
     chunkConcurrency: normalizeChunkConcurrency(document.getElementById('chunk-concurrency').value)
   };
 }
@@ -467,9 +456,6 @@ async function buildAgentConfig({ requireApiKey = false } = {}) {
     'videoAnalysisModel',
     'model',
     'arkModel',
-    'videoStrategyModel',
-    'strategyModel',
-    'arkStrategyModel',
     'serverTaskConcurrency',
     'taskConcurrency',
     'videoChunkConcurrency'
@@ -484,7 +470,6 @@ async function buildAgentConfig({ requireApiKey = false } = {}) {
   }
   const analyzerModel = readStoredModelId(stored);
   const preset = presetFromModel(analyzerModel);
-  const strategyModel = readStoredStrategyModel(stored);
   const taskConcurrency = normalizeTaskConcurrency(stored.serverTaskConcurrency || stored.taskConcurrency);
   const chunkConcurrency = normalizeChunkConcurrency(stored.videoChunkConcurrency);
   const data = {
@@ -496,7 +481,6 @@ async function buildAgentConfig({ requireApiKey = false } = {}) {
     videoAnalysis: {
       modelPreset: preset,
       analyzerModel,
-      strategyModel,
       chunkConcurrency
     },
     server: {
@@ -507,8 +491,6 @@ async function buildAgentConfig({ requireApiKey = false } = {}) {
     [keys.apiKey]: apiKey,
     model: analyzerModel,
     [keys.model]: analyzerModel,
-    strategyModel,
-    [keys.strategyModel]: strategyModel,
     taskConcurrency,
     serverTaskConcurrency: taskConcurrency,
     videoChunkConcurrency: chunkConcurrency,
@@ -1698,10 +1680,8 @@ function renderDerivedItem(task, item) {
 
   const meta = document.createElement('div');
   meta.className = 'derived-meta';
-  const score = Number.isFinite(Number(item.score)) ? `${Number(item.score)}分` : '';
   meta.textContent = [
     targetTypeLabel(item.targetType),
-    score,
     item.targetUrl || item.searchQuery || ''
   ].filter(Boolean).join(' · ');
 
@@ -1830,18 +1810,6 @@ function stageLabel(stage) {
     probed_duration: '读取视频信息',
     fps_decided: '计算抽帧',
     chunking_plan: '规划切片',
-    overview_uploading: '上传全片概览',
-    overview_uploaded: '全片概览上传完成',
-    overview_chunking: '规划分片概览',
-    overview_chunk_uploading: '上传概览切片',
-    overview_chunk_uploaded: '概览切片上传完成',
-    analyzing_overview: '分析全片概览',
-    analyzing_overview_chunk: '分析概览切片',
-    overview_chunk_done: '概览切片完成',
-    synthesizing_overview_strategy: '合成精拆策略',
-    repairing_overview_strategy: '修复精拆策略',
-    overview_strategy_repaired: '精拆策略已修复',
-    overview_strategy_decided: '决定精拆策略',
     chunk_uploading: '上传切片',
     chunk_uploaded: '切片上传完成',
     uploading: '上传中',
@@ -1963,9 +1931,6 @@ async function collectConfig() {
     videoAnalysisModel: video.analyzerModel,
     model: video.analyzerModel,
     [keys.model]: video.analyzerModel,
-    videoStrategyModel: video.strategyModel,
-    strategyModel: video.strategyModel,
-    [keys.strategyModel]: video.strategyModel,
     videoChunkConcurrency: video.chunkConcurrency,
     serverTaskConcurrency: taskConcurrency,
     taskConcurrency,

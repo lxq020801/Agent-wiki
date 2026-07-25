@@ -63,7 +63,7 @@ port = 8765
     assert cfg.vault_path == vault.resolve()
     assert cfg.vault_relative_root == "知识资产"
     assert cfg.default_quality == "quality"
-    assert cfg.strategy_model == "doubao-seed-2-0-mini-260428"
+    assert not hasattr(cfg, "strategy_model")
     assert cfg.video_fps_mode == "fixed_3"
     assert cfg.fps_min == 2.0
     assert cfg.quality_params("quality")["fps_mode"] == "fixed_3"
@@ -392,8 +392,6 @@ def _fake_config(tmp: Path, vault: Path, runtime_name: str = "test-runtime"):
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        analyzer_fallback="doubao-seed-2-0-mini-260428",
-        strategy_model="doubao-seed-2-0-mini-260428",
         default_quality="quality",
         balanced_target_frames=240,
         quality_target_frames=1250,
@@ -542,9 +540,9 @@ def test_derive_strategy_keeps_all_primary_candidates_dedupes_and_redacts(tmp: P
     )
 
     assert decision["enabled"] is True
-    assert len(decision["items"]) == 10
+    assert len(decision["items"]) == 11
     assert decision["limits"] == {"candidates": None}
-    assert decision["counts"]["suppressed"] >= 1
+    assert decision["counts"]["suppressed"] == 0
     assert len({item["dedupe_key"] for item in decision["items"]}) == len(decision["items"])
     existing_items = [
         item for item in decision["items"]
@@ -558,9 +556,13 @@ def test_derive_strategy_keeps_all_primary_candidates_dedupes_and_redacts(tmp: P
     assert all(item.get("execution_status") != "queued" for item in decision["items"])
 
     public = public_derived_tasks(decision)
-    assert len(public) == 10
-    assert all(item["status"] in {"candidate", "existing_related"} for item in public)
+    assert len(public) == 11
+    assert all(item["status"] in {"auto_ready", "needs_target", "existing_related"} for item in public)
     assert all(item["decision"] == "candidate" for item in public)
+    assert all("score" not in item and "confidence" not in item for item in public)
+    generic = next(item for item in public if item["name"] == "AI")
+    assert generic["status"] == "needs_target"
+    assert generic["autoEligible"] is False
     log_text = (tmp / "derive-runtime" / "logs" / "derive-strategy-events.jsonl").read_text(encoding="utf-8")
     assert "derive_decision" in log_text
     assert "api_key" not in log_text.lower()
@@ -574,7 +576,7 @@ def test_derive_strategy_keeps_all_primary_candidates_dedupes_and_redacts(tmp: P
         "derive_raw_json_candidates",
         "derive_raw_markdown_candidates",
         "derive_normalized_candidates",
-        "derive_scored_retained_candidates",
+        "derive_retained_candidates",
         "derive_public_candidates",
     ):
         assert key in files
@@ -646,14 +648,13 @@ def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp
     assert langgraph["status"] == "auto_ready"
     assert "requires_confirmation" not in langgraph["autoBlockReasons"]
     assert "target_resolution_required" not in langgraph["autoBlockReasons"]
-    assert not any(item["name"] == "Some API Docs" for item in public)
-    suppressed = decision["audit_artifacts"]["files"]["derive_scored_retained_candidates"]
-    suppressed_text = (tmp / "derive-auto-runtime" / suppressed).read_text(encoding="utf-8")
-    assert "Some API Docs" in suppressed_text
-    assert "target_url_required_for_visible_candidate" in suppressed_text
+    docs = next(item for item in public if item["name"] == "Some API Docs")
+    assert docs["status"] == "needs_target"
+    assert docs["autoEligible"] is False
+    assert docs["autoBlockReasons"] == ["status_needs_target", "target_url_required"]
 
 
-def test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp: Path) -> None:
+def test_derive_strategy_allows_safe_urls_and_blocks_unsafe_urls(tmp: Path) -> None:
     import sys
 
     os.environ["AGENT_WIKI_HOME"] = str(tmp / "derive-url-runtime")
@@ -710,10 +711,10 @@ def test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp: Path) -> No
     public = public_derived_tasks(decision)
     docs = next(item for item in public if item["name"] == "Official Docs")
     assert docs["targetUrl"] == "https://docs.example.com/api"
-    assert docs["autoEligible"] is False
-    assert "manual_review_required_for_target_type" in docs["autoBlockReasons"]
+    assert docs["autoEligible"] is True
+    assert docs["status"] == "auto_ready"
     assert not any(item["name"] == "Credential Repo" for item in public)
-    suppressed = decision["audit_artifacts"]["files"]["derive_scored_retained_candidates"]
+    suppressed = decision["audit_artifacts"]["files"]["derive_retained_candidates"]
     suppressed_text = (tmp / "derive-url-runtime" / suppressed).read_text(encoding="utf-8")
     assert "Credential Repo" in suppressed_text
     assert "url_contains_credentials" in suppressed_text
@@ -728,20 +729,19 @@ def test_knowledge_prompts_do_not_force_github_manual_confirmation() -> None:
     for prompt in (video_prompt, image_prompt):
         assert '"requires_confirmation": false' in prompt
         assert "不设候选数量上限" in prompt
-        assert "主要介绍对象" in prompt
-        assert "顺带提及" in prompt
-        assert "案例" in prompt
+        assert "不使用分数、置信度" in prompt
+        assert "只供任务系统读取" in prompt
         assert "即使缺 URL，也可以设为 `false`" in prompt
         assert "GitHub API 搜索解析" in prompt
         assert "## 简洁概括" in prompt
         assert "## 完整内容整理" in prompt
         assert "## AI 分析" in prompt
-        assert '"subject_role": "primary"' in prompt
-        assert '"evidence_strength": 5' in prompt
-        assert '"ambiguity_inverse": 4' in prompt
+        assert '"subject_role"' not in prompt
+        assert '"scores"' not in prompt
+        assert '"confidence"' not in prompt
 
 
-def test_derive_strategy_keeps_four_primary_projects_and_suppresses_incidental(tmp: Path) -> None:
+def test_derive_strategy_keeps_all_valid_candidates_without_role_gate(tmp: Path) -> None:
     import sys
 
     os.environ["AGENT_WIKI_HOME"] = str(tmp / "four-project-runtime")
@@ -800,13 +800,11 @@ def test_derive_strategy_keeps_four_primary_projects_and_suppresses_incidental(t
     )
 
     public = public_derived_tasks(decision)
-    assert [item["name"] for item in public] == names
+    assert [item["name"] for item in public] == names + ["FFmpeg"]
     assert all(item["autoEligible"] for item in public)
     assert all(item["status"] == "auto_ready" for item in public)
-    assert decision["counts"]["retained"] == 4
-    assert decision["counts"]["suppressed"] == 1
-    audit_path = tmp / "four-project-runtime" / decision["audit_artifacts"]["files"]["derive_scored_retained_candidates"]
-    assert "object_not_primary_subject" in audit_path.read_text(encoding="utf-8")
+    assert decision["counts"]["retained"] == 5
+    assert decision["counts"]["suppressed"] == 0
 
 
 def test_derive_executor_github_search_failure_and_ambiguity_are_mocked(tmp: Path) -> None:
@@ -936,8 +934,6 @@ def test_vault_write_schema(tmp: Path) -> None:
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        analyzer_fallback="doubao-seed-2-0-mini-260428",
-        strategy_model="doubao-seed-2-0-mini-260428",
         default_quality="quality",
         balanced_target_frames=240,
         quality_target_frames=1250,
@@ -973,7 +969,7 @@ def test_vault_write_schema(tmp: Path) -> None:
     assert "## 简洁概括" in text
     assert "## 完整内容整理" in text
     assert "## AI 分析" in text
-    assert "### 派生状态（系统）" in text
+    assert "派生状态" not in text
     assert re.findall(r"^##\s+", text, re.MULTILINE) == ["## ", "## ", "## "]
     assert "model:" not in text
     assert "input_tokens:" not in text
@@ -1178,8 +1174,6 @@ def test_vault_write_includes_derived_tasks_and_record(tmp: Path) -> None:
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        analyzer_fallback="doubao-seed-2-0-mini-260428",
-        strategy_model="doubao-seed-2-0-mini-260428",
         default_quality="quality",
         balanced_target_frames=240,
         quality_target_frames=1250,
@@ -1253,9 +1247,8 @@ def test_vault_write_includes_derived_tasks_and_record(tmp: Path) -> None:
     assert "derived_candidate_record:" not in text
     assert "derived_candidate_ids:" not in text
     assert "target_type:" not in text.split("---", 2)[1]
-    assert "### 派生状态（系统）" in text
-    assert "[LangGraph](https://github.com/langchain-ai/langgraph)" in text
-    assert "当前没有待执行或已完成的派生" not in text
+    assert "派生状态" not in text
+    assert "LangGraph" not in text
     assert "派生决策 JSON" not in text
     assert "候选名称" not in text
 
@@ -1410,8 +1403,6 @@ def test_image_post_vault_write_schema(tmp: Path) -> None:
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        analyzer_fallback="doubao-seed-2-0-mini-260428",
-        strategy_model="doubao-seed-2-0-mini-260428",
         default_quality="quality",
         balanced_target_frames=240,
         quality_target_frames=1250,
@@ -1520,8 +1511,6 @@ def test_vault_write_uses_knowledge_root_and_rejects_removed_intent(tmp: Path) -
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        analyzer_fallback="doubao-seed-2-0-mini-260428",
-        strategy_model="doubao-seed-2-0-mini-260428",
         default_quality="quality",
         balanced_target_frames=240,
         quality_target_frames=1250,
@@ -1586,8 +1575,6 @@ def test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp: Path) 
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        analyzer_fallback="doubao-seed-2-0-mini-260428",
-        strategy_model="doubao-seed-2-0-mini-260428",
         default_quality="quality",
         balanced_target_frames=240,
         quality_target_frames=1250,
@@ -1634,7 +1621,7 @@ def test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp: Path) 
         calls.append((
             "analyze_video",
             video_path_arg,
-            kwargs.get("strategy_model"),
+            kwargs.get("model"),
             kwargs.get("analysis_key"),
         ))
         assert video_path_arg == video
@@ -1739,7 +1726,7 @@ def test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp: Path) 
     assert (
         "analyze_video",
         video,
-        "doubao-seed-2-0-mini-260428",
+        "doubao-seed-2-0-lite-260428",
         "knowledge_ingest",
     ) in calls
     assert sum(1 for call in calls if call == ("write_to_vault", "knowledge_ingest")) == 1
@@ -1757,7 +1744,6 @@ def test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp: Path) 
         "targetUrl": "https://example.com/docs/primary-api",
         "decision": "candidate",
         "status": "candidate",
-        "score": 84,
         "reason": "需要核验父视频里的 API 参数。",
     }
     for key, value in expected_public.items():
@@ -1826,25 +1812,6 @@ def test_analyzer_single_wrappers_preserve_analysis_key() -> None:
         ("images", ("knowledge_ingest",)),
     ]
 
-
-def test_long_overview_prompt_uses_single_ingest_placeholder() -> None:
-    import sys
-
-    sys.path.insert(0, str(SCRIPTS))
-    from analyzer import _build_long_overview_prompt
-
-    prompt = _build_long_overview_prompt(
-        duration_sec=601,
-        chunk_plan=[{
-            "part_index": 1,
-            "start_sec": 0,
-            "end_sec": 240,
-            "overlap_sec": 0,
-        }],
-        intents=["knowledge_ingest"],
-    )
-    assert "当前入库意图：`knowledge_ingest`" in prompt
-    assert "{ingest_intent}" not in prompt
 
 
 def test_analyzer_rejects_empty_response_text(tmp: Path) -> None:
@@ -1944,7 +1911,7 @@ def test_websocket_config_writer(tmp: Path) -> None:
     assert cfg.fps_min == 2.0
     assert cfg.fps_max == 5.0
     assert cfg.response_timeout_sec == 900
-    assert cfg.strategy_model == "doubao-seed-2-0-mini-260428"
+    assert not hasattr(cfg, "strategy_model")
     assert cfg.chunk_concurrency == 4
     assert cfg.video_fps_mode == "auto"
     assert server.task_concurrency == 3
@@ -1953,6 +1920,8 @@ def test_websocket_config_writer(tmp: Path) -> None:
     config_text = config_path.read_text(encoding="utf-8")
     assert "task_concurrency = 3" in config_text
     assert "chunk_concurrency = 4" in config_text
+    assert "strategy =" not in config_text
+    assert "analyzer_fallback =" not in config_text
     assert oct(config_path.stat().st_mode & 0o777) == "0o600"
 
     weak_status = asyncio.run(server.handle_cookie_update(
@@ -2116,73 +2085,35 @@ def test_local_prescan_writes_reproduction_evidence(tmp: Path) -> None:
     assert "fps=1" in calls[0][0][calls[0][0].index("-vf") + 1]
 
 
-def test_repack_analysis_plan_merges_same_fps_segments() -> None:
+def test_mechanical_chunk_plan_uses_one_fps_without_semantic_strategy() -> None:
     import sys
 
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
-    plan = []
-    start = 0.0
-    for index in range(1, 19):
-        end = min(4120.0, start + 240.0)
-        plan.append({
-            "part_index": index,
-            "start_sec": round(start, 3),
-            "end_sec": round(end, 3),
-            "overlap_sec": 0.0 if index == 1 else 10.0,
-        })
-        start += 230.0
-    strategy = {
-        "chunks": [
-            {"part_index": i, "recommended_fps": 2.0, "lite_brief": f"第{i}段", "confidence": 0.9}
-            for i in range(1, 19)
-        ]
-    }
-    new_plan, new_chunks, changed = analyzer._repack_analysis_plan(plan, strategy)
-    assert changed is True
-    assert len(new_plan) == 7, new_plan
-    assert len(new_chunks) == 7
-    for item in new_plan:
-        assert float(item["end_sec"]) - float(item["start_sec"]) <= 600.0 + 1e-6
-    assert new_plan[0]["overlap_sec"] == 0.0
-    assert all(c["recommended_fps"] == 2.0 for c in new_chunks)
-    assert "第1段" in new_chunks[0]["lite_brief"] and "第3段" in new_chunks[0]["lite_brief"]
-    assert "第6段" not in new_chunks[0]["lite_brief"]
-    assert all(
-        (chunk["start_sec"], chunk["end_sec"], chunk["overlap_sec"])
-        == (item["start_sec"], item["end_sec"], item["overlap_sec"])
-        for item, chunk in zip(new_plan, new_chunks)
-    )
+    plan = analyzer._chunk_plan(520.809, fps=5.0)
+    assert [(item["start_sec"], item["end_sec"]) for item in plan] == [
+        (0.0, 250.0),
+        (240.0, 490.0),
+        (480.0, 520.809),
+    ]
+    assert [item["part_index"] for item in plan] == [1, 2, 3]
+    assert [item["overlap_sec"] for item in plan] == [0.0, 10.0, 10.0]
+    assert all((float(item["end_sec"]) - float(item["start_sec"])) * 5.0 <= 1250 for item in plan)
 
-    # 相邻不同 fps 不合并；5fps 段按 250 秒上限切
-    mixed = {
-        "chunks": [
-            {"part_index": 1, "recommended_fps": 5.0, "lite_brief": "a", "confidence": 0.9},
-            {"part_index": 2, "recommended_fps": 5.0, "lite_brief": "b", "confidence": 0.9},
-            {"part_index": 3, "recommended_fps": 2.0, "lite_brief": "c", "confidence": 0.8},
-        ]
-    }
-    plan3 = [dict(item) for item in plan[:3]]
-    new_plan3, new_chunks3, changed3 = analyzer._repack_analysis_plan(plan3, mixed)
-    assert changed3 is True
-    assert [item["part_index"] for item in new_plan3] == [1, 2, 3]
-    assert [item["part_index"] for item in new_chunks3] == [1, 2, 3]
-    fps_by_part = {c["part_index"]: c["recommended_fps"] for c in new_chunks3}
-    assert sorted(fps_by_part.values()) == [2.0, 5.0, 5.0]
-    for item in new_plan3:
-        fps = fps_by_part[item["part_index"]]
-        assert (float(item["end_sec"]) - float(item["start_sec"])) * fps <= 1250 + 1e-6
-    assert new_chunks3[0]["lite_brief"] == "a b"
-    assert new_chunks3[1]["lite_brief"] == "b"
-    assert new_chunks3[2]["lite_brief"] == "c"
+    assert analyzer._chunk_plan(520.809, fps=2.0) == []
+    long_plan = analyzer._chunk_plan(700.0, fps=2.0)
+    assert [(item["start_sec"], item["end_sec"]) for item in long_plan] == [
+        (0.0, 600.0),
+        (590.0, 700.0),
+    ]
 
-    # 无变化时原样返回，不触发重切
-    single = [{"part_index": 1, "start_sec": 0.0, "end_sec": 200.0, "overlap_sec": 0.0}]
-    single_strategy = {"chunks": [{"part_index": 1, "recommended_fps": 5.0, "lite_brief": "x", "confidence": 0.9}]}
-    same_plan, same_chunks, same_changed = analyzer._repack_analysis_plan(single, single_strategy)
-    assert same_changed is False
-    assert same_plan is single
+    import inspect
+    source = inspect.getsource(analyzer.analyze_video_many)
+    assert "_prepare_long_video_strategy" not in source
+    assert "_repack_analysis_plan" not in source
+    assert "strategy_model" not in inspect.signature(analyzer.analyze_video_many).parameters
+    assert "doubao-seed-2-0-mini" not in source
 
 
 def test_prescan_timeout_scales_with_duration() -> None:
@@ -2490,20 +2421,14 @@ def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
-    assert analyzer.should_chunk_video(600) is False
-    assert analyzer.should_chunk_video(601) is True
-    assert analyzer._chunk_plan(300) == []
-    assert len(analyzer._chunk_plan(300, force_for_frame_budget=True)) == 2
-    assert analyzer._long_overview_fps(1200) == 2.0
-    assert analyzer._long_overview_fps(1800) == 2.0
-    assert analyzer._ultra_long_threshold_sec() == 615.0
-    assert analyzer._is_ultra_long_video(615) is False
-    assert analyzer._is_ultra_long_video(616) is True
-    assert analyzer._is_ultra_long_video(1800) is True
+    assert analyzer.should_chunk_video(250) is False
+    assert analyzer.should_chunk_video(251) is True
+    assert analyzer._chunk_plan(250) == []
+    assert len(analyzer._chunk_plan(300)) == 2
     plan = analyzer._chunk_plan(601)
     assert len(plan) == 3
     assert plan[0]["start_sec"] == 0
-    assert plan[1]["start_sec"] == 230
+    assert plan[1]["start_sec"] == 240
     assert plan[1]["overlap_sec"] == 10.0
 
     analyzer.save_response_memory(
@@ -2633,517 +2558,6 @@ def test_status_writer_redacts_sensitive_fields(tmp: Path) -> None:
     assert "previous_response_id" not in text
 
 
-def test_long_video_strategy_accepts_top_level_segments_and_partial_fallback() -> None:
-    import sys
-
-    sys.path.insert(0, str(SCRIPTS))
-    import analyzer
-
-    plan = analyzer._chunk_plan(601)
-
-    def segment(item, *, part_index=None, evidence=True):
-        payload = {
-            "part_index": part_index or item["part_index"],
-            "start_sec": item["start_sec"],
-            "end_sec": item["end_sec"],
-            "rough_summary": "稳定讲解",
-            "recommended_fps": 3,
-            "confidence": 0.9,
-            "scores": {
-                "visual_change": 1,
-                "ocr_subtitle_density": 2,
-                "operation_density": 1,
-                "motion_detail": 0,
-                "concept_density": 3,
-                "risk_if_low_fps": 2,
-            },
-            "focus": ["结论"],
-            "lite_brief": "重点提取口播结论，画面稳定，不要把重复画面当作新信息。",
-            "risk_flags": [],
-            "why_not_lower_fps": "需要保留字幕细节",
-        }
-        if evidence:
-            payload["evidence"] = ["字幕稳定可读"]
-        return payload
-
-    top_level = analyzer._normalize_long_video_strategy(
-        json.dumps({
-            "overview": {"summary": "这条视频讲 Open Design。", "timeline": []},
-            "strategy": {"global_notes": "模型把 segments 放在顶层。"},
-            "segments": [segment(item) for item in plan],
-        }, ensure_ascii=False),
-        plan,
-    )
-    assert top_level["ok"] is True
-    assert top_level["detected_structure"]["segments_path"] == "segments"
-    assert analyzer._strategy_needs_json_repair(top_level) is False
-    assert [item["recommended_fps"] for item in top_level["chunks"]] == [3.0, 3.0, 3.0]
-
-    partial = analyzer._normalize_long_video_strategy(
-        json.dumps({
-            "overview": {"summary": "部分策略字段坏。", "timeline": []},
-            "segments": [
-                segment(plan[0]),
-                {k: v for k, v in segment(plan[1]).items() if k != "lite_brief"},
-                segment(plan[2]),
-            ],
-        }, ensure_ascii=False),
-        plan,
-    )
-    assert partial["ok"] is True
-    assert partial["chunks"][0]["recommended_fps"] == 3.0
-    assert partial["chunks"][0]["fallback_applied"] is False
-    assert partial["chunks"][1]["recommended_fps"] == 5.0
-    assert partial["chunks"][1]["fallback_applied"] is True
-    assert partial["chunks"][1]["validation_fallback"] is True
-    assert "必填字段" in partial["chunks"][1]["fallback_reason"]
-    assert partial["chunks"][2]["recommended_fps"] == 3.0
-
-
-def test_long_video_strategy_validation_falls_back_to_5fps() -> None:
-    import sys
-
-    sys.path.insert(0, str(SCRIPTS))
-    import analyzer
-
-    plan = analyzer._chunk_plan(601)
-    strategy = analyzer._normalize_long_video_strategy("not json", plan)
-
-    assert strategy["ok"] is False
-    assert "JSON" in strategy["fallback_reason"]
-    assert len(strategy["chunks"]) == len(plan)
-    assert all(item["recommended_fps"] == 5.0 for item in strategy["chunks"])
-    assert all(item["fallback_applied"] is True for item in strategy["chunks"])
-
-    valid = analyzer._normalize_long_video_strategy(
-        json.dumps({
-            "overview": {
-                "summary": "一条长视频，前半段讲背景，后半段演示操作。",
-                "timeline": [],
-                "important_points": ["操作演示"],
-                "uncertain_points": [],
-            },
-            "strategy": {
-                "global_notes": "多数片段较稳定，但第二段操作密集。",
-                "segments": [
-                    {
-                        "part_index": 1,
-                        "start_sec": 0,
-                        "end_sec": 240,
-                        "rough_summary": "背景说明",
-                        "recommended_fps": 2,
-                        "confidence": 0.9,
-                        "scores": {
-                            "visual_change": 1,
-                            "ocr_subtitle_density": 1,
-                            "operation_density": 0,
-                            "motion_detail": 0,
-                            "concept_density": 2,
-                            "risk_if_low_fps": 1,
-                        },
-                        "evidence": ["固定机位，画面变化低"],
-                        "focus": ["核心结论"],
-                        "lite_brief": "重点理解口播观点和结论，画面只是低变化背景。",
-                        "risk_flags": [],
-                        "why_not_lower_fps": "2fps 已能覆盖慢变化画面",
-                    },
-                    {
-                        "part_index": 2,
-                        "start_sec": 230,
-                        "end_sec": 470,
-                        "rough_summary": "软件操作演示",
-                        "recommended_fps": 2,
-                        "confidence": 0.6,
-                        "scores": {
-                            "visual_change": 3,
-                            "ocr_subtitle_density": 3,
-                            "operation_density": 5,
-                            "motion_detail": 3,
-                            "concept_density": 3,
-                            "risk_if_low_fps": 5,
-                        },
-                        "evidence": ["多处界面操作"],
-                        "focus": ["菜单和按钮"],
-                        "lite_brief": "重点捕捉界面菜单、按钮和操作顺序，避免漏掉短暂视觉步骤。",
-                        "risk_flags": ["低 fps 可能漏步骤"],
-                        "why_not_lower_fps": "操作密集",
-                    },
-                    {
-                        "part_index": 3,
-                        "start_sec": 460,
-                        "end_sec": 601,
-                        "rough_summary": "总结",
-                        "recommended_fps": 3,
-                        "confidence": 0.7,
-                        "scores": {
-                            "visual_change": 1,
-                            "ocr_subtitle_density": 2,
-                            "operation_density": 0,
-                            "motion_detail": 0,
-                            "concept_density": 2,
-                            "risk_if_low_fps": 1,
-                        },
-                        "evidence": ["字幕较清楚"],
-                        "focus": ["结论"],
-                        "lite_brief": "重点提取收尾结论和字幕里的关键词。",
-                        "risk_flags": [],
-                        "why_not_lower_fps": "需要确认字幕",
-                    },
-                ],
-            },
-        }, ensure_ascii=False),
-        plan,
-    )
-
-    assert valid["ok"] is True
-    assert valid["chunks"][0]["recommended_fps"] == 2.0
-    assert valid["chunks"][1]["recommended_fps"] == 5.0
-    assert valid["chunks"][1]["fallback_applied"] is True
-    assert valid["chunks"][2]["recommended_fps"] == 4.0
-
-
-def test_long_video_strategy_does_not_raise_fps_for_concepts_only() -> None:
-    import sys
-
-    sys.path.insert(0, str(SCRIPTS))
-    import analyzer
-
-    plan = analyzer._chunk_plan(601)
-    strategy = analyzer._normalize_long_video_strategy(
-        json.dumps({
-            "overview": {"summary": "静态长访谈，观点密度高。", "timeline": []},
-            "strategy": {
-                "global_notes": "全程固定机位，主要靠口播承载信息。",
-                "segments": [
-                    {
-                        "part_index": item["part_index"],
-                        "start_sec": item["start_sec"],
-                        "end_sec": item["end_sec"],
-                        "rough_summary": "嘉宾密集输出产业观点。",
-                        "recommended_fps": 5,
-                        "confidence": 0.92,
-                        "information_carriers": {
-                            "audio_argument": 5,
-                            "subtitle_ocr": 1,
-                            "visual_scene": 1,
-                            "operation_steps": 0,
-                            "motion_detail": 0,
-                            "structure_context": 5,
-                        },
-                        "scores": {
-                            "visual_change": 1,
-                            "ocr_subtitle_density": 1,
-                            "operation_density": 0,
-                            "motion_detail": 0,
-                            "concept_density": 5,
-                            "risk_if_low_fps": 5,
-                        },
-                        "lite_brief": "画面重复，核心信息来自口播论证。Lite 应重点提取观点链、数字和待验证事实。",
-                        "evidence": ["固定机位坐着说话"],
-                        "risk_flags": [],
-                        "why_not_lower_fps": "观点很密，但视觉风险低。",
-                    }
-                    for item in plan
-                ],
-            },
-        }, ensure_ascii=False),
-        plan,
-    )
-
-    assert strategy["ok"] is True
-    assert all(item["recommended_fps"] == 3.0 for item in strategy["chunks"])
-    assert all(item["fps_adjusted"] is True for item in strategy["chunks"])
-    assert all("概念密度" in item["fps_adjust_reason"] for item in strategy["chunks"])
-
-
-def test_long_video_strategy_missing_required_fields_requests_repair() -> None:
-    import sys
-
-    sys.path.insert(0, str(SCRIPTS))
-    import analyzer
-
-    plan = analyzer._chunk_plan(601)
-    missing_fields = analyzer._normalize_long_video_strategy(
-        json.dumps({
-            "overview": {"summary": "概览", "timeline": []},
-            "strategy": {
-                "segments": [
-                    {
-                        "part_index": item["part_index"],
-                        "start_sec": item["start_sec"],
-                        "end_sec": item["end_sec"],
-                        "recommended_fps": 2,
-                        "confidence": 0.95,
-                        "evidence": ["稳定画面"],
-                    }
-                    for item in plan
-                ],
-            },
-        }, ensure_ascii=False),
-        plan,
-    )
-
-    assert missing_fields["ok"] is True
-    assert analyzer._strategy_needs_json_repair(missing_fields) is True
-    assert all(item["recommended_fps"] == 5.0 for item in missing_fields["chunks"])
-    assert all("必填字段" in item["fallback_reason"] for item in missing_fields["chunks"])
-
-
-def test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp: Path) -> None:
-    import asyncio
-    import sys
-
-    os.environ["AGENT_WIKI_HOME"] = str(tmp / "strategy-repair-runtime")
-    sys.path.insert(0, str(SCRIPTS))
-    import analyzer
-
-    video = tmp / "long.mp4"
-    video.write_bytes(b"fake-video")
-    plan = analyzer._chunk_plan(601)
-    calls = []
-    progress = []
-
-    async def fake_upload(client, path, *, fps, model):
-        calls.append(("upload", fps, model))
-        return SimpleNamespace(id="file-overview")
-
-    async def fake_wait(*args, **kwargs):
-        calls.append(("wait", args[1] if len(args) > 1 else ""))
-        return SimpleNamespace(status="active")
-
-    async def fake_stream(client, *, model, file_id, prompt, on_progress, previous_response_id=None, timeout_sec=None):
-        calls.append(("stream", model, file_id, previous_response_id))
-        return analyzer.ResponseCallResult(
-            text="坏 JSON",
-            usage={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
-            response_id="resp-overview",
-        )
-
-    async def fake_text(client, *, model, prompt, on_progress, previous_response_id=None, timeout_sec=None):
-        calls.append(("repair", model, previous_response_id, "坏 JSON" in prompt))
-        repaired = {
-            "overview": {
-                "summary": "全片先讲背景，再演示流程。",
-                "timeline": [],
-                "important_points": ["流程"],
-                "uncertain_points": [],
-            },
-            "strategy": {
-                "global_notes": "修复后的策略。",
-                "segments": [
-                    {
-                        "part_index": item["part_index"],
-                        "start_sec": item["start_sec"],
-                        "end_sec": item["end_sec"],
-                        "rough_summary": "稳定讲解",
-                        "recommended_fps": 2,
-                        "confidence": 0.9,
-                        "scores": {
-                            "visual_change": 1,
-                            "ocr_subtitle_density": 1,
-                            "operation_density": 0,
-                            "motion_detail": 0,
-                            "concept_density": 2,
-                            "risk_if_low_fps": 1,
-                        },
-                        "evidence": ["画面稳定"],
-                        "focus": ["结论"],
-                        "lite_brief": "画面稳定，重点提取口播结论和关键事实。",
-                        "risk_flags": [],
-                        "why_not_lower_fps": "低风险",
-                    }
-                    for item in plan
-                ],
-            },
-        }
-        return analyzer.ResponseCallResult(
-            text=json.dumps(repaired, ensure_ascii=False),
-            usage={"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
-            response_id="resp-repair",
-        )
-
-    async def on_progress(stage, info):
-        progress.append((stage, info))
-
-    old_upload = analyzer._upload_with_preprocess
-    old_wait = analyzer._wait_for_active
-    old_stream = analyzer._stream_responses
-    old_text = analyzer._call_text_responses
-    try:
-        analyzer._upload_with_preprocess = fake_upload
-        analyzer._wait_for_active = fake_wait
-        analyzer._stream_responses = fake_stream
-        analyzer._call_text_responses = fake_text
-        strategy = asyncio.run(analyzer._prepare_long_video_strategy(
-            video,
-            plan,
-            ["knowledge_ingest"],
-            files_client=SimpleNamespace(),
-            responses_client=SimpleNamespace(),
-            model="doubao-seed-2-0-lite-260428",
-            strategy_model="doubao-seed-2-0-mini-260428",
-            source_id="aweme-repair",
-            file_active_timeout_sec=120,
-            response_timeout_sec=900,
-            on_progress=on_progress,
-        ))
-    finally:
-        analyzer._upload_with_preprocess = old_upload
-        analyzer._wait_for_active = old_wait
-        analyzer._stream_responses = old_stream
-        analyzer._call_text_responses = old_text
-
-    assert strategy["ok"] is True
-    assert all(item["recommended_fps"] == 2.0 for item in strategy["chunks"])
-    assert strategy["usage_by_model"]["doubao-seed-2-0-mini-260428"] == {
-        "input_tokens": 15,
-        "output_tokens": 5,
-        "total_tokens": 20,
-    }
-    assert ("upload", 2.0, "doubao-seed-2-0-mini-260428") in calls
-    assert ("stream", "doubao-seed-2-0-mini-260428", "file-overview", None) in calls
-    assert ("repair", "doubao-seed-2-0-mini-260428", "resp-overview", True) in calls
-    assert any(stage == "repairing_overview_strategy" for stage, _ in progress)
-    assert any(stage == "overview_strategy_repaired" for stage, _ in progress)
-    log_path = tmp / "strategy-repair-runtime" / "logs" / "video-strategy-events.jsonl"
-    assert log_path.exists()
-    log_text = log_path.read_text(encoding="utf-8")
-    assert "overview_strategy_repair_needed" in log_text
-    assert "overview_strategy_repaired" in log_text
-    assert "resp-overview" not in log_text
-
-
-def test_prepare_long_video_strategy_chunks_unsafe_full_overview(tmp: Path) -> None:
-    import asyncio
-    import sys
-
-    os.environ["AGENT_WIKI_HOME"] = str(tmp / "strategy-too-long-runtime")
-    sys.path.insert(0, str(SCRIPTS))
-    import analyzer
-
-    video = tmp / "thirty-minutes.mp4"
-    video.write_bytes(b"fake-video")
-    plan = analyzer._chunk_plan(1800)
-    chunk_paths = []
-    for item in plan:
-        path = tmp / f"part-{int(item['part_index']):03d}.mp4"
-        path.write_bytes(b"fake-chunk")
-        chunk_paths.append(path)
-    upload_calls = []
-    stream_calls = []
-    synth_calls = []
-    progress = []
-
-    async def fake_upload(client, path, *, fps, model):
-        assert path != video
-        upload_calls.append((Path(path).name, fps, model))
-        return SimpleNamespace(id=f"file-{Path(path).stem}")
-
-    async def fake_wait(*args, **kwargs):
-        return SimpleNamespace(status="active")
-
-    async def fake_stream(client, *, model, file_id, prompt, on_progress, previous_response_id=None, timeout_sec=None):
-        stream_calls.append((model, file_id, previous_response_id))
-        return analyzer.ResponseCallResult(
-            text=f"{file_id} 粗概览：画面稳定，主要是口播和字幕。",
-            usage={"total_tokens": 1},
-            response_id=f"resp-{file_id}",
-        )
-
-    async def fake_text(client, *, model, prompt, on_progress, previous_response_id=None, timeout_sec=None):
-        synth_calls.append((model, previous_response_id, "粗概览结果" in prompt))
-        strategy = {
-            "overview": {
-                "summary": "超长视频按切片粗概览后，整体以稳定口播和字幕讲解为主。",
-                "timeline": [],
-                "important_points": ["稳定口播"],
-                "uncertain_points": [],
-            },
-            "strategy": {
-                "global_notes": "画面稳定，低 fps 漏细节风险低。",
-                "segments": [
-                    {
-                        "part_index": item["part_index"],
-                        "start_sec": item["start_sec"],
-                        "end_sec": item["end_sec"],
-                        "rough_summary": "稳定讲解",
-                        "recommended_fps": 2,
-                        "confidence": 0.9,
-                        "scores": {
-                            "visual_change": 1,
-                            "ocr_subtitle_density": 1,
-                            "operation_density": 0,
-                            "motion_detail": 0,
-                            "concept_density": 2,
-                            "risk_if_low_fps": 1,
-                        },
-                        "evidence": ["粗概览显示画面稳定"],
-                        "focus": ["口播结论"],
-                        "lite_brief": "画面稳定，核心信息来自口播和字幕，重点提取观点链和关键事实。",
-                        "risk_flags": [],
-                        "why_not_lower_fps": "低风险",
-                    }
-                    for item in plan
-                ],
-            },
-        }
-        return analyzer.ResponseCallResult(
-            text=json.dumps(strategy, ensure_ascii=False),
-            usage={"total_tokens": 2},
-            response_id="resp-chunked-overview-strategy",
-        )
-
-    async def on_progress(stage, info):
-        progress.append((stage, info))
-
-    old_upload = analyzer._upload_with_preprocess
-    old_wait = analyzer._wait_for_active
-    old_stream = analyzer._stream_responses
-    old_text = analyzer._call_text_responses
-    try:
-        analyzer._upload_with_preprocess = fake_upload
-        analyzer._wait_for_active = fake_wait
-        analyzer._stream_responses = fake_stream
-        analyzer._call_text_responses = fake_text
-        strategy = asyncio.run(analyzer._prepare_long_video_strategy(
-            video,
-            plan,
-            ["knowledge_ingest"],
-            files_client=SimpleNamespace(),
-            responses_client=SimpleNamespace(),
-            model="doubao-seed-2-0-lite-260428",
-            strategy_model="doubao-seed-2-0-mini-260428",
-            source_id="aweme-too-long",
-            file_active_timeout_sec=120,
-            response_timeout_sec=900,
-            chunk_paths=chunk_paths,
-            chunk_concurrency=4,
-            on_progress=on_progress,
-        ))
-    finally:
-        analyzer._upload_with_preprocess = old_upload
-        analyzer._wait_for_active = old_wait
-        analyzer._stream_responses = old_stream
-        analyzer._call_text_responses = old_text
-
-    assert len(upload_calls) == len(plan)
-    assert all(call[1] == 2.0 for call in upload_calls)
-    assert len(stream_calls) == len(plan)
-    assert synth_calls == [("doubao-seed-2-0-mini-260428", None, True)]
-    assert strategy["ok"] is True
-    assert all(item["recommended_fps"] == 2.0 for item in strategy["chunks"])
-    assert any(stage == "overview_chunking" for stage, _ in progress)
-    assert any(stage == "synthesizing_overview_strategy" for stage, _ in progress)
-    assert any(stage == "overview_strategy_decided" for stage, _ in progress)
-    log_path = tmp / "strategy-too-long-runtime" / "logs" / "video-strategy-events.jsonl"
-    assert log_path.exists()
-    log_text = log_path.read_text(encoding="utf-8")
-    assert "overview_strategy_chunked_started" in log_text
-    assert "overview_strategy_chunked_synthesized" in log_text
-    assert "ultra_long_video" in log_text
-    assert "1800" in log_text
-    assert "response_id" not in log_text
-
 
 def test_strategy_log_redacts_sensitive_values(tmp: Path) -> None:
     import sys
@@ -3199,7 +2613,7 @@ def test_strategy_log_redacts_sensitive_values(tmp: Path) -> None:
     assert "response_id" not in text
 
 
-def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
+def test_chunk_analysis_uses_one_fps_without_semantic_context(tmp: Path) -> None:
     import asyncio
     import sys
 
@@ -3214,46 +2628,6 @@ def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
         {"part_index": 1, "start_sec": 0.0, "end_sec": 240.0, "overlap_sec": 0.0},
         {"part_index": 2, "start_sec": 230.0, "end_sec": 470.0, "overlap_sec": 10.0},
     ]
-    strategy = {
-        "ok": True,
-        "overview": {
-            "summary": "全片先讲背景，再演示操作。",
-            "timeline": [],
-            "important_points": ["操作步骤"],
-            "uncertain_points": [],
-        },
-        "global_notes": "第二段需要更高 fps。",
-        "chunks": [
-            {
-                **plan[0],
-                "recommended_fps": 2.0,
-                "confidence": 0.9,
-                "scores": {"risk_if_low_fps": 1},
-                "rough_summary": "背景说明",
-                "evidence": ["固定画面"],
-                "focus": ["结论"],
-                "lite_brief": "重点理解背景结论，画面稳定。",
-                "risk_flags": [],
-                "why_not_lower_fps": "2fps 足够",
-                "fallback_applied": False,
-                "fallback_reason": "",
-            },
-            {
-                **plan[1],
-                "recommended_fps": 5.0,
-                "confidence": 0.8,
-                "scores": {"risk_if_low_fps": 5},
-                "rough_summary": "密集操作",
-                "evidence": ["多处点击"],
-                "focus": ["按钮和菜单"],
-                "lite_brief": "重点捕捉界面菜单、按钮和操作顺序，避免漏掉短暂视觉步骤。",
-                "risk_flags": ["可能漏步骤"],
-                "why_not_lower_fps": "操作密集",
-                "fallback_applied": False,
-                "fallback_reason": "",
-            },
-        ],
-    }
     uploads = []
     prompts = []
     audit_dir = tmp / "audit"
@@ -3303,7 +2677,7 @@ def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
             quality="quality",
             full_duration=470.0,
             source_id="aweme-strategy",
-            strategy=strategy,
+            sampling_fps=5.0,
             audit_dir=audit_dir,
             audit_files=audit_files,
             file_active_timeout_sec=120,
@@ -3316,21 +2690,19 @@ def test_chunk_analysis_uses_strategy_fps_and_context(tmp: Path) -> None:
         analyzer._stream_responses = old_stream
         analyzer._call_text_responses = old_text
 
-    assert sorted(uploads) == [("part-001.mp4", 2.0), ("part-002.mp4", 5.0)]
-    assert "全片概览" in prompts[0]
-    assert "本段精拆策略" in prompts[0]
-    assert "第二段需要更高 fps" in prompts[-1]
+    assert sorted(uploads) == [("part-001.mp4", 5.0), ("part-002.mp4", 5.0)]
+    assert all("全片概览" not in prompt for prompt in prompts)
+    assert all("本段精拆策略" not in prompt for prompt in prompts)
     result = results["knowledge_ingest"]
     assert result.chunked is True
     assert result.file_id == "file-part-001.mp4"
     assert result.fps_used == 5.0
-    assert result.actual_frames_estimate == 1680
-    assert [item["fps"] for item in result.chunks] == [2.0, 5.0]
-    assert result.chunks[1]["strategy_focus"] == ["按钮和菜单"]
-    assert result.chunks[1]["strategy_lite_brief"] == "重点捕捉界面菜单、按钮和操作顺序，避免漏掉短暂视觉步骤。"
+    assert result.actual_frames_estimate == 2400
+    assert [item["fps"] for item in result.chunks] == [5.0, 5.0]
+    assert all(not any(key.startswith("strategy_") for key in item) for item in result.chunks)
     assert result.audit_artifacts["dir"].endswith("audit")
-    assert (audit_dir / "03-lite/knowledge_ingest/part-001-prompt.md").exists()
-    assert (audit_dir / "03-lite/knowledge_ingest/part-001-output.md").exists()
+    assert (audit_dir / "03-analysis/knowledge_ingest/part-001-prompt.md").exists()
+    assert (audit_dir / "03-analysis/knowledge_ingest/part-001-output.md").exists()
     assert (audit_dir / "04-synthesis/knowledge_ingest-synthesis-prompt.md").exists()
     assert (audit_dir / "04-synthesis/knowledge_ingest-synthesis-output.md").exists()
     assert all("response_id" not in item for item in result.chunks)
@@ -3406,7 +2778,7 @@ def test_chunk_analysis_retries_transient_stream_failure(tmp: Path) -> None:
             quality="quality",
             full_duration=470.0,
             source_id="aweme-retry",
-            strategy={"ok": True, "chunks": []},
+            sampling_fps=5.0,
             audit_dir=audit_dir,
             audit_files={},
             file_active_timeout_sec=120,
@@ -3423,8 +2795,8 @@ def test_chunk_analysis_retries_transient_stream_failure(tmp: Path) -> None:
 
     assert attempts == {1: 2, 2: 1}
     assert any(stage == "chunk_retrying" and info["part_index"] == 1 for stage, info in progress_events)
-    assert (audit_dir / "03-lite/knowledge_ingest/part-001-output.md").exists()
-    assert (audit_dir / "03-lite/knowledge_ingest/part-001-meta.json").exists()
+    assert (audit_dir / "03-analysis/knowledge_ingest/part-001-output.md").exists()
+    assert (audit_dir / "03-analysis/knowledge_ingest/part-001-meta.json").exists()
     result = results["knowledge_ingest"]
     assert result.text == "最终汇总"
     assert [item["reused_from_artifact"] for item in result.chunks] == [False, False]
@@ -3446,7 +2818,7 @@ def test_chunk_analysis_reuses_existing_chunk_artifact_on_rerun(tmp: Path) -> No
         {"part_index": 2, "start_sec": 230.0, "end_sec": 470.0, "overlap_sec": 10.0},
     ]
     audit_dir = tmp / "resume-audit"
-    cached_output = audit_dir / "03-lite" / "knowledge_ingest" / "part-001-output.md"
+    cached_output = audit_dir / "03-analysis" / "knowledge_ingest" / "part-001-output.md"
     cached_output.parent.mkdir(parents=True)
     cached_output.write_text(
         "## 分片 1/2 (0.0s - 240.0s)\n\n"
@@ -3507,7 +2879,7 @@ def test_chunk_analysis_reuses_existing_chunk_artifact_on_rerun(tmp: Path) -> No
             quality="quality",
             full_duration=470.0,
             source_id="aweme-resume",
-            strategy={"ok": True, "chunks": []},
+            sampling_fps=5.0,
             audit_dir=audit_dir,
             audit_files={},
             file_active_timeout_sec=120,
@@ -3597,7 +2969,7 @@ def test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp: Path) 
             quality="quality",
             full_duration=120.0,
             source_id="aweme-memory",
-            strategy={"ok": True, "chunks": []},
+            sampling_fps=5.0,
             file_active_timeout_sec=120,
             response_timeout_sec=900,
             on_progress=None,
@@ -4862,19 +4234,13 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
         "related: []\n"
         "---\n"
         "# 父视频：Agent Harness\n\n正文\n\n"
-        "## AI 分析\n\n> 以下内容由 AI 生成。\n\n"
-        "### 派生状态（系统）\n\n"
-        "| 决策 | 类型 | 名称 | 分数 | 状态 | 原因 |\n"
-        "|---|---|---|---:|---|---|\n"
-        "| candidate | github_project | LangGraph | 95 | auto_ready | 父视频主要介绍 LangGraph。 |\n",
+        "## AI 分析\n\n> 以下内容由 AI 生成。\n",
         encoding="utf-8",
     )
     cfg = Config(
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        analyzer_fallback="doubao-seed-2-0-mini-260428",
-        strategy_model="doubao-seed-2-0-mini-260428",
         default_quality="quality",
         balanced_target_frames=240,
         quality_target_frames=1250,
@@ -4973,7 +4339,7 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
         index_text = (vault_path / "index.md").read_text(encoding="utf-8")
         assert asset_path.exists()
         assert f"[[{asset_path.stem}|" in index_text
-        assert "| completed | github_project |" in parent_text
+        assert "## 相关资产" in parent_text
         assert not (vault_path / ".git").exists()
         register_calls.append(repository)
         return {"ok": True, "autoStar": {"attempted": False, "ok": True}}
@@ -5019,9 +4385,8 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
     assert "input_tokens:" not in child_text
     assert "total_tokens:" not in child_text
     assert "## 相关资产" in parent_text
-    assert "completed" in parent_text
-    table_child_link = child_link.replace("|", "\\|")
-    assert f"| completed | github_project | {table_child_link} | 95 | completed |" in parent_text
+    assert "派生状态" not in parent_text
+    assert "completed" not in parent_text
     assert not (vault / "系统记录").exists()
     assert (vault / "index.md").exists()
     assert summary["audit_artifacts"]["dir"] == "run-artifacts/child-task"
@@ -5057,61 +4422,6 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
     assert len(register_calls) == 1
     assert summary["github_integration"]["autoStar"]["attempted"] is False
     assert not (vault / ".git").exists()
-
-
-def test_derived_completion_matches_exact_candidate_identity(tmp: Path) -> None:
-    import sys
-
-    sys.path.insert(0, str(SCRIPTS))
-    from ingest import mark_derived_candidate_executed
-
-    parent = tmp / "candidate-identity-parent.md"
-    parent.write_text(
-        "# Parent\n\n## AI 分析\n\n### 派生状态（系统）\n\n"
-        "| 决策 | 类型 | 名称 | 分数 | 状态 | 原因 |\n"
-        "|---|---|---|---:|---|---|\n"
-        "| candidate | github_project | [Lang](https://github.com/example/lang) | 90 | auto_ready | A |\n"
-        "| candidate | github_project | [LangGraph](https://github.com/example/langgraph) | 95 | auto_ready | B |\n",
-        encoding="utf-8",
-    )
-
-    mark_derived_candidate_executed(
-        parent,
-        candidate_name="LangGraph",
-        candidate_type="github_project",
-        candidate_url="https://github.com/example/langgraph",
-        child_link="[[langgraph|LangGraph]]",
-    )
-
-    text = parent.read_text(encoding="utf-8")
-    assert "| candidate | github_project | [Lang](https://github.com/example/lang) | 90 | auto_ready |" in text
-    assert "| completed | github_project | [[langgraph\\|LangGraph]] | 95 | completed |" in text
-
-    mark_derived_candidate_executed(
-        parent,
-        candidate_name="LangGraph",
-        candidate_type="github_project",
-        candidate_url="https://github.com/example/langgraph",
-        child_link="[[langgraph|LangGraph]]",
-    )
-    rerun_text = parent.read_text(encoding="utf-8")
-    assert rerun_text == text
-    assert "- 已完成：" not in rerun_text
-
-    legacy = tmp / "candidate-identity-legacy-parent.md"
-    legacy.write_text(
-        "# Parent\n\n## AI 分析\n\n### 派生状态（系统）\n\n"
-        "- 已完成：[[legacy-child|Legacy Child]]\n",
-        encoding="utf-8",
-    )
-    mark_derived_candidate_executed(
-        legacy,
-        candidate_name="Legacy Child",
-        candidate_type="github_project",
-        child_link="[[legacy-child|Legacy Child]]",
-    )
-    legacy_text = legacy.read_text(encoding="utf-8")
-    assert legacy_text.count("- 已完成：[[legacy-child|Legacy Child]]") == 1
 
 
 def test_derive_executor_main_preserves_derived_ingest_status(tmp: Path) -> None:
@@ -5389,18 +4699,8 @@ def test_websocket_persists_derived_child_terminal_states(tmp: Path) -> None:
         ("dt-cancelled", "Cancelled Repo", "auto_ready"),
         ("dt-done", "Done Repo", "auto_ready"),
     ]
-    rows = "\n".join(
-        f"| candidate | github_project | {name} | 90 | {status} | 测试候选 |"
-        for _candidate_id, name, status in candidates
-    )
-    parent_path.write_text(
-        "# Parent\n\n## AI 分析\n\n正文\n\n### 派生状态（系统）\n\n"
-        "| 决策 | 类型 | 名称 | 分数 | 状态 | 原因 |\n"
-        "|---|---|---|---:|---|---|\n"
-        + rows
-        + "\n",
-        encoding="utf-8",
-    )
+    parent_path.write_text("# Parent\n\n## AI 分析\n\n正文\n", encoding="utf-8")
+    original_parent_text = parent_path.read_text(encoding="utf-8")
     public_candidates = [{
         "id": candidate_id,
         "name": name,
@@ -5454,9 +4754,8 @@ def test_websocket_persists_derived_child_terminal_states(tmp: Path) -> None:
     sidecar = json.loads((runtime / "derived-actions" / "parent-terminal.json").read_text(encoding="utf-8"))
     assert {key: value["status"] for key, value in sidecar["items"].items()} == saved_states
     parent_text = parent_path.read_text(encoding="utf-8")
-    assert "| needs_target | 测试候选 |" in parent_text
-    assert "| failed | 测试候选 |" in parent_text
-    assert "| cancelled | 测试候选 |" in parent_text
+    assert parent_text == original_parent_text
+    assert "派生状态" not in parent_text
 
     restarted = LibrarianServer(enable_task_runner=False)
     merged = restarted._merge_derived_actions("parent-terminal", public_candidates)
@@ -5474,9 +4773,9 @@ def main() -> int:
         test_ingest_url_preserves_share_text_argument()
         test_derive_strategy_keeps_all_primary_candidates_dedupes_and_redacts(tmp)
         test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp)
-        test_derive_strategy_auto_blocks_non_github_and_unsafe_urls(tmp)
+        test_derive_strategy_allows_safe_urls_and_blocks_unsafe_urls(tmp)
         test_knowledge_prompts_do_not_force_github_manual_confirmation()
-        test_derive_strategy_keeps_four_primary_projects_and_suppresses_incidental(tmp)
+        test_derive_strategy_keeps_all_valid_candidates_without_role_gate(tmp)
         test_derive_executor_github_search_failure_and_ambiguity_are_mocked(tmp)
         test_derive_executor_uses_context_to_disambiguate_same_name_repository()
         test_derive_strategy_ignores_candidates_json_outside_derived_section(tmp)
@@ -5494,7 +4793,6 @@ def main() -> int:
         test_vault_write_uses_knowledge_root_and_rejects_removed_intent(tmp)
         test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp)
         test_analyzer_single_wrappers_preserve_analysis_key()
-        test_long_overview_prompt_uses_single_ingest_placeholder()
         test_analyzer_rejects_empty_response_text(tmp)
         test_websocket_config_writer(tmp)
         test_quality_fps_stays_5_until_safe_frame_target()
@@ -5505,15 +4803,9 @@ def main() -> int:
         test_official_tiered_cost_and_display_rules()
         test_video_chunk_threshold_and_memory_store(tmp)
         test_status_writer_redacts_sensitive_fields(tmp)
-        test_long_video_strategy_accepts_top_level_segments_and_partial_fallback()
-        test_long_video_strategy_validation_falls_back_to_5fps()
-        test_long_video_strategy_does_not_raise_fps_for_concepts_only()
-        test_long_video_strategy_missing_required_fields_requests_repair()
-        test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp)
-        test_prepare_long_video_strategy_chunks_unsafe_full_overview(tmp)
         test_strategy_log_redacts_sensitive_values(tmp)
-        test_repack_analysis_plan_merges_same_fps_segments()
-        test_chunk_analysis_uses_strategy_fps_and_context(tmp)
+        test_mechanical_chunk_plan_uses_one_fps_without_semantic_strategy()
+        test_chunk_analysis_uses_one_fps_without_semantic_context(tmp)
         test_chunk_analysis_retries_transient_stream_failure(tmp)
         test_chunk_analysis_reuses_existing_chunk_artifact_on_rerun(tmp)
         test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp)
@@ -5540,7 +4832,6 @@ def main() -> int:
         test_derive_executor_existing_child_backlink_is_cleaned(tmp)
         test_derive_executor_sanitizes_leading_h1()
         test_derive_executor_execute_task_writes_child_and_backlinks(tmp)
-        test_derived_completion_matches_exact_candidate_identity(tmp)
         test_derive_executor_main_preserves_derived_ingest_status(tmp)
         test_websocket_auto_enqueue_respects_ignored_candidate(tmp)
         test_ai_semantic_title_and_headingless_derived_json_are_preserved_correctly(tmp)

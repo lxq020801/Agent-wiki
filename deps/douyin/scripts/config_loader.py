@@ -10,7 +10,7 @@ config_loader.py — 读取并校验 ~/.agent-wiki/config.toml
     load_config(path=None) -> Config
     Config.provider
     Config.ark_api_key / .ark_endpoint  # 字节跳动火山方舟 Ark 凭据/端点
-    Config.analyzer_model / .analyzer_fallback / .strategy_model
+    Config.analyzer_model
     Config.quality_params(quality) -> dict
     Config.vault_path / .vault_relative_root
     Config.cookie_path
@@ -97,8 +97,6 @@ class Config:
     ark_endpoint: str
     # models
     analyzer_model: str
-    analyzer_fallback: str
-    strategy_model: str
     # analysis
     default_quality: str
     balanced_target_frames: int
@@ -230,19 +228,6 @@ def load_config(path: Optional[Path] = None) -> Config:
         "analyzer",
         default="doubao-seed-2-0-lite-260428",
     )
-    analyzer_fallback = _get(
-        data,
-        "models",
-        "analyzer_fallback",
-        default="doubao-seed-2-0-mini-260428",
-    )
-    strategy_model = _get(
-        data,
-        "models",
-        "strategy",
-        default=analyzer_fallback or "doubao-seed-2-0-mini-260428",
-    )
-
     # analysis
     configured_quality = _get(data, "analysis", "default_quality", default="quality")
     if configured_quality not in ("balanced", "quality"):
@@ -330,8 +315,6 @@ def load_config(path: Optional[Path] = None) -> Config:
         ark_api_key=ark_api_key,
         ark_endpoint=ark_endpoint,
         analyzer_model=analyzer_model,
-        analyzer_fallback=analyzer_fallback,
-        strategy_model=strategy_model,
         default_quality=default_quality,
         balanced_target_frames=balanced_target_frames,
         quality_target_frames=quality_target_frames,
@@ -377,15 +360,11 @@ endpoint = "https://ark.cn-beijing.volces.com/api/v3"
 client_id = ""
 
 [models]
-# 拆解模型（Seed 2.0 Lite，信息提取能力更强）
+# 视频理解与最终资产生成统一使用这一模型。
 analyzer = "doubao-seed-2-0-lite-260428"
-# 长视频概览与分段策略模型（Mini，成本低；只做粗看、决策和 JSON 修复）
-strategy = "doubao-seed-2-0-mini-260428"
-# 备用模型（Mini，保留兼容字段）
-analyzer_fallback = "doubao-seed-2-0-mini-260428"
 
 [analysis]
-# 视频模型默认按本地画面变化和长视频语义风险在 2-5fps 自动选择。
+# 视频模型默认按本地画面变化在 2-5fps 自动选择。
 # 可选：auto、fixed_2、fixed_3、fixed_5。本地变化预扫描固定 1fps，
 # 但它不调用模型，也不生成知识。
 video_fps_mode = "auto"

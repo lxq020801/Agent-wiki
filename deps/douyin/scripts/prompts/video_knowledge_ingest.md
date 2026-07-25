@@ -20,32 +20,29 @@
 
 ## 派生决策 JSON
 
-派生判断只看对象在来源中的地位、证据和用途：对象是不是这条视频的主要介绍对象。主要介绍对象可以有多个；如果视频并列、逐一重点讲解多个 GitHub 项目，就为每个主要项目输出候选。顺带提及、背景引用、对比时一笔带过或只作为依赖出现的对象不派生。
+这段 JSON 只供任务系统读取，会在写入知识资产前从 Markdown 中移除。请列出视频中值得形成独立知识资产、并且有清楚来源证据的对象。一个视频可以有任意多个候选；不要因为篇幅、排序或固定数量截断。仅仅一闪而过、没有足够信息形成独立资产的名称不输出。
 
 - 不设候选数量上限，不得固定截取 3 个或任何其他数量。
-- 不要因为对象被称为“案例”、出现在案例段落或命中某个单一关键词就否决；结合它是否是主要介绍对象、证据是否清楚、后续资产用途是否成立来判断。
-- `github_project`：主要介绍的明确开源项目或仓库。项目名清楚但 URL 缺失时仍输出；执行层会搜索 GitHub 官方仓库。唯一可信匹配可继续，不唯一会进入待确认。
-- `official_doc`：视频主要介绍或核心依赖的官方文档/API 文档；没有明确 URL 时通常需要确认。
-- `web_research`：视频主要围绕、且确实需要多源核验的具体事实对象；泛趋势、公司背景和普通补充研究不输出。
+- 不使用分数、置信度或“主要/顺带”硬门槛。直接判断它能否形成有独立价值、可追溯的知识资产。
+- `github_project`：视频明确介绍、演示或说明用途，信息足以独立整理的开源项目或仓库。项目名清楚但 URL 缺失时仍输出；执行层会搜索 GitHub 官方仓库。唯一可信匹配可继续，不唯一会进入待确认。
+- `official_doc`：视频明确介绍、引用或将结论建立在其上的官方文档/API 文档；没有明确 URL 时通常需要确认。
+- `web_research`：视频明确讲解、展示证据或结论确实依赖、且值得多源核验的具体事实对象；泛趋势、公司背景和普通补充研究不输出。
 - 不要编造 URL。只有画面、字幕或口播明确给出时才填写 `target_url`。
 - GitHub 项目没有明确 URL 时，`search_query` 使用准确英文项目名，并追加 2-4 个能区分同名仓库的英文功能词；不要只重复 `GitHub repository`，也不要把整句中文描述塞进查询。例如：`Openship self-hosted deployment platform`。
 
-`subject_role` 只允许 `primary` 或 `mentioned`。JSON 中只输出 `primary` 候选；`mentioned` 对象留在完整内容整理中。评分维度均为 `0-5` 整数：`knowledge_value`、`parent_dependency`、`evidence_strength`、`actionability`、`freshness_risk`、`novelty`、`asset_fit`、`cost_risk_inverse`、`ambiguity_inverse`。候选应有清晰证据，且通常满足 `evidence_strength >= 4`、`actionability >= 4`、`asset_fit >= 4`、`ambiguity_inverse >= 3`、`confidence >= 0.8`。
-
-`requires_confirmation` 只在目标不唯一、证据不确定、需要登录/付费、或需要人工判断官方性时设为 `true`。名称清晰且属于主要介绍对象的 GitHub 项目即使缺 URL，也可以设为 `false`，由执行层通过可审计的 GitHub API 搜索解析。
+`requires_confirmation` 只在目标不唯一、证据不确定、需要登录/付费、或需要人工判断官方性时设为 `true`。名称和用途清晰的 GitHub 项目即使缺 URL，也可以设为 `false`，由执行层通过可审计的 GitHub API 搜索解析。
 
 ```json
 {
   "candidates": [
     {
       "name": "项目名称",
-      "subject_role": "primary",
       "target_type": "github_project",
       "target_url": "",
       "subtype": "",
       "search_query": "ProjectName core feature terms",
       "mentioned_context": "视频如何重点介绍或演示这个项目",
-      "parent_context": "它为什么属于视频主要介绍对象",
+      "parent_context": "它为什么能从当前视频独立整理为资产",
       "reason": "派生后能独立维护和复用的具体价值",
       "evidence": ["时间码[估算]：口播、字幕或画面证据"],
       "acceptance_criteria": [
@@ -53,22 +50,10 @@
         "整理核心能力、用法、限制和风险",
         "成功生成子资产后再建立父子链接"
       ],
-      "confidence": 0.9,
-      "requires_confirmation": false,
-      "scores": {
-        "knowledge_value": 5,
-        "parent_dependency": 5,
-        "evidence_strength": 5,
-        "actionability": 5,
-        "freshness_risk": 4,
-        "novelty": 4,
-        "asset_fit": 5,
-        "cost_risk_inverse": 4,
-        "ambiguity_inverse": 4
-      }
+      "requires_confirmation": false
     }
   ]
 }
 ```
 
-没有主要对象时输出 `{"candidates": []}`。只输出 Markdown 正文，不写客套话，不写 Cookie、API Key、个人账号信息、模型名称、Token 或成本。
+没有合适对象时输出 `{"candidates": []}`。除上面的三段 Markdown 正文和供程序读取的派生 JSON 外，不输出客套话，不写 Cookie、API Key、个人账号信息、模型名称、Token 或成本。

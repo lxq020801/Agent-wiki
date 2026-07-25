@@ -141,59 +141,6 @@ def _format_tags(tags: tuple[str, ...]) -> str:
     return "[" + ", ".join(tags) + "]"
 
 
-def _visible_derived_items(decision: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if not decision or not isinstance(decision.get("items"), list):
-        return []
-    return [
-        item for item in decision["items"]
-        if isinstance(item, dict) and item.get("decision") != "reject"
-    ]
-
-
-def _format_derived_tasks_section(
-    decision: dict[str, Any] | None,
-) -> str:
-    if not decision or not decision.get("items"):
-        return "- 当前没有待执行或已完成的派生。"
-    items = _visible_derived_items(decision)
-    if not items:
-        return "- 暂无达到候选阈值的派生任务。"
-    lines = [
-        "> 这里只展示结构化策略的真实状态；正式父子关系只在子资产成功生成后建立。",
-        "",
-        "| 决策 | 类型 | 名称 | 分数 | 状态 | 原因 |",
-        "|---|---|---|---:|---|---|",
-    ]
-    for item in items:
-        target = item.get("target_url") or item.get("canonical_target") or ""
-        name = str(item.get("name") or "未命名派生线索")
-        if target and str(target).startswith("http"):
-            display_name = f"[{name}]({target})"
-        else:
-            display_name = name
-        reason = re.sub(r"\s+", " ", str(item.get("reason") or "")).strip()
-        if len(reason) > 90:
-            reason = reason[:87] + "..."
-        lines.append(
-            "| {decision} | {target_type} | {name} | {score} | {status} | {reason} |".format(
-                decision=item.get("decision", "candidate"),
-                target_type=item.get("target_type", ""),
-                name=display_name.replace("|", "\\|"),
-                score=int(item.get("score", 0) or 0),
-                status=item.get("execution_status", "candidate"),
-                reason=reason.replace("|", "\\|"),
-            )
-        )
-    rejected = sum(1 for item in decision.get("items", []) if item.get("decision") == "reject")
-    suppressed = int((decision.get("counts") or {}).get("suppressed", 0) or 0)
-    if rejected or suppressed:
-        lines.extend([
-            "",
-            f"- 已过滤低分、重复或非主要对象线索：{rejected + suppressed} 个。完整记录见运行审计。",
-        ])
-    return "\n".join(lines)
-
-
 def _markdown_h2_sections(text: str) -> tuple[str, list[tuple[str, str]]]:
     """Parse level-two Markdown sections without rewriting arbitrary text."""
     preamble: list[str] = []
@@ -269,221 +216,6 @@ def _source_sections_from_analysis(text: str, fallback_title: str = "") -> dict[
         "complete": complete_text,
         "ai_analysis": ai_text,
     }
-
-
-def _replace_h2_section(text: str, headings: set[str], new_heading: str, body: str) -> str:
-    lines = str(text or "").splitlines()
-    start: int | None = None
-    end = len(lines)
-    for index, line in enumerate(lines):
-        match = re.match(r"^##\s+(.+?)\s*$", line)
-        if not match:
-            continue
-        plain = _plain_heading(match.group(1))
-        if start is None and plain in headings:
-            start = index
-        elif start is not None:
-            end = index
-            break
-    replacement = [f"## {new_heading}", "", body.strip()]
-    if start is None:
-        return str(text or "").rstrip() + "\n\n" + "\n".join(replacement) + "\n"
-    return "\n".join(lines[:start] + replacement + lines[end:]).rstrip() + "\n"
-
-
-def mark_derived_candidate_executed(
-    parent_path: Path | None,
-    *,
-    candidate_name: str,
-    child_link: str,
-    candidate_type: str = "",
-    candidate_url: str = "",
-) -> list[Path]:
-    """Update the parent status only after the child and both links exist."""
-    if parent_path is None or not parent_path.exists() or not child_link:
-        return []
-    parent_text = parent_path.read_text(encoding="utf-8")
-    _preamble, sections = _markdown_h2_sections(parent_text)
-    status_body = ""
-    ai_body = ""
-    status_span: tuple[int, int] | None = None
-    for heading, body in sections:
-        plain = _plain_heading(heading)
-        if plain in {"派生状态", "派生任务候选", "派生候选"}:
-            status_body = body
-            break
-        if plain == "ai分析":
-            ai_body = body
-            match = re.search(r"(?m)^###\s+派生状态(?:（系统）)?\s*$", body)
-            if match:
-                next_h3 = re.search(r"(?m)^###\s+", body[match.end():])
-                end = match.end() + next_h3.start() if next_h3 else len(body)
-                status_span = (match.start(), end)
-                status_body = body[match.end():end].strip()
-    lines = [
-        line for line in status_body.splitlines()
-        if "当前没有待执行或已完成的派生" not in line
-    ]
-    matched = False
-    for index, line in enumerate(lines):
-        if not line.strip().startswith("|"):
-            continue
-        columns = [
-            column.strip()
-            for column in re.split(r"(?<!\\)\|", line.strip().strip("|"))
-        ]
-        if len(columns) < 6:
-            continue
-        display_name = columns[2].replace("\\|", "|")
-        if columns[0] == "completed" and display_name == child_link:
-            matched = True
-            break
-        row_url = ""
-        link_match = re.fullmatch(r"\[([^]]+)]\((https?://.+)\)", display_name)
-        if link_match:
-            display_name, row_url = link_match.groups()
-        if display_name != candidate_name:
-            continue
-        if candidate_type and columns[1] != candidate_type:
-            continue
-        if candidate_url and row_url and row_url.rstrip("/") != candidate_url.rstrip("/"):
-            continue
-        columns[0] = "completed"
-        columns[2] = child_link.replace("|", "\\|")
-        columns[4] = "completed"
-        lines[index] = "| " + " | ".join(columns) + " |"
-        matched = True
-        break
-    if not matched and any(line.strip() == f"- 已完成：{child_link}" for line in lines):
-        matched = True
-    if not matched:
-        if lines and lines[-1].strip():
-            lines.append("")
-        lines.append(f"- 已完成：{child_link}")
-    status_body = "\n".join(lines).strip()
-    if status_span is not None:
-        start, end = status_span
-        new_ai_body = (
-            ai_body[:start].rstrip()
-            + "\n\n### 派生状态（系统）\n\n"
-            + status_body
-            + ("\n\n" + ai_body[end:].lstrip() if ai_body[end:].strip() else "")
-        )
-        updated_parent = _replace_h2_section(
-            parent_text,
-            {"ai分析"},
-            "AI 分析",
-            new_ai_body,
-        )
-    elif ai_body:
-        updated_parent = _replace_h2_section(
-            parent_text,
-            {"ai分析"},
-            "AI 分析",
-            ai_body.rstrip() + "\n\n### 派生状态（系统）\n\n" + status_body,
-        )
-    else:
-        updated_parent = _replace_h2_section(
-            parent_text,
-            {"派生状态", "派生任务候选", "派生候选"},
-            "派生状态",
-            status_body,
-        )
-    if updated_parent != parent_text:
-        parent_path.write_text(updated_parent, encoding="utf-8")
-        return [parent_path]
-    return []
-
-
-def mark_derived_candidate_status(
-    parent_path: Path | None,
-    *,
-    candidate_name: str,
-    execution_status: str,
-    candidate_type: str = "",
-    candidate_url: str = "",
-) -> list[Path]:
-    """Persist a non-success child state in the parent's system status table."""
-    if (
-        parent_path is None
-        or not parent_path.exists()
-        or execution_status not in {"queued", "running", "needs_target", "failed", "cancelled"}
-    ):
-        return []
-    parent_text = parent_path.read_text(encoding="utf-8")
-    _preamble, sections = _markdown_h2_sections(parent_text)
-    status_body = ""
-    ai_body = ""
-    status_span: tuple[int, int] | None = None
-    for heading, body in sections:
-        plain = _plain_heading(heading)
-        if plain in {"派生状态", "派生任务候选", "派生候选"}:
-            status_body = body
-            break
-        if plain == "ai分析":
-            ai_body = body
-            match = re.search(r"(?m)^###\s+派生状态(?:（系统）)?\s*$", body)
-            if match:
-                next_h3 = re.search(r"(?m)^###\s+", body[match.end():])
-                end = match.end() + next_h3.start() if next_h3 else len(body)
-                status_span = (match.start(), end)
-                status_body = body[match.end():end].strip()
-    lines = status_body.splitlines()
-    matched = False
-    for index, line in enumerate(lines):
-        if not line.strip().startswith("|"):
-            continue
-        columns = [
-            column.strip()
-            for column in re.split(r"(?<!\\)\|", line.strip().strip("|"))
-        ]
-        if len(columns) < 6:
-            continue
-        display_name = columns[2].replace("\\|", "|")
-        row_url = ""
-        link_match = re.fullmatch(r"\[([^]]+)]\((https?://.+)\)", display_name)
-        if link_match:
-            display_name, row_url = link_match.groups()
-        if display_name != candidate_name:
-            continue
-        if candidate_type and columns[1] != candidate_type:
-            continue
-        if candidate_url and row_url and row_url.rstrip("/") != candidate_url.rstrip("/"):
-            continue
-        columns[4] = execution_status
-        lines[index] = "| " + " | ".join(columns) + " |"
-        matched = True
-        break
-    if not matched:
-        return []
-    status_body = "\n".join(lines).strip()
-    if status_span is not None:
-        start, end = status_span
-        new_ai_body = (
-            ai_body[:start].rstrip()
-            + "\n\n### 派生状态（系统）\n\n"
-            + status_body
-            + ("\n\n" + ai_body[end:].lstrip() if ai_body[end:].strip() else "")
-        )
-        updated_parent = _replace_h2_section(parent_text, {"ai分析"}, "AI 分析", new_ai_body)
-    elif ai_body:
-        updated_parent = _replace_h2_section(
-            parent_text,
-            {"ai分析"},
-            "AI 分析",
-            ai_body.rstrip() + "\n\n### 派生状态（系统）\n\n" + status_body,
-        )
-    else:
-        updated_parent = _replace_h2_section(
-            parent_text,
-            {"派生状态", "派生任务候选", "派生候选"},
-            "派生状态",
-            status_body,
-        )
-    if updated_parent != parent_text:
-        parent_path.write_text(updated_parent, encoding="utf-8")
-        return [parent_path]
-    return []
 
 
 def _derived_audit_artifacts(decision: dict[str, Any] | None) -> dict[str, Any]:
@@ -721,10 +453,6 @@ aweme_id: "{aweme_id}"
 > 以下内容由 AI 仅依据当前来源生成，不代表外部事实核验。
 
 {ai_analysis}
-
-### 派生状态（系统）
-
-{derived_tasks_section}
 """
 
 
@@ -774,10 +502,6 @@ aweme_id: "{aweme_id}"
 > 以下内容由 AI 仅依据当前来源生成，不代表外部事实核验。
 
 {ai_analysis}
-
-### 派生状态（系统）
-
-{derived_tasks_section}
 """
 
 
@@ -1106,7 +830,6 @@ def _write_to_vault_locked(
         concise=sections["concise"],
         complete=sections["complete"],
         ai_analysis=sections["ai_analysis"],
-        derived_tasks_section=_format_derived_tasks_section(derived_decision),
     )
 
     md_path.write_text(content, encoding="utf-8")
@@ -1221,7 +944,6 @@ def _write_image_post_to_vault_locked(
         concise=sections["concise"],
         complete=sections["complete"],
         ai_analysis=sections["ai_analysis"],
-        derived_tasks_section=_format_derived_tasks_section(derived_decision),
     )
 
     md_path.write_text(content, encoding="utf-8")
@@ -1462,7 +1184,6 @@ async def run_task(
             api_key=config.ark_api_key,
             endpoint=config.ark_endpoint,
             model=config.analyzer_model,
-            strategy_model=config.strategy_model,
             file_api_key=config.files_api_key,
             file_endpoint=config.files_endpoint,
             quality=quality,

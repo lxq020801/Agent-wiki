@@ -48,7 +48,7 @@ async function main() {
     },
     notifications: { create() {} },
     runtime: {
-      getManifest: () => ({ version: '0.4.5' }),
+      getManifest: () => ({ version: '0.4.6' }),
       lastError: null,
       onInstalled: extensionEvent(),
       onMessage: extensionEvent(),
@@ -91,7 +91,9 @@ async function main() {
     setTimeout
   });
   context.self = context;
-  vm.runInContext(fs.readFileSync(backgroundPath, 'utf8'), context, { filename: backgroundPath });
+  const backgroundSource = fs.readFileSync(backgroundPath, 'utf8');
+  assert.doesNotMatch(backgroundSource, /strategyModel|videoStrategyModel|arkStrategyModel/);
+  vm.runInContext(backgroundSource, context, { filename: backgroundPath });
 
   vm.runInContext('connectWebSocket()', context);
   assert.equal(FakeWebSocket.instances.length, 1);
@@ -108,7 +110,7 @@ async function main() {
     type: 'handshake',
     client: 'agent-wiki-background',
     product: 'agent-wiki',
-    version: '0.4.5',
+    version: '0.4.6',
     protocolVersion: 1
   });
   assert.match(socket.sent[0].operationId, /^handshake-/);
@@ -125,7 +127,7 @@ async function main() {
 
   const compatibleRuntime = {
     product: 'agent-wiki',
-    productVersion: '0.4.5',
+    productVersion: '0.4.6',
     protocolVersion: 1,
     sourceRevision: 'abcdef123456',
     buildId: 'src-1234567890abcdef',
@@ -137,12 +139,12 @@ async function main() {
     compatibility: {
       state: 'compatible',
       canOperate: true,
-      clientVersion: '0.4.5',
+      clientVersion: '0.4.6',
       clientProtocolVersion: 1
     }
   })})`, context);
   assert.equal(stored.runtimeCompatibility.canOperate, true);
-  assert.equal(stored.agentRuntime.productVersion, '0.4.5');
+  assert.equal(stored.agentRuntime.productVersion, '0.4.6');
   const automaticVaultScan = socket.sent.find(message => message.type === 'vault_scan');
   assert.ok(automaticVaultScan, 'compatible handshake must trigger one automatic vault scan');
   assert.equal(automaticVaultScan.data.source, 'extension_handshake');

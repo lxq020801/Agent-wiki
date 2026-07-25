@@ -411,18 +411,6 @@ TASK_STAGES = {
     "probed_duration": "读取视频信息",
     "fps_decided": "计算抽帧",
     "chunking_plan": "规划切片",
-    "overview_uploading": "上传全片概览",
-    "overview_uploaded": "全片概览上传完成",
-    "overview_chunking": "规划分片概览",
-    "overview_chunk_uploading": "上传概览切片",
-    "overview_chunk_uploaded": "概览切片上传完成",
-    "analyzing_overview": "分析全片概览",
-    "analyzing_overview_chunk": "分析概览切片",
-    "overview_chunk_done": "概览切片完成",
-    "synthesizing_overview_strategy": "合成精拆策略",
-    "repairing_overview_strategy": "修复精拆策略",
-    "overview_strategy_repaired": "精拆策略已修复",
-    "overview_strategy_decided": "决定精拆策略",
     "chunk_uploading": "上传切片",
     "chunk_uploaded": "切片上传完成",
     "uploading": "上传中",
@@ -465,10 +453,6 @@ TASK_STAGES = {
 }
 RESPONSE_PHASE_STAGES = {
     "analyzing",
-    "analyzing_overview",
-    "analyzing_overview_chunk",
-    "synthesizing_overview_strategy",
-    "repairing_overview_strategy",
     "analyzing_chunk",
     "synthesizing_chunks",
     "analyzing_derived_target",
@@ -2023,33 +2007,6 @@ class LibrarianServer:
         parent_status['updated_at'] = time.time()
         self._write_task_status(parent_task_id, parent_status)
 
-        if outcome != 'done':
-            parent_asset = str(
-                task.get('parent_asset_path')
-                or self._parent_asset_path(parent_status, candidate_id)
-                or ''
-            ).strip()
-            if parent_asset:
-                try:
-                    from ingest import mark_derived_candidate_status
-                    from server.vault_writer import vault_write_transaction
-
-                    parent_path = Path(parent_asset).expanduser()
-                    vault_root = next(
-                        (ancestor.parent for ancestor in parent_path.parents if ancestor.name == '知识资产'),
-                        parent_path.parent,
-                    )
-                    with vault_write_transaction(vault_root):
-                        mark_derived_candidate_status(
-                            parent_path,
-                            candidate_name=str(candidate.get('name') or ''),
-                            execution_status=outcome,
-                            candidate_type=str(candidate.get('targetType') or candidate.get('target_type') or ''),
-                            candidate_url=str(candidate.get('targetUrl') or candidate.get('target_url') or ''),
-                        )
-                except Exception as exc:
-                    log(f"[Server] 父资产派生状态写入失败: {type(exc).__name__}")
-
         parent_operation_id = str(task.get('parent_id') or task.get('parentId') or '')
         if parent_operation_id:
             try:
@@ -2390,8 +2347,6 @@ class LibrarianServer:
             if not isinstance(candidate, dict) or candidate.get('autoEligible') is not True:
                 continue
             candidate = dict(candidate)
-            if str(candidate.get('targetType') or candidate.get('target_type') or '') != 'github_project':
-                continue
             if candidate.get('status') not in {'auto_ready', 'candidate'}:
                 continue
             raw_target_url = candidate.get('targetUrl') or candidate.get('target_url') or ''
@@ -3046,12 +3001,6 @@ class LibrarianServer:
             'probed_duration': 42,
             'fps_decided': 45,
             'chunking_plan': 47,
-            'overview_uploading': 49,
-            'overview_uploaded': 55,
-            'analyzing_overview': 72,
-            'repairing_overview_strategy': 73,
-            'overview_strategy_repaired': 74,
-            'overview_strategy_decided': 74,
             'resolving_target': 20,
             'target_resolved': 35,
             'analyzing_derived_target': 72,
@@ -3240,18 +3189,6 @@ class LibrarianServer:
             'analyzer',
             _provider_default(provider, 'model'),
         )
-        existing_fallback = _simple_config_value(
-            config_path,
-            'models',
-            'analyzer_fallback',
-            _provider_default(provider, 'fallback'),
-        )
-        existing_strategy = _simple_config_value(
-            config_path,
-            'models',
-            'strategy',
-            _provider_default(provider, 'fallback'),
-        )
         existing_vault_path = _simple_config_value(config_path, 'vault', 'path')
         existing_github_client_id = _simple_config_value(config_path, 'github', 'client_id')
         existing_task_concurrency = _simple_config_value(
@@ -3286,15 +3223,6 @@ class LibrarianServer:
         )
         if not model:
             model = existing_model if provider == previous_provider else _provider_default(provider, 'model')
-        fallback_model = None if legacy_agent_plan_payload else config_data.get('fallbackModel')
-        if not fallback_model:
-            fallback_model = existing_fallback if provider == previous_provider else _provider_default(provider, 'fallback')
-        strategy_model = None if legacy_agent_plan_payload else (
-            video_config.get('strategyModel')
-            or config_data.get('strategyModel')
-        )
-        if not strategy_model:
-            strategy_model = existing_strategy if provider == previous_provider else _provider_default(provider, 'fallback')
         incoming_task_concurrency = (
             _first_config_value(server_config, ('taskConcurrency', 'task_concurrency', 'concurrency'))
             or _first_config_value(config_data, ('serverTaskConcurrency', 'taskConcurrency', 'task_concurrency', 'concurrency'))
@@ -3357,8 +3285,6 @@ client_id = "{_toml_escape(existing_github_client_id)}"
 
 [models]
 analyzer = "{_toml_escape(model)}"
-strategy = "{_toml_escape(strategy_model)}"
-analyzer_fallback = "{_toml_escape(fallback_model)}"
 
 [analysis]
 default_quality = "{_toml_escape(quality)}"
@@ -3449,7 +3375,6 @@ task_concurrency = {int(task_concurrency)}
         provider = _normalize_provider(_simple_config_value(config_path, 'provider', 'active', DEFAULT_PROVIDER))
         api_key = _provider_api_key(config_path, provider)
         model = _simple_config_value(config_path, 'models', 'analyzer', _provider_default(provider, 'model'))
-        strategy_model = _simple_config_value(config_path, 'models', 'strategy', _provider_default(provider, 'fallback'))
         endpoint = _provider_endpoint(config_path, provider)
         chunk_concurrency = _normalize_chunk_concurrency(
             _simple_config_value(config_path, 'analysis', 'chunk_concurrency', '2')
@@ -3462,7 +3387,6 @@ task_concurrency = {int(task_concurrency)}
                 'provider': provider,
                 'providerLabel': _provider_default(provider, 'label'),
                 'model': model,
-                'strategyModel': strategy_model,
                 'endpoint': endpoint,
                 'taskConcurrency': self.task_concurrency,
                 'chunkConcurrency': chunk_concurrency,
@@ -3482,7 +3406,6 @@ task_concurrency = {int(task_concurrency)}
                 'provider': provider,
                 'providerLabel': _provider_default(provider, 'label'),
                 'model': model,
-                'strategyModel': strategy_model,
                 'endpoint': endpoint,
                 'taskConcurrency': self.task_concurrency,
                 'chunkConcurrency': chunk_concurrency,
@@ -3495,7 +3418,6 @@ task_concurrency = {int(task_concurrency)}
             'provider': last.get('provider', provider),
             'providerLabel': _provider_default(last.get('provider', provider), 'label'),
             'model': last.get('model', model),
-            'strategyModel': strategy_model,
             'endpoint': endpoint,
             'taskConcurrency': self.task_concurrency,
             'chunkConcurrency': chunk_concurrency,
@@ -3506,7 +3428,6 @@ task_concurrency = {int(task_concurrency)}
     def video_analysis_status(self):
         config_path = self.config_path()
         model = _simple_config_value(config_path, 'models', 'analyzer', _provider_default(DEFAULT_PROVIDER, 'model'))
-        strategy_model = _simple_config_value(config_path, 'models', 'strategy', _provider_default(DEFAULT_PROVIDER, 'fallback'))
         chunk_concurrency = _normalize_chunk_concurrency(
             _simple_config_value(config_path, 'analysis', 'chunk_concurrency', '2')
         )
@@ -3516,7 +3437,6 @@ task_concurrency = {int(task_concurrency)}
             'state': 'ready',
             'modelPreset': preset,
             'analyzerModel': model,
-            'strategyModel': strategy_model,
             'chunkConcurrency': chunk_concurrency,
             'taskConcurrency': self.task_concurrency,
         }
@@ -3704,11 +3624,6 @@ end try
             or config_data.get('modelId')
             or _simple_config_value(config_path, 'models', 'analyzer', _provider_default(provider, 'model'))
         )
-        strategy_model = (
-            video_config.get('strategyModel')
-            or config_data.get('strategyModel')
-            or _simple_config_value(config_path, 'models', 'strategy', _provider_default(provider, 'fallback'))
-        )
         chunk_concurrency = _normalize_chunk_concurrency(
             video_config.get('chunkConcurrency')
             or config_data.get('videoChunkConcurrency')
@@ -3724,7 +3639,6 @@ end try
                 'provider': provider,
                 'providerLabel': _provider_default(provider, 'label'),
                 'model': model,
-                'strategyModel': strategy_model,
                 'endpoint': endpoint,
                 'taskConcurrency': self.task_concurrency,
                 'chunkConcurrency': chunk_concurrency,
@@ -3753,7 +3667,6 @@ end try
                     'provider': provider,
                     'providerLabel': _provider_default(provider, 'label'),
                     'model': model,
-                    'strategyModel': strategy_model,
                     'endpoint': endpoint,
                     'taskConcurrency': self.task_concurrency,
                     'chunkConcurrency': chunk_concurrency,
@@ -3772,7 +3685,6 @@ end try
                 'provider': provider,
                 'providerLabel': _provider_default(provider, 'label'),
                 'model': model,
-                'strategyModel': strategy_model,
                 'endpoint': endpoint,
                 'taskConcurrency': self.task_concurrency,
                 'chunkConcurrency': chunk_concurrency,
@@ -3786,7 +3698,6 @@ end try
                 'provider': provider,
                 'providerLabel': _provider_default(provider, 'label'),
                 'model': model,
-                'strategyModel': strategy_model,
                 'endpoint': endpoint,
                 'taskConcurrency': self.task_concurrency,
                 'chunkConcurrency': chunk_concurrency,

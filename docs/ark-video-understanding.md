@@ -4,191 +4,111 @@
 
 ## 主链路
 
-1. 下载抖音视频到任务私有缓存目录 `cache/videos/<task_id>/`；任务结束（成功、失败或取消）即删除，不复制进知识库，资产通过 `source_url` 等元数据追溯原始内容。
-2. 通过普通 Ark Files API 上传：
-   - `POST /api/v3/files`
-   - `purpose = user_data`
-   - 上传时传 `preprocess_configs.video.fps`
-   - 上传时传 `preprocess_configs.video.model`
-3. 轮询文件状态，直到 `status = active`。
-4. 调 Ark Responses API：
-   - `POST /api/v3/responses`
-   - content 使用 `{"type": "input_video", "file_id": "..."}`
-   - 同一条 input 附加 `{"type": "input_text", "text": "..."}`
-   - 视频分析请求显式 `store = true`
-5. 保存返回的 `response_id` 到本地短期记忆索引。
+1. 下载抖音视频到任务私有缓存 `cache/videos/<task_id>/`。任务结束后删除缓存，不把原视频复制进知识库。
+2. 用 `ffprobe` 读取时长和基本媒体信息。
+3. 自动模式用本地 `1fps` 灰度图做只读画面变化预扫描，然后在 `2/3/4/5fps` 中选择一个全局 FPS；固定模式不预扫描。
+4. 若 `时长 × FPS <= 1250` 帧，整个视频只上传和分析一次。
+5. 若超过 `1250` 帧安全目标，则用同一 FPS 做机械切片，分片并发分析后再汇总。
+6. 解析最终资产正文与内部派生候选 JSON，写入干净的来源 Markdown。
 
-## 模型分工
+Files API 上传必须在预处理阶段传入：
 
-- Agent 模型：不在本工具内部配置。它读取 `PROJECT_INTENT.md`、`AGENTS.md` 和 `SKILL.md`，决定何时调用当前工具；未来检索和维护方式不由本工具规定。
-- 主分析模型：默认 `doubao-seed-2-0-lite-260428`，负责正式视频精拆、最终汇总、标题/摘要/标签候选和派生候选 JSON。
-- 策略模型：默认 `doubao-seed-2-0-mini-260428`，负责长视频 `2fps` 全片/分片概览、分段 fps 决策、给 Lite 的精拆说明和策略 JSON 修复。
+- `preprocess_configs.video.fps`
+- `preprocess_configs.video.model`
 
-## 派生候选边界
+然后等待文件 `status = active`，再用 Responses API 的 `input_video.file_id` 进行分析。
 
-Ark 视频理解只负责从 `knowledge_ingest` 输出中给出结构化派生候选。执行层会二次解析、评分和去重，不按数量截断；所有属于主要介绍对象且高置信、低风险、可解析的 GitHub 项目候选都可自动入队。弱证据、缺 URL 的官方文档/网页研究和顺带提及对象只保留在审计记录中。
+## 模型
 
-人工确认、忽略和自动入队状态写入 `~/.agent-wiki/derived-actions/{parent_task_id}.json`，再由 WebSocket 状态快照合并回 `derivedTasks`。只有通过可见候选闸门的项目才进入这里，避免把 UI 操作状态和泛研究想法塞进父资产 Markdown。
+- 默认主分析模型为 `doubao-seed-2-0-lite-260428`。
+- 扩展中的 Mini 选项仍可作为主分析模型，用户选择后全链路都用 Mini。
+- 不再有独立 Mini 粗拆、全片概览模型或分段策略模型。
+- 单文件分析、切片分析和最终汇总使用同一个当前配置模型。
+- 旧配置中的 `models.strategy`、`models.analyzer_fallback` 和协议字段 `strategyModel` 可被新服务无声忽略，但新配置不再写入它们。
 
-当前允许的候选目标类型：
+## FPS 与机械切片
 
-- `github_project`：明确 GitHub 仓库或开源库。可以在只有项目名时由派生执行器通过 GitHub API + README 解析；解析后会再次查 vault，避免重复写同一项目资产。
-- `official_doc`：官方文档、API 文档、官方报告、官方博客。当前需要明确 URL 且与父结论强相关才进入可见候选；否则只进审计。
-- `web_research`：需要多源核验的事实、案例或趋势。当前必须是父结论强依赖且有明确 URL 的高价值核验才进入可见候选；普通案例背景和泛行业研究默认压到审计。
-
-候选不是正式资产。完整记录写入 runtime `run-artifacts/`；父资产只展示可读状态，不在 frontmatter 保存候选引用。派生记录不得包含 API Key、Cookie、Bearer token、`response_id`。
-
-派生链路同时写 runtime 审计节点：
-
-- `run-artifacts/{task_id}/05-derive/`：记录分析正文输入、JSON 候选、Markdown fallback 候选、归一化候选、保留/过滤结果和公开投影。
-- `run-artifacts/{child_task_id}/05-derive-executor/`：记录子任务输入、目标解析、来源材料、Lite prompt、原始输出、清洗后输出、写库结果和父子链接结果。
-
-这些节点只用于排查和复盘，不写入 Obsidian 正文。
-
-## fps 和帧数
-
-- Ark 接口允许更低 fps，但当前产品的模型上传统一限制为 `2 - 5fps`。
-- 自动模式先以本地 `1fps` 做只读画面变化预扫描，再选择 `2/3/4/5fps`；本地预扫描不调用模型。
-- 固定模式支持 `fixed_2`、`fixed_3`、`fixed_5`，不运行预扫描。
-- 项目默认质量档：`quality`。
+- 模型上传 FPS 范围：`2-5fps`。
+- 本地预扫描：固定 `1fps`，只测画面变化，不调用模型。
+- 预扫描失败：保守回退为 `5fps`。
+- 方舟硬上限：约 `1280` 帧。
 - 项目安全目标：`1250` 帧。
-- Ark 硬上限：约 `1280` 帧。
-- 自动预扫描失败时保守回退 `5fps`。
-- 任意视频若所选 fps 会超过 `1250` 帧安全目标，进入切片流程，不静默降低采样密度。
-- `> 600s`：不继续依赖单文件低 fps，进入长视频“概览 + 切片精拆”策略。
+- 切片长度：`min(600, 1250 / fps)` 秒。
+- 相邻切片重叠：`10` 秒。
+- 同一个视频的所有切片使用同一 FPS。
+- 切片并发：默认 `2`，可配置为 `1-4`。
 
-关键阈值：
+例如，`520.809` 秒视频选择 `5fps` 时的切片为：
 
-- `250s / 4m10s`：`5fps` 到达 `1250` 帧安全目标，超过后会按所选 fps 切片。
-- `600s / 10m`：进入长视频概览与精拆流程。
-- `615s / 10m15s`：全片 `2fps` 概览约 `1230` 帧；再长时概览阶段也切片。
+```text
+0-250s
+240-490s
+480-520.809s
+```
 
-## 长视频概览与切片
+若同一视频选择 `2fps`，估算为约 `1042` 帧，不切片。切片只是服务商帧数上限的工程处理，不表示语义章节。
 
-触发条件：
+## 分析、重试与汇总
 
-- 视频时长 `> 10 分钟`。
+- 每个切片 prompt 只在原始分析要求后增加当前切片编号、真实时间范围和重叠时长。
+- 不生成粗拆、语义分段、每段 FPS 建议或 `lite_brief`。
+- Responses 连接中断、超时、`429` 和部分 `5xx` 会自动重试，默认最多 `3` 次。`400`、鉴权和文件类型错误不盲目重试。
+- 同一 `task_id` 重跑时，若新流程的 `03-analysis/<intent>/part-xxx-output.md` 和 prompt hash 匹配，可复用已完成切片。
+- 最终汇总负责去除 `10` 秒重叠内容，按时间顺序合并，生成一份正式资产正文。
 
-策略：
+## 派生候选与 Markdown
 
-- `10 分钟 < duration <= 615s` 时，上传全片，使用 `2fps` 做概览。
-- `duration > 615s / 10m15s` 时，概览阶段也切片：每片用 `2fps` 粗拆，再把所有粗概览合成为全片分段策略。
-- 超长视频后续仍走正常长视频精拆流程，因此时长可以继续按切片数量扩展；工程上仍受 `500MB` 文件安全上限、下载耗时、任务超时和模型上下文窗口限制。
-- 全片概览上传的 `preprocess_configs.video.model` 使用策略模型，Responses 推理也使用策略模型。
-- 概览 prompt 要输出粗内容、粗时间线、重要概念、待确认点、每个固定切片的 `2-5fps` 精拆建议，以及给 Lite 的 `lite_brief` 精拆说明。
-- fps 决策不按死板类型判断，而按实际信息承载方式判断：画面变化、字幕/OCR、操作、动作和短暂视觉证据决定采样；概念密度、知识密度和论证复杂度进入 `lite_brief`，不单独推高 fps。
-- 程序校验概览 JSON。JSON 无效、缺段或缺必填字段时，策略模型最多做一次文本修复，不重新上传视频；修复仍失败时，坏掉的片段按 `5fps` 兜底，整份 JSON 不可用时全段 `5fps` 兜底。
-- 结构坏掉叫结构兜底；置信度低、超过安全帧数或缺少视觉/OCR/操作证据时叫 fps 调整。两类事件分开记录，避免把“策略保守”误读成“JSON 坏了”。
-- 如果模型建议 `4/5fps`，必须有明确视觉/OCR/操作/动作证据；纯静态口播/访谈即使知识密度高，也会被程序压回较低 fps，并把重点交给 Lite 的语义拆解。
-- 策略评估粒度：每片 `240s`，重叠 `10s`，步长 `230s`。
-- 精拆分段：相邻同 fps 的策略片按帧预算合并（`1250/fps` 秒，最长 `600s`，重叠 `10s`），低 fps 长视频的分析片数显著减少。
-- 单片在 `5fps` 下约 `1200` 帧，低于项目安全目标 `1250`，距离 Ark 硬上限约留 `80` 帧。
-- 实测方舟按单次调用总帧数动态压缩：480 帧/片与 1200 帧/片的视频 token 都约 9 万，因此装满帧预算的分析片成本与原来 240s 小片相当。
-- 分片上传和精拆默认 `2` 路并发，可在扩展“视频拆解设置”里调整为 `1-4`。扩展里的任务队列并发只控制同时处理多少个入库任务，不改变单个长视频内部的分片并发。
+模型输出分为两部分：
 
-处理流程：
+1. 正式资产内容：`简洁概括`、`完整内容整理`、`明确标识的 AI 分析`。
+2. 仅供程序使用的派生候选 JSON。
 
-1. 判断全片 `2fps` 概览是否会超过 `1250` 帧安全目标；超过则切分概览。
-2. 未超过时，全片用 `2fps` 走 Files API 上传、等待 active。
-3. 超过时，复用固定切片，每片 `2fps` 上传分析，先得到分片粗概览。
-4. 策略模型通过 Responses 生成长视频概览和分段精拆策略；超长视频则先把分片粗概览合成为同一份策略 JSON。
-5. 如果策略 JSON 不能解析、缺少分段或缺必填字段，策略模型用 `previous_response_id` 接上上轮上下文修复一次。
-6. 用 `ffmpeg -c copy` 生成临时 mp4 切片，尽量避免重新编码；超长视频概览和后续精拆共用同一批切片。
-7. 每片按策略 fps 独立走 Files API 上传、等待 active。
-8. 每片由主分析模型用 Responses 分析，prompt 中带上全片概览和本段精拆重点。
-9. 每个入库意图可以接入上次同视频同意图的 `previous_response_id`，但当前任务内的分片彼此并发，不串行依赖上一片输出。
-10. 所有片段拆完后，再由主分析模型用全片概览和分片结果做 text-only Responses 汇总。
-11. 临时切片目录结束后清理。
+程序在写入 Markdown 前先解析并移除内部 JSON。后续状态如下：
 
-策略日志：
+```text
+模型输出
+  -> 解析正文与内部候选 JSON
+  -> 写入干净的来源 Markdown
+  -> 候选在任务系统中解析、去重、确认或执行
+  -> 只有子资产真实存在后，才回写 related 和“相关资产”链接
+```
 
-- 路径：`~/.agent-wiki/logs/video-strategy-events.jsonl`
-- 记录：JSON 修复、修复失败、低置信/缺证据/高风险导致的 fps 上调、最终 fps 计划。
-- 不记录：API Key、Cookie、Bearer token、`response_id`。
+- 候选数量没有固定上限。
+- 不用数值分数、置信度或“必须是唯一主对象”作为可见或执行门槛。
+- GitHub 项目可只有明确名称，后续用 GitHub 官方 API 解析；唯一可信匹配可继续，歧义则进入 `needs_target`。
+- `official_doc` 和 `web_research` 有明确、安全、可追溯 URL 时可自动执行；无 URL 时保留候选并等待确认。
+- 候选、待确认、失败、取消和调试信息只保存在任务 JSON、`derived-actions/` 与 `run-artifacts/`，不写入 Markdown 正文或 frontmatter。
+- 派生子资产与普通资产使用同一 `知识资产/` 目录和正文结构。
 
-审计产物：
+## 审计产物
 
-- 路径：`~/.agent-wiki/run-artifacts/{task_id}/`
-- 保存：任务 manifest、原始入库 prompt、mini 每段粗拆 prompt/输出、mini 合成策略 prompt/输出、修复 prompt/输出、最终 normalized strategy、Lite 每段 prompt/输出、最终汇总 prompt/输出。
-- 任务状态和最终 Markdown 只写审计目录/文件索引，不把大段中间文本塞进状态 JSON。
-- 审计产物会做本地脱敏：不写 API Key、Cookie、Bearer token、`response_id`。
+每个任务的可排查产物位于：
 
-片段元数据会保留在运行结果里：
+```text
+~/.agent-wiki/run-artifacts/<task_id>/
+```
 
-- `part_index`
-- `start_sec`
-- `end_sec`
-- `overlap_sec`
-- `file_id`
-- `fps`
-- `target_frames`
-- `actual_frames_estimate`
-- `usage`
-- `strategy_confidence`
-- `strategy_scores`
-- `strategy_fallback_applied`
-- `strategy_fallback_reason`
-- `strategy_validation_fallback`
-- `strategy_fps_adjusted`
-- `strategy_fps_adjust_reason`
-- `strategy_lite_brief`
-- `strategy_focus`
+主要包含：
 
-## Responses 记忆
+- `00-run-manifest.json`：任务与模型摘要。
+- `01-prompts/`：原始入库 prompt。
+- `01-sampling/evidence.json`：本地预扫描和 FPS 决策证据。
+- `01-sampling/chunk-plan.json`：只在必要时保存机械切片计划。
+- `03-analysis/`：每个切片的 prompt、输出和摘要。
+- `04-synthesis/`：最终汇总 prompt 和输出。
+- `05-derive/`：派生候选解析、归一化、去重和公开投影。
 
-用途：
+任务状态和最终 Markdown 只保存审计目录/文件索引，不嵌入大段 prompt 或模型原始输出。审计中不得保存 API Key、Cookie、Bearer token 或 `response_id`。
 
-- 让同一视频、同一入库意图的后续补拆可以接上模型上下文。
+## Responses 短期记忆
 
-实现：
+视频分析请求使用 `store=true`。返回的 `response_id` 只保存在本地 `~/.agent-wiki/responses-memory/`，默认保留 `3` 天，用于同视频同 prompt 的短期上下文续接。
 
-- 请求时传 `store = true`。
-- 如果本地存在未过期记忆，传 `previous_response_id`。
-- 记忆默认保存在 `~/.agent-wiki/responses-memory/`。
-- 本地记忆默认保存 `3` 天，匹配 Ark Responses 默认存储周期，避免过期后继续复用。
-- key 使用 `media_type + source_id/aweme_id + ingest_intent + model + prompt_hash + flow_version + chunked`。
-- 不同来源、模型、prompt 和单文件/分片链路使用独立记忆，避免上下文串味。
+`response_id` 不写入 Markdown、任务状态或日志；它也不是长期知识记忆。Files API 的文件可用期与 Responses 记忆是两件事。
 
-边界：
+## 工程边界
 
-- `response_id` 不写入 Obsidian frontmatter。
-- `response_id` 不写入任务状态文件或策略日志。
-- `response_id` 不等于长期知识记忆。
-- `previous_response_id` 只续模型上下文，不负责 `file_id` 保活。
-- Files API 文件可用期和 Responses 记忆是两件事。
-
-## 文件大小
-
-- Ark 默认托管 Files API 视频上限：`512MB`。
-- 项目侧安全线：`500MB`。
-- 超过 500MB 当前直接失败。
-- TOS Bucket 可作为未来路线支持更大文件，本轮不接入。
-
-未来接 TOS 时需要处理：
-
-- Bucket 与 Ark 同地域，例如 `cn-beijing`。
-- 使用可下载的预签名 GET URL。
-- URL 过期时间、对象 key 稳定性、查询参数要可追踪。
-
-## Agent Plan 历史记录
-
-已验证：
-
-- Agent Plan Key -> `POST /api/plan/v3/files`：404。
-- Agent Plan Key -> `POST /api/v3/files`：401。
-- Agent Plan Key -> `POST /api/plan/v3/responses` + fake `file_id`：失败。
-- Agent Plan Key -> `POST /api/plan/v3/responses` + base64 小视频：成功。
-
-当前取舍：
-
-- 产品运行通道不再支持 Agent Plan。
-- 扩展、服务端、配置、健康检查、analyzer 都只保留普通 Ark。
-- 旧 `provider = "volcengine_agent_plan"` 会回落为 `doubao`。
-- 旧 Agent Plan Key 不会自动迁移成普通 Ark Key。
-
-## 资料来源
-
-- Ark 视频理解文档：https://www.volcengine.com/docs/82379/1895586
-- Ark Files API 文档：https://www.volcengine.com/docs/82379/1885708
-- Ark Responses API 文档：https://www.volcengine.com/docs/82379/1569618
-- Ark Agent Plan 对比文档：https://www.volcengine.com/docs/82379/2160841
+- Ark 默认托管 Files API 视频上限为 `512MB`；项目侧安全线为 `500MB`。
+- 超过 `500MB` 当前直接失败。
+- 长视频仍受下载时间、任务超时、模型上下文和供应商稳定性限制。
+- 所有分片为任务临时文件，任务结束后清理。

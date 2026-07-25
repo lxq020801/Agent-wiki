@@ -138,8 +138,6 @@ def _derive_config(root: Path, vault: Path):
         ark_api_key="mock-key",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="mock-analyzer",
-        analyzer_fallback="mock-fallback",
-        strategy_model="mock-strategy",
         default_quality="quality",
         balanced_target_frames=1,
         quality_target_frames=1,

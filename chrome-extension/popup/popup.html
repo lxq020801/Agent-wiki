@@ -251,13 +251,13 @@
     <section class="settings-group detail-section" id="video-settings" data-title="模型与并发" tabindex="-1" hidden>
       <div class="section-heading">
         <h3>模型与并发</h3>
-        <p>配置主拆解模型 ID，并控制任务队列和长视频分片并发。</p>
+        <p>配置视频理解模型 ID，并控制任务队列和机械切片并发。</p>
       </div>
       <div class="field model-id-field">
         <label for="analysis-model-id">主拆解模型 ID</label>
         <input class="model-id-input" type="text" id="analysis-model-id" spellcheck="false" placeholder="doubao-seed-2-0-lite-260428">
         <input type="hidden" id="analysis-model-preset" value="lite">
-        <p class="microcopy">保存后用于正式视频拆解；长视频策略模型仍固定使用 Mini。</p>
+        <p class="microcopy">所有视频理解使用这一模型；超过帧数上限时使用同一模型机械切片。</p>
         <div class="model-preset-grid" role="group" aria-label="快速填入模型 ID">
           <button class="option-button selected" type="button" data-control="analysis-model-preset" data-value="lite" data-model-id="doubao-seed-2-0-lite-260428">
             <span>Lite</span>
@@ -285,8 +285,8 @@
         </div>
         <div class="control-card">
           <div class="control-card-head">
-            <label id="chunk-concurrency-label">长视频分片并发</label>
-            <p class="microcopy">单个长视频内几个切片同时分析。</p>
+            <label id="chunk-concurrency-label">机械切片并发</label>
+            <p class="microcopy">超过模型帧数上限时，同时分析几个切片。</p>
           </div>
           <input type="hidden" id="chunk-concurrency" value="2">
           <div class="choice-group" role="radiogroup" aria-labelledby="chunk-concurrency-label">

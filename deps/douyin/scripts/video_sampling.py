@@ -370,7 +370,7 @@ def decide_sampling_fps(
 
     coverage_ratio = float(prescan.get("coverage_ratio") or 0.0)
     if duration > _PRESCAN_MAX_COVERAGE_SEC and coverage_ratio < 0.99:
-        reasons.append("long-video prescan is coverage-limited; cloud chunk strategy remains authoritative")
+        reasons.append("long-video prescan is coverage-limited; use one conservative global FPS")
     if duration >= 1800 and fps < 3:
         fps = 3.0
         reasons.append("ultra-long duration raises the local baseline to 3 FPS")
@@ -392,88 +392,3 @@ def decide_sampling_fps(
             "coverage_ratio": coverage_ratio,
         },
     }
-
-
-def prescan_window(
-    prescan: Optional[dict[str, Any]],
-    *,
-    start_sec: float,
-    end_sec: float,
-) -> Optional[dict[str, Any]]:
-    """Return change metrics for a covered time window without inventing gaps."""
-    if not prescan or not prescan.get("ok"):
-        return prescan
-    timestamps = list(prescan.get("timestamps_sec") or [])
-    covered = [float(value) for value in timestamps if start_sec <= float(value) <= end_sec]
-    if not covered:
-        return None
-    points = [
-        item for item in (prescan.get("change_points") or [])
-        if start_sec <= float(item.get("timestamp_sec") or -1) <= end_sec
-    ]
-    window_duration = max(1.0, end_sec - start_sec)
-    scores = [float(item.get("change_score") or 0.0) for item in points]
-    comparisons = max(1, len(covered) - 1)
-    return {
-        "ok": True,
-        "mean_change_score": sum(scores) / comparisons,
-        "p90_change_score": _percentile(scores, 0.90),
-        "peak_change_score": max(scores, default=0.0),
-        "change_point_ratio": len(points) / comparisons,
-        "coverage_ratio": min(1.0, len(covered) / window_duration),
-    }
-
-
-def merge_chunk_sampling_strategy(
-    strategy: dict[str, Any],
-    chunk_plan: list[dict[str, float | int]],
-    *,
-    mode: str,
-    prescan: Optional[dict[str, Any]],
-) -> dict[str, Any]:
-    """Merge local change evidence with the existing semantic chunk strategy."""
-    normalized = normalize_fps_mode(mode)
-    chunks = strategy.get("chunks") if isinstance(strategy.get("chunks"), list) else []
-    by_part = {
-        int(item.get("part_index")): item
-        for item in chunks
-        if isinstance(item, dict) and item.get("part_index") is not None
-    }
-    merged: list[dict[str, Any]] = []
-    for plan_item in chunk_plan:
-        part_index = int(plan_item["part_index"])
-        original = dict(by_part.get(part_index) or plan_item)
-        semantic_fps = max(2.0, min(5.0, float(original.get("recommended_fps") or 5.0)))
-        start = float(plan_item["start_sec"])
-        end = float(plan_item["end_sec"])
-        scores = original.get("scores") if isinstance(original.get("scores"), dict) else {}
-        risk_hints = {
-            "presentation_risk": scores.get("visual_change", 0),
-            "ocr_risk": scores.get("ocr_subtitle_density", 0),
-            "action_risk": scores.get("operation_density", 0),
-            "motion_risk": scores.get("motion_detail", 0),
-        }
-        window = prescan_window(prescan, start_sec=start, end_sec=end)
-        if normalized == FPS_MODE_AUTO and window is None:
-            local = None
-            selected = semantic_fps
-            reason = "local prescan did not cover this chunk; retained semantic overview strategy"
-        else:
-            local = decide_sampling_fps(
-                mode=normalized,
-                duration_sec=end - start,
-                prescan=window,
-                risk_hints=risk_hints,
-            )
-            local_fps = float(local["selected_fps"])
-            selected = local_fps if fixed_fps_for_mode(normalized) is not None else max(semantic_fps, local_fps)
-            reason = "; ".join(local.get("decision_reasons") or [])
-        original.update({
-            **plan_item,
-            "recommended_fps": max(2.0, min(5.0, selected)),
-            "semantic_strategy_fps": semantic_fps,
-            "local_sampling_decision": local,
-            "sampling_merge_reason": reason,
-        })
-        merged.append(original)
-    return {**strategy, "chunks": merged, "sampling_mode": normalized}

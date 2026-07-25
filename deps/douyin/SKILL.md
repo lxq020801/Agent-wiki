@@ -21,7 +21,7 @@ download, analysis, vault writes, index updates, and status.
 | `scripts/config_loader.py` | Load `~/.agent-wiki/config.toml` |
 | `scripts/status_writer.py` | Write diagnostic status JSON for Agent/debugging |
 | `scripts/cost_estimator.py` | Estimate RMB cost from model usage |
-| `scripts/derive_strategy.py` | Score, dedupe, and record all qualifying primary-subject candidates |
+| `scripts/derive_strategy.py` | Parse, validate, deduplicate, and persist derivation candidates |
 | `scripts/derive_executor.py` | Resolve approved derived targets, generate child assets, and link parent/child notes |
 | `vendor/` | Embedded Douyin crawler code; treat as read-only |
 
@@ -51,13 +51,15 @@ The WebSocket control server writes:
    SCHEMA-compliant source note directly to `知识资产/` with
    `asset_family: knowledge_asset` and `ingest_intent: knowledge_ingest`. It then
    updates `index.md` without initializing, staging, or committing Git.
-6. For `knowledge_ingest`, `derive_strategy.py` turns model-discovered primary
-   introduced objects into candidates without a fixed count limit. Full records
-   stay in runtime `run-artifacts/`; the parent Markdown only stores a readable
-   status table. High-confidence, low-risk, resolvable candidates may be queued
-   as `derived_ingest` tasks by the WebSocket service after the parent asset is
-   written. Ambiguous or missing-target candidates remain pending for extension
-   confirmation. Debuggable process nodes live under
+6. For `knowledge_ingest`, `derive_strategy.py` parses the model's internal JSON
+   candidates without a fixed count limit. Candidate, pending, failure, and
+   cancellation state stays in task JSON, `derived-actions/`, and
+   `run-artifacts/`; it never enters the source Markdown. Structurally valid,
+   safe, resolvable candidates may be queued as `derived_ingest` tasks after the
+   parent asset is written. Ambiguous or missing-target candidates remain in the
+   task system for confirmation. Only after a child asset really exists does the
+   executor add `related` metadata and a `## 相关资产` link. Debuggable process
+   nodes live under
    `run-artifacts/{task_id}/05-derive/` and
    `run-artifacts/{child_task_id}/05-derive-executor/`, not in the asset body.
 
@@ -90,34 +92,21 @@ The WebSocket control server writes:
 - Responses memory is short-term only. Store returned `response_id` under
   `~/.agent-wiki/responses-memory/` for 3 days; never write it into
   vault Markdown, task status, or strategy logs.
-- Videos longer than 10 minutes first run a full-video overview at `2fps` when
-  duration is `<= 615s`, leaving 20 frames of margin below the 1250-frame
-  safety target, with the strategy model (`models.strategy`, default mini). If
-  duration is `> 615s`, split the overview phase too, analyze each 240s chunk
-  at `2fps`, synthesize those rough
-  overviews into the same global strategy JSON, then continue through the normal
-  long-video precision pass. This means duration scales by chunk count; the
-  practical limits are still file size, download time, task timeout, and model
-  context windows. The overview extracts rough content, information carriers,
-  and a `lite_brief` for the main analyzer model; fps is for visual/OCR/action
-  risk, while high concept density should be handled in the Lite prompt rather
-  than automatically raising fps. Then
-  240s chunks with 10s overlap are used as the strategy granularity; before
-  the precision pass, adjacent same-fps segments are merged into frame-budget
-  sized analysis chunks (`1250/fps` seconds, max 600s, 10s overlap) and
-  uploaded/analyzed independently at `2-5fps` by the main analyzer model with
-  default 2-way concurrency, configurable from 1 to 4. Ark compresses frames so
-  that per-call video tokens stay roughly constant, so packing each chunk to
-  the frame budget cuts cost proportionally to chunk count. Invalid JSON, missing segments, or missing required fields may be
-  repaired once by the same strategy model via `previous_response_id`; structural
-  fallback and fps adjustment are tracked separately. Text-only Responses then
-  synthesizes the final asset body from the overview and chunk results.
-- A shorter high-change video is also split when its selected upload FPS would
-  exceed the 1250-frame safety budget; this preserves the requested density
-  instead of silently relying on server-side uniform resampling.
+- One configured model performs all video understanding. Mini remains an
+  optional main-model preset; there is no separate Mini overview or strategy
+  call.
+- Automatic mode runs one local change-only prescan and chooses one global FPS
+  for the whole video. Fixed modes use their selected FPS without prescan.
+- A video is split only when `duration * selected_fps` exceeds the 1250-frame
+  safety target. Each mechanical slice uses the same FPS, spans at most
+  `min(600, 1250/fps)` seconds, and overlaps the previous slice by 10 seconds.
+- Slices are uploaded and analyzed independently with default 2-way concurrency,
+  configurable from 1 to 4. A text-only Responses call then removes overlap and
+  synthesizes the final asset body. There is no semantic 240-second plan, rough
+  analysis, per-slice FPS decision, or strategy JSON repair.
 - Video ingest writes inspectable intermediate artifacts under
-  `~/.agent-wiki/run-artifacts/{task_id}/`: mini chunk overview
-  prompts/outputs, strategy synthesis and repair artifacts, Lite chunk
+  `~/.agent-wiki/run-artifacts/{task_id}/`: the run manifest, original prompt,
+  local sampling evidence, mechanical chunk plan, per-slice analysis
   prompts/outputs, and final synthesis prompt/output.
 - `01-sampling/evidence.json` separates local reproduction frames and
   thumbnails, requested upload FPS/planned frame counts, and provider-returned
@@ -127,12 +116,11 @@ The WebSocket control server writes:
   to the latest progress snapshot.
 - Cost estimation uses provider-returned usage only. It splits audio from
   non-audio input, preserves reasoning-token facts without double charging,
-  applies the official input-length tier per model, and sums Mini/Lite stages
-  separately. Unknown pricing returns unavailable instead of using a fallback
-  rate; the amount remains an estimate rather than the final invoice.
-- Strategy fallbacks and JSON repair results are logged to
-  `~/.agent-wiki/logs/video-strategy-events.jsonl` without API keys,
-  Cookies, Bearer tokens, or `response_id`.
+  applies the official input-length tier per model, and sums all analysis calls.
+  Unknown pricing returns unavailable instead of using a fallback rate; the
+  amount remains an estimate rather than the final invoice.
+- Retry and sampling diagnostics never contain API keys, Cookies, Bearer tokens,
+  or `response_id`.
 
 ## Output Contract
 
@@ -160,23 +148,22 @@ Derivation candidate contract:
 
 - Only `knowledge_ingest` generates derivation candidates.
 - Allowed target types: `github_project`, `official_doc`, `web_research`.
-- Full candidate fields, scores, evidence, dedupe status, parent lineage, and
+- Full candidate fields, evidence, dedupe status, parent lineage, and
   acceptance criteria live in runtime `run-artifacts/`.
 - Raw candidate extraction, normalization, target resolution, source material,
   prompt/output, write result, and linkback records live in runtime
   `run-artifacts/`.
 - Candidate-stage Markdown must not contain future `[[wikilink]]` targets. The
   derived executor writes child assets first, then updates parent/child links.
-- Candidate count has no fixed maximum. A candidate survives when the object is
-  a primary introduced subject with sufficient evidence and a real asset use;
-  incidental mentions stay in the source note or audit trail.
+- Candidate count has no fixed maximum. A structurally valid candidate survives
+  when the model identifies an independently useful, traceable asset; numerical
+  score, confidence, and primary-object thresholds do not hide it.
 - GitHub candidates may omit URL when the project name and context are strong;
   `derive_executor.py` resolves them through GitHub API search plus README
   comparison before writing the child asset.
-- All qualifying high-confidence GitHub candidates are eligible for automatic enqueue in
-  the current runtime. `official_doc` and `web_research` remain candidates that
-  require manual confirmation or a supplied URL until official-domain and
-  multi-source verification are implemented.
+- GitHub candidates can auto-enqueue after unique official API resolution.
+  Explicit safe URLs for `official_doc` and `web_research` can also auto-enqueue;
+  missing or ambiguous targets remain `needs_target` for confirmation.
 - Do not write candidate references, full candidate objects, `scores`,
   `evidence`, `dedupe`, or execution status objects into asset frontmatter.
 
