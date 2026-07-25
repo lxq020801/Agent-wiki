@@ -52,7 +52,7 @@ export AGENT_WIKI_GITHUB_CLIENT_ID="<your-github-app-client-id>"
 
 - 仓库搜索使用 `GET /search/repositories`，支持分页；限流响应会返回建议重试时间。
 - “导入我的 Stars”使用 `GET /user/starred`。界面可全选当前已加载列表或逐项选择，批量任务逐项报告成功、已存在或失败，并可取消尚未执行的项目。
-- 正式 GitHub 项目资产写入 `知识资产/GitHub项目/`，并更新 `index.md`。
+- GitHub 只是一种来源。正式 GitHub 资产与其他资产一样写入 `知识资产/`，使用 `asset_family: knowledge_asset` 和统一三段式正文，并列入 `index.md` 的「知识入库」栏目；仓库与派生关系保留在 frontmatter 中。
 - 自动 Star 默认关闭。开启后，仅在正式派生资产与索引成功写入并调用登记钩子后，才请求 `PUT /user/starred/{owner}/{repo}`。Stars 导入和普通首次写入不会重复 Star；Star 失败只作为附加结果返回，不回滚知识资产。
 - 刷新只由用户点击“检查更新”触发。服务比较 README、最新 Release、License、归档状态、最近推送、默认分支和仓库路径；发现变化后先返回摘要，只有用户确认才改写资产。无变化会明确返回 `no_changes`。
 

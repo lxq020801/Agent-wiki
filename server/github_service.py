@@ -37,7 +37,7 @@ KEYCHAIN_SERVICE = "com.agent-wiki.github"
 KEYCHAIN_ACCOUNT = "github-oauth-token"
 CLIENT_ID_ENV = "AGENT_WIKI_GITHUB_CLIENT_ID"
 DEFAULT_CLIENT_ID = "Iv23liSzzn6LYCGleEQA"
-USER_AGENT = "Agent-wiki/0.4.2"
+USER_AGENT = "Agent-wiki/0.4.3"
 MAX_README_CHARS = 500_000
 CLIENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 OWNER_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -1134,7 +1134,7 @@ class GitHubService:
         slug = re.sub(r"[^a-z0-9]+", "-", full_name).strip("-")[:58] or f"github-{material['public']['id']}"
         date = datetime.now().strftime("%Y%m%d")
         repository_id = _safe_int(material["public"].get("id"))
-        return vault_path / "知识资产" / "GitHub项目" / f"{date}-{slug}-{repository_id}.md"
+        return vault_path / "知识资产" / f"{date}-{slug}-{repository_id}.md"
 
     def _frontmatter_value(self, text: str, key: str) -> str:
         if not text.startswith("---\n"):
@@ -1151,13 +1151,13 @@ class GitHubService:
         return ""
 
     def _find_vault_asset(self, vault_path: Path, repo: dict[str, Any]) -> Path | None:
-        root = vault_path / "知识资产" / "GitHub项目"
+        root = vault_path / "知识资产"
         if not root.exists():
             return None
         repository_id = _safe_int(repo.get("id"))
         canonical = normalize_owner_repo(repo.get("full_name"))
         name_match = None
-        for path in root.glob("*.md"):
+        for path in root.glob("**/*.md"):
             try:
                 text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
@@ -1200,7 +1200,7 @@ class GitHubService:
         text = index.read_text(encoding="utf-8") if index.exists() else "# 知识库索引\n"
         repo = material["public"]
         summary = re.sub(r"\s+", " ", repo["description"]).strip()[:80] or f"{repo['fullName']} GitHub 项目"
-        entry = f"- [[{asset_path.stem}|{repo['fullName']}]] — {summary} `#github` `#project`"
+        entry = f"- [[{asset_path.stem}|{repo['fullName']}]] — {summary} `#github` `#knowledge-asset`"
         lines = [line for line in text.splitlines() if f"[[{asset_path.stem}|" not in line]
         if not lines or lines[0] != "# 知识库索引":
             lines.insert(0, "# 知识库索引")
@@ -1210,7 +1210,7 @@ class GitHubService:
             lines[1] = meta
         else:
             lines.insert(1, meta)
-        heading = "## GitHub项目 / 网页剪藏 / 代码模块"
+        heading = "## 知识入库"
         try:
             index_at = lines.index(heading) + 1
         except ValueError:

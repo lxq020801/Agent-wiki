@@ -945,6 +945,8 @@ def _summary_from_text(text: str, title: str) -> str:
     """Generate a short SCHEMA-compatible summary without calling another model."""
     heading_re = re.compile(r"^[一二三四五六七八九十]+[、.．]\s*")
     for raw in text.splitlines():
+        if raw.lstrip().startswith("#"):
+            continue
         line = raw.strip().strip("-*# >")
         if not line:
             continue

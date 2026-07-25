@@ -82,6 +82,19 @@ GITHUB_RETRY_MAX_DELAY_SEC = 2.0
 _GITHUB_REQUEST_THREAD_LOCK = threading.Lock()
 _GITHUB_TOKEN_UNSET = object()
 _GITHUB_TOKEN_CACHE: object | str = _GITHUB_TOKEN_UNSET
+GITHUB_CONTEXT_CONCEPTS = (
+    (re.compile(r"自托管|self[- ]?host", re.I), ("self-hosted",)),
+    (re.compile(r"部署|deploy", re.I), ("deployment",)),
+    (re.compile(r"平台|platform", re.I), ("platform",)),
+    (re.compile(r"网关|gateway", re.I), ("gateway",)),
+    (re.compile(r"路由|routing|router", re.I), ("routing",)),
+    (re.compile(r"多模型|multi[- ]?model", re.I), ("multi-model",)),
+    (re.compile(r"协作|collaborat", re.I), ("collaboration",)),
+    (re.compile(r"工作台|workspace|workbench", re.I), ("workspace",)),
+    (re.compile(r"桌面|desktop", re.I), ("desktop",)),
+    (re.compile(r"设计|design", re.I), ("design",)),
+    (re.compile(r"大模型|\bllm\b|language model", re.I), ("llm",)),
+)
 SECRET_PATTERNS = [
     (re.compile(r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer [REDACTED]"),
     (re.compile(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@"), r"\1[REDACTED]@"),
@@ -853,7 +866,11 @@ def _github_repo_payload(owner: str, repo: str) -> tuple[dict[str, Any], str]:
 def _keywords(text: str) -> set[str]:
     words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u4e00-\u9fff]{2,}", text.lower())
     stop = {"github", "project", "official", "documentation", "api", "视频", "项目", "工具", "官方", "文档"}
-    return {word for word in words if word not in stop}
+    keywords = {word for word in words if word not in stop}
+    for pattern, concepts in GITHUB_CONTEXT_CONCEPTS:
+        if pattern.search(text):
+            keywords.update(concepts)
+    return keywords
 
 
 def _score_repo_match(candidate: dict[str, Any], repo: dict[str, Any], readme: str) -> int:
@@ -1258,10 +1275,10 @@ def _format_yaml_list(values: list[str]) -> str:
 def _tag_list(target_type: str, content: str = "") -> tuple[str, ...]:
     tags = _content_tags(content)
     auxiliary = {
-        "github_project": ("project", "derived-asset", "github"),
-        "official_doc": ("official-doc", "derived-asset", "webpage"),
-        "web_research": ("web-research", "derived-asset", "webpage"),
-    }.get(target_type, ("derived-asset", "webpage"))
+        "github_project": ("github",),
+        "official_doc": ("official-doc", "webpage"),
+        "web_research": ("web-research", "webpage"),
+    }.get(target_type, ("webpage",))
     for tag in auxiliary:
         if tag not in tags:
             tags.append(tag)
@@ -1337,7 +1354,7 @@ def _child_frontmatter(
     tags = _tag_list(target_type, f"{title}\n{target_material}\n{body_text}")
     if target_type == "github_project":
         asset_id = _schema_asset_id(config.vault_path, date, "github")
-        rel_dir = Path("知识资产/GitHub项目")
+        rel_dir = Path("知识资产")
         repo = target.raw.get("repo", {})
         md_slug = _slug_for_vault(str(repo.get("full_name") or title), str(candidate.get("id") or "derived"), 58)
         md_path = config.vault_path / rel_dir / f"{date}-{md_slug}.md"
@@ -1347,7 +1364,7 @@ def _child_frontmatter(
         frontmatter = f"""---
 id: "{asset_id}"
 type: github_project
-asset_family: github_project
+asset_family: knowledge_asset
 source_media: github
 ingest_intent: derived_ingest
 title: "{_yaml_escape(title)}"
@@ -1380,7 +1397,7 @@ related: {_format_yaml_list([parent_link] if parent_link else [])}
         return frontmatter, md_path, tags
 
     asset_id = _schema_asset_id(config.vault_path, date, "web")
-    rel_dir = Path("知识资产/网页剪藏")
+    rel_dir = Path("知识资产")
     md_slug = _slug_for_vault(title, str(candidate.get("id") or "derived"), 58)
     md_path = config.vault_path / rel_dir / f"{date}-{md_slug}.md"
     domain = urllib.parse.urlparse(target.url).hostname or ""
@@ -1561,7 +1578,7 @@ def _link_existing_target_locked(
     relation = str(candidate.get("relationType") or "派生资产")
     text = existing_path.read_text(encoding="utf-8", errors="ignore")
     summary = _summary_from_text(text, title)
-    section = "GitHub项目" if target.kind == "github_project" else "网页剪藏"
+    section = "知识入库"
     tags = _tag_list(target.kind, text)
     _ensure_vault_structure(config.vault_path)
     _update_index(config.vault_path, existing_path, title, summary, section=section, tags=tags)
@@ -1839,7 +1856,7 @@ def execute_derived_task(task: dict[str, Any], config: Config, sw: StatusWriter)
                 str(candidate.get("relationType") or "派生资产"),
             )
             md_path.write_text(frontmatter + "\n" + child_body, encoding="utf-8")
-            section = "GitHub项目" if target.kind == "github_project" else "网页剪藏"
+            section = "知识入库"
             _update_index(config.vault_path, md_path, title, summary, section=section, tags=tags)
             touched = [md_path, config.vault_path / "index.md"]
             relation = str(candidate.get("relationType") or "派生资产")

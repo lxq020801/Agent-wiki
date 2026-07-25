@@ -151,6 +151,7 @@ status: active
 ```
 
 The note body uses `简洁概括`, `完整内容整理`, and clearly marked `AI 分析`.
+All completed assets use the same `知识资产/` directory and three-section body. Derivation is provenance, not an asset family; preserve it with `ingest_intent`, `source_media`, source fields, and `derived_from`.
 Model names, token counts, costs, and analysis parameters stay in status/audit
 records. API keys and Cookies must never be written to Markdown, logs, or final
 Agent replies.

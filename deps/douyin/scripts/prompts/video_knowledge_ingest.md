@@ -28,6 +28,7 @@
 - `official_doc`：视频主要介绍或核心依赖的官方文档/API 文档；没有明确 URL 时通常需要确认。
 - `web_research`：视频主要围绕、且确实需要多源核验的具体事实对象；泛趋势、公司背景和普通补充研究不输出。
 - 不要编造 URL。只有画面、字幕或口播明确给出时才填写 `target_url`。
+- GitHub 项目没有明确 URL 时，`search_query` 使用准确英文项目名，并追加 2-4 个能区分同名仓库的英文功能词；不要只重复 `GitHub repository`，也不要把整句中文描述塞进查询。例如：`Openship self-hosted deployment platform`。
 
 `subject_role` 只允许 `primary` 或 `mentioned`。JSON 中只输出 `primary` 候选；`mentioned` 对象留在完整内容整理中。评分维度均为 `0-5` 整数：`knowledge_value`、`parent_dependency`、`evidence_strength`、`actionability`、`freshness_risk`、`novelty`、`asset_fit`、`cost_risk_inverse`、`ambiguity_inverse`。候选应有清晰证据，且通常满足 `evidence_strength >= 4`、`actionability >= 4`、`asset_fit >= 4`、`ambiguity_inverse >= 3`、`confidence >= 0.8`。
 
@@ -42,7 +43,7 @@
       "target_type": "github_project",
       "target_url": "",
       "subtype": "",
-      "search_query": "项目名称 GitHub repository",
+      "search_query": "ProjectName core feature terms",
       "mentioned_context": "视频如何重点介绍或演示这个项目",
       "parent_context": "它为什么属于视频主要介绍对象",
       "reason": "派生后能独立维护和复用的具体价值",

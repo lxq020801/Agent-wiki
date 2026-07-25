@@ -194,8 +194,12 @@ Donate here and join our Discord chat.
             self.assertIn("rag", result.tags)
             self.assertIn("github", result.tags)
             self.assertGreater(len(result.tags), 3)
+            self.assertEqual(result.asset_path.parent, vault / "知识资产")
+            self.assertIn("asset_family: knowledge_asset", text)
+            self.assertNotIn("derived-asset", result.tags)
             index = (vault / "index.md").read_text(encoding="utf-8")
-            self.assertEqual(index.count("## GitHub项目 / 网页剪藏 / 代码模块"), 1)
+            self.assertEqual(index.count("## 知识入库"), 1)
+            self.assertNotIn("## GitHub项目 / 网页剪藏 / 代码模块", index)
             self.assertNotIn("\n## GitHub项目\n", index)
             self.assertEqual(index.count("[[legacy-github|"), 1)
 
@@ -233,7 +237,7 @@ Donate here and join our Discord chat.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             vault = root / "vault"
-            asset = vault / "知识资产" / "GitHub项目" / "derived.md"
+            asset = vault / "知识资产" / "derived.md"
             asset.parent.mkdir(parents=True)
             existing = (
                 '---\nid: "derived-id"\ningest_intent: derived_ingest\n'
@@ -327,13 +331,13 @@ class GitHubTaskStoreTests(unittest.TestCase):
             second_store = GitHubTaskStore(root)
             event, created = first_store.ensure_asset_event(
                 {"id": 101, "fullName": "openai/example"},
-                "知识资产/GitHub项目/example.md",
+                "知识资产/example.md",
                 source="manual",
                 auto_star_enabled=True,
             )
             duplicate, duplicate_created = second_store.ensure_asset_event(
                 {"id": 101, "fullName": "openai/example-renamed"},
-                "知识资产/GitHub项目/example.md",
+                "知识资产/example.md",
                 source="derived_ingest",
                 auto_star_enabled=True,
             )
@@ -469,7 +473,7 @@ class GitHubBackendServiceTests(unittest.TestCase):
             service, api, _vault = self.make_service(root)
             event, created = service.task_store.ensure_asset_event(
                 {"id": 101, "fullName": "openai/example"},
-                "知识资产/GitHub项目/example.md",
+                "知识资产/example.md",
                 source="manual",
                 auto_star_enabled=True,
             )

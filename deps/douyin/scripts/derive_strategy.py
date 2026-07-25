@@ -669,7 +669,6 @@ def _visible_block_reasons(item: dict[str, Any]) -> list[str]:
         "evidence_strength": 4,
         "actionability": 4,
         "asset_fit": 4,
-        "cost_risk_inverse": 4,
         "ambiguity_inverse": 3,
     }
     for key, minimum in required_scores.items():
@@ -867,7 +866,7 @@ def _normalize_candidate(
         "evidence": _string_list(raw.get("evidence") or raw.get("source_evidence"), limit=6),
         "acceptance_criteria": acceptance_criteria,
         "relation_type": _relation_type(target_type, subtype),
-        "intended_asset_family": "github_project" if target_type == "github_project" else "knowledge_asset",
+        "intended_asset_family": "knowledge_asset",
         "lineage_depth": 1,
         "allow_child_derivation": False,
         "auto_eligible": False,

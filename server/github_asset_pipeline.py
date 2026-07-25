@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-CANONICAL_INDEX_SECTION = "GitHub项目 / 网页剪藏 / 代码模块"
+CANONICAL_INDEX_SECTION = "知识入库"
 INDEX_SECTION_ALIASES = {
     CANONICAL_INDEX_SECTION,
+    "GitHub项目 / 网页剪藏 / 代码模块",
     "GitHub项目",
     "网页剪藏",
     "代码模块",
@@ -424,11 +425,9 @@ class GitHubAssetPipeline:
             sections["ai_analysis"],
         ])
         tags = list(tools["content_tags"](content_for_tags))
-        for tag in ("github", "project"):
+        for tag in ("github",):
             if tag not in tags:
                 tags.append(tag)
-        if ingest_intent == "derived_ingest" and "derived-asset" not in tags:
-            tags.append("derived-asset")
 
         date = datetime.now().strftime("%Y%m%d")
         date_iso = datetime.now().strftime("%Y-%m-%d")
@@ -450,7 +449,7 @@ class GitHubAssetPipeline:
                 str(repo.get("id") or "github"),
                 52,
             )
-            asset_path = vault_path / "知识资产" / "GitHub项目" / f"{date}-{slug}-{int(repo['id'])}.md"
+            asset_path = vault_path / "知识资产" / f"{date}-{slug}-{int(repo['id'])}.md"
         try:
             asset_path.resolve().relative_to(vault_path.resolve())
         except ValueError as exc:
@@ -466,7 +465,7 @@ class GitHubAssetPipeline:
         content = f'''---
 id: "{_yaml_escape(asset_id)}"
 type: github_project
-asset_family: github_project
+asset_family: knowledge_asset
 source_media: github
 ingest_intent: {ingest_intent}
 title: "{_yaml_escape(title)}"

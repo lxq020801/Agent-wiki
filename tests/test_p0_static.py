@@ -463,7 +463,7 @@ def test_derive_strategy_keeps_all_primary_candidates_dedupes_and_redacts(tmp: P
         "freshness_risk": 4,
         "novelty": 4,
         "asset_fit": 5,
-        "cost_risk_inverse": 4,
+        "cost_risk_inverse": 3,
         "ambiguity_inverse": 5,
     }
     candidates = [
@@ -867,6 +867,53 @@ def test_derive_executor_github_search_failure_and_ambiguity_are_mocked(tmp: Pat
         derive_executor._json_request = original
 
 
+def test_derive_executor_uses_context_to_disambiguate_same_name_repository() -> None:
+    import base64
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import derive_executor
+
+    deployment = {
+        "name": "openship",
+        "full_name": "oblien/openship",
+        "description": "Self-hosted deployment platform",
+        "stargazers_count": 8357,
+        "owner": {"login": "oblien"},
+        "html_url": "https://github.com/oblien/openship",
+    }
+    fulfillment = {
+        "name": "openship",
+        "full_name": "openshiporg/openship",
+        "description": "Multi-channel commerce fulfillment at scale",
+        "stargazers_count": 1516,
+        "owner": {"login": "openshiporg"},
+        "html_url": "https://github.com/openshiporg/openship",
+    }
+
+    def fake_request(url: str, *, timeout: int = 20):
+        if "search/repositories" in url:
+            return {"items": [deployment, fulfillment]}
+        if url.endswith("/readme"):
+            text = "Self-hosted deployment platform" if "/oblien/" in url else "Commerce fulfillment service"
+            return {"content": base64.b64encode(text.encode()).decode()}
+        return deployment if "/oblien/" in url else fulfillment
+
+    original = derive_executor._json_request
+    derive_executor._json_request = fake_request
+    try:
+        target = derive_executor.resolve_github_target({
+            "name": "Openship",
+            "searchQuery": "Openship self-hosted deployment platform",
+            "reason": "视频重点介绍这个开源自托管部署平台的安装和使用。",
+            "evidence": ["画面完整展示平台功能和部署配置"],
+        })
+    finally:
+        derive_executor._json_request = original
+
+    assert target.url == "https://github.com/oblien/openship"
+
+
 def test_vault_write_schema(tmp: Path) -> None:
     import sys
 
@@ -1173,7 +1220,7 @@ def test_vault_write_includes_derived_tasks_and_record(tmp: Path) -> None:
             "reason": "父视频用它解释 Agent Harness 状态图。",
             "evidence": ["时间码 03:20 出现仓库名"],
             "relation_type": "implements",
-            "intended_asset_family": "github_project",
+            "intended_asset_family": "knowledge_asset",
             "lineage_depth": 1,
             "dedupe": {"status": "new", "matched_asset": ""},
             "downgrade_flags": ["requires_confirmation"],
@@ -1442,7 +1489,7 @@ def test_summary_skips_markdown_section_headings() -> None:
     from ingest import _summary_from_text
 
     text = """
-## 一、全片一句话概括（≤ 40 字）
+## 简洁概括
 博主分享Codex操控剪映的高效方法，解答观众疑问。
 
 ## 二、结构拆解
@@ -4929,6 +4976,7 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
 
     child = Path(summary["vault_path"])
     assert child.exists()
+    assert child.parent == vault / "知识资产"
     child_text = child.read_text(encoding="utf-8")
     parent_text = parent.read_text(encoding="utf-8")
     child_link = f"[[{child.stem}|LangGraph 项目]]"
@@ -4944,6 +4992,8 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
     assert '"repo"' not in child_text
     assert '"readme"' not in child_text
     assert "github_managed: true" in child_text
+    assert "asset_family: knowledge_asset" in child_text
+    assert "derived-asset" not in child_text
     assert child_text.count("## 简洁概括") == 1
     assert child_text.count("## 完整内容整理") == 1
     assert child_text.count("## AI 分析") == 1
@@ -5413,6 +5463,7 @@ def main() -> int:
         test_knowledge_prompts_do_not_force_github_manual_confirmation()
         test_derive_strategy_keeps_four_primary_projects_and_suppresses_incidental(tmp)
         test_derive_executor_github_search_failure_and_ambiguity_are_mocked(tmp)
+        test_derive_executor_uses_context_to_disambiguate_same_name_repository()
         test_derive_strategy_ignores_candidates_json_outside_derived_section(tmp)
         test_normalize_ingest_intent_rejects_removed_viral_intent()
         test_vault_write_schema(tmp)

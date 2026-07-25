@@ -31,10 +31,7 @@ vault/
 ├── raw/                      ← 原始抓取物（图文图片、网页HTML、GitHub README）
 │   ├── images/  web/  github/
 ├── 知识资产/                  ← agent 产出的结构化笔记（正式产出区）
-│   ├── *.md                  ← 普通知识资产直接存放于此
-│   ├── GitHub项目/
-│   ├── 网页剪藏/
-│   └── 代码模块/
+│   └── *.md                  ← 所有正式知识资产直接存放于此
 ├── 系统记录/                  ← 可选的人工维护区；普通入库不会夹带写入规则或候选文件
 ├── .obsidian/                ← 【红线】agent 严禁读取或修改此目录
 └── .git/                     ← 可选；存在时也不由入库工具自动操作
@@ -65,10 +62,8 @@ vault/
 
 | asset_family 值 | 写入目录 | 用途 |
 |---|---|---|
-| `knowledge_asset` | `知识资产/` | 知识、工具、项目、方法、步骤、风险、派生线索 |
-| `github_project` | `知识资产/GitHub项目/` | GitHub 仓库的中文化评估：功能、用法、风险 |
-| `code_module` | `知识资产/代码模块/` | 代码模块的能力说明书、接口契约、复刻步骤 |
-| `idea_asset` | `知识资产/` | 用户灵感、问题、假设、方案草稿 |
+| `knowledge_asset` | `知识资产/` | 当前所有正式资产；内容可以是知识、工具、项目、方法、步骤或风险 |
+| `idea_asset` | `知识资产/` | 兼容字段；用户灵感、问题、假设、方案草稿 |
 
 ### C. 来源模板：`type`
 
@@ -82,9 +77,9 @@ vault/
 | `web_clip` | `templates/web_clip.md` | 网页/文章输入生成的资产 |
 | `code_module` | `templates/code_module.md` | 代码模块输入生成的资产 |
 
-> 目录按 `asset_family` 分区；来源信息写入 frontmatter。缺失必备章节视为不完整资产。
+> 当前正式入库统一使用 `asset_family: knowledge_asset` 并写入 `知识资产/`。`type`、`source_media`、来源字段和关系字段负责保留来源与形成方式。缺失必备章节视为不完整资产。
 
-### D. 派生任务候选与派生资产
+### D. 派生任务候选与新资产
 
 > 以下执行规则描述当前已实现行为，不代表可以据此扩展新的派生类型。
 
@@ -92,15 +87,15 @@ vault/
 
 - 不参与 `asset_family` / `type` / `source_media` 分类。
 - 不进入 `index.md`。
-- 不写入 `知识资产/`，直到后续被确认并真正执行为 GitHub 项目、网页剪藏等资产。
+- 不写入 `知识资产/`，直到后续被确认并真正执行为新知识资产。
 - 完整候选记录、评分和调试数据写入 runtime `run-artifacts/`，不作为普通入库的额外 vault 文件。
 - 父资产正文只展示可读的派生状态，frontmatter 不保存候选对象或候选记录路径。
 
 完整评分、证据、去重状态、执行建议、验收标准、父资产追溯信息必须留在运行审计，不得塞进资产 frontmatter。
 
-高置信、低风险、可解析的 GitHub 项目候选可以自动进入 `derived_ingest` 派生执行队列。`official_doc` 和 `web_research` 只有在目标明确、证据强、父资产强依赖时才进入可见候选；普通补充研究只保留在审计记录。派生工具执行完成后才生成正式资产，并回写真实存在的 Obsidian wikilink：
+高置信、低风险、可解析的 GitHub 项目候选可以自动进入 `derived_ingest` 派生执行队列。`official_doc` 和 `web_research` 只有在目标明确、证据强、父资产强依赖时才进入可见候选；普通补充研究只保留在审计记录。派生工具执行完成后才生成与其他资产结构一致的正式资产，并回写真实存在的 Obsidian wikilink：
 
-- `github_project` -> `type: github_project` / `asset_family: github_project` / `source_media: github`
+- `github_project` -> `type: github_project` / `asset_family: knowledge_asset` / `source_media: github`
 - `official_doc` / `web_research` -> `type: web_clip` / `asset_family: knowledge_asset` / `source_media: webpage`，并写 `derived_kind`
 - 父资产 `related` 追加子资产链接；子资产 `derived_from` 和 `related` 回链父资产
 - 候选阶段禁止写未来 `[[wikilink]]`，避免死链
@@ -138,7 +133,7 @@ related: []                 # 关联的 [[笔记名]] 列表
 |------|------|------|
 | `id` | 是 | `{YYYYMMDD}-{type}-{序号}`，全局唯一 |
 | `type` | 是 | 来源模板类型：`video_analysis` / `image_post_analysis` / `github_project` / `web_clip` / `code_module` |
-| `asset_family` | 是 | `knowledge_asset` / `github_project` / `code_module` / `idea_asset` |
+| `asset_family` | 是 | 当前正式入库统一为 `knowledge_asset`；`idea_asset` 仅作兼容保留 |
 | `source_media` | 是 | `douyin_video` / `douyin_image_post` / `webpage` / `github` / `manual` / `other` |
 | `ingest_intent` | 是 | `knowledge_ingest` / `manual` / `derived_ingest` |
 | `title` | 是 | ≤60字，中文优先 |
@@ -167,7 +162,7 @@ related: []                 # 关联的 [[笔记名]] 列表
 
 **平台类：** `douyin` `bilibili` `youtube` `github` `webpage` `zhihu` `weixin` `xiaohongshu` `hackernews` `arxiv` `medium` `substack` `twitter`
 
-**领域类：** `ai-agent` `video-analysis` `image-analysis` `code-generation` `knowledge-management` `web-scraping` `api-design` `prompt-engineering` `llm` `rag` `mcp` `tool-use` `browser-automation` `derived-asset` `official-doc` `web-research` `project`
+**领域类：** `ai-agent` `video-analysis` `image-analysis` `code-generation` `knowledge-management` `web-scraping` `api-design` `prompt-engineering` `llm` `rag` `mcp` `tool-use` `browser-automation` `official-doc` `web-research`
 
 **类型类：** `knowledge-asset` `tutorial` `reference` `case-study` `tool` `library` `framework` `opinion` `news` `paper` `sop`
 
@@ -201,12 +196,10 @@ related: []                 # 关联的 [[笔记名]] 列表
 
 ## 知识入库
 - [[20260617-douyin-video-download|抖音视频下载]] — Cookie鉴权链路分析 `#douyin` `#knowledge-asset`
-
-## GitHub项目 / 网页剪藏 / 代码模块
 - [[20260616-openai-agents-sdk|OpenAI Agents SDK]] — 官方Agent SDK评估 `#ai-agent` `#library`
 ```
 
-**更新规则：** 按资产用途分组，组内倒序。每条 `[[文件名|标题]] — 摘要 \`#tag\``。资产标记 `deprecated`/`archived` 时移入「已归档」分组。顶部资产总数只统计索引中存在、目标 Markdown 真实存在、且具有有效资产 frontmatter 的非归档资产；孤立文件和断链不得计数。
+**更新规则：** 所有活跃资产统一列入「知识入库」，组内倒序。每条 `[[文件名|标题]] — 摘要 \`#tag\``。来源和形成方式不另建索引栏目。资产标记 `deprecated`/`archived` 时移入「已归档」分组。顶部资产总数只统计索引中存在、目标 Markdown 真实存在、且具有有效资产 frontmatter 的非归档资产；孤立文件和断链不得计数。
 
 ---
 

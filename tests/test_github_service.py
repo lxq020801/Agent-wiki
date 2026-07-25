@@ -601,6 +601,7 @@ class GitHubServiceTests(unittest.TestCase):
             service, _store, vault = self.make_service(root, api=api)
             first = service.ingest_repository({"id": 101, "fullName": "openai/example"})
             self.assertEqual(first["state"], "created")
+            self.assertEqual(Path(first["assetPath"]).parent, Path("知识资产"))
             self.assertFalse((vault / ".git").exists())
             asset = vault / first["assetPath"]
             original = asset.read_text(encoding="utf-8")
@@ -615,7 +616,7 @@ class GitHubServiceTests(unittest.TestCase):
             self.assertTrue(duplicate["deduplicated"])
             self.assertTrue(duplicate["refreshAvailable"])
             self.assertEqual(asset.read_text(encoding="utf-8"), original)
-            self.assertEqual(len(list((vault / "知识资产" / "GitHub项目").glob("*.md"))), 1)
+            self.assertEqual(len(list((vault / "知识资产").glob("*.md"))), 1)
 
             check = service.check_refresh({"id": 101, "fullName": "openai/renamed"})
             self.assertEqual(check["state"], "confirmation_required")
@@ -674,7 +675,7 @@ class GitHubServiceTests(unittest.TestCase):
             self.assertNotEqual(first_path, second_path)
             self.assertEqual(first_path.read_text(encoding="utf-8"), first_text)
             self.assertIn('repository_id: 202', second_path.read_text(encoding="utf-8"))
-            self.assertEqual(len(list((vault / "知识资产" / "GitHub项目").glob("*.md"))), 2)
+            self.assertEqual(len(list((vault / "知识资产").glob("*.md"))), 2)
 
     def test_concurrent_ingest_creates_one_asset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -685,7 +686,7 @@ class GitHubServiceTests(unittest.TestCase):
                     range(2),
                 ))
             self.assertEqual({item["state"] for item in results}, {"created", "existing"})
-            self.assertEqual(len(list((vault / "知识资产" / "GitHub项目").glob("*.md"))), 1)
+            self.assertEqual(len(list((vault / "知识资产").glob("*.md"))), 1)
             self.assertFalse((vault / ".git").exists())
 
     def test_core_and_github_concurrent_writes_keep_both_index_entries(self) -> None:
