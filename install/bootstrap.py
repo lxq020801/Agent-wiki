@@ -132,17 +132,27 @@ def _find_python() -> Optional[str]:
 
 def _find_python_with_module(module: str) -> Optional[str]:
     seen: set[str] = set()
-    for cand in ["python3.13", "python3.12", "python3.11", sys.executable, "python3"]:
-        exe = cand if os.sep in cand else shutil.which(cand)
+    for cand in [
+        douyin_venv_python(),
+        "python3.13",
+        "python3.12",
+        "python3.11",
+        sys.executable,
+        "python3",
+    ]:
+        if not cand:
+            continue
+        raw = os.fspath(cand)
+        exe = raw if os.sep in raw else shutil.which(raw)
         if not exe:
             continue
-        resolved = str(Path(exe).resolve())
-        if resolved in seen:
+        execution_path = os.path.abspath(os.path.expanduser(exe))
+        if execution_path in seen:
             continue
-        seen.add(resolved)
-        result = _run([resolved, "-c", f"import {module}"])
+        seen.add(execution_path)
+        result = _run([execution_path, "-c", f"import {module}"])
         if result.returncode == 0:
-            return resolved
+            return execution_path
     return None
 
 

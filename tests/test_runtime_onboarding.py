@@ -219,6 +219,28 @@ class AutostartTests(unittest.TestCase):
 
 
 class UnifiedCliTests(unittest.TestCase):
+    def test_module_probe_preserves_the_isolated_venv_execution_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            venv = Path(directory) / "venv"
+            venv_python = venv / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.symlink_to(Path(sys.executable))
+            calls: list[list[str]] = []
+
+            def fake_run(command, **_kwargs):
+                calls.append(list(command))
+                code = 0 if command[0] == str(venv_python) else 1
+                return subprocess.CompletedProcess(command, code, "", "")
+
+            with (
+                mock.patch.object(bootstrap_module, "DOUYIN_VENV", venv),
+                mock.patch.object(bootstrap_module, "_run", side_effect=fake_run),
+            ):
+                selected = bootstrap_module._find_python_with_module("websockets")
+
+            self.assertEqual(selected, str(venv_python))
+            self.assertEqual(calls[0][0], str(venv_python))
+
     def test_public_runtime_docs_use_root_cli_and_cover_lifecycle(self) -> None:
         paths = (
             ROOT / "README.md",

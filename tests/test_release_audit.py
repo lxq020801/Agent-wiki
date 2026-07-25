@@ -111,7 +111,7 @@ class ReleaseAuditTests(unittest.TestCase):
     def test_public_version_surfaces_must_match_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            init_version_repo(root, "0.4.1")
+            init_version_repo(root, "0.4.2")
             (root / "README.md").write_text("当前版本为 **v9.9.9**\n", encoding="utf-8")
             (root / "server").mkdir()
             (root / "server" / "github_service.py").write_text(
