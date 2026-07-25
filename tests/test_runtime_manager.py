@@ -28,6 +28,7 @@ from server.runtime_manager import (  # noqa: E402
     ServiceController,
     ServiceState,
     cache_report,
+    extension_copy_check,
     find_python311,
     main,
     missing_python_modules,
@@ -78,6 +79,26 @@ class RuntimeManagerTests(unittest.TestCase):
         }
         defaults.update(overrides)
         return ServiceController(self.project, self.runtime, **defaults)
+
+    def test_extension_copy_ignores_metadata_and_rejects_symlinks(self) -> None:
+        source = self.project / "chrome-extension"
+        destination = self.runtime / "extension"
+        source.mkdir(parents=True)
+        destination.mkdir(parents=True)
+        for root in (source, destination):
+            (root / "manifest.json").write_text('{"version":"0.4.0"}\n', encoding="utf-8")
+        (source / ".DS_Store").write_bytes(b"finder metadata")
+
+        check = extension_copy_check(self.project, self.runtime)
+        self.assertEqual(check.status, "PASS")
+
+        try:
+            (source / "linked-manifest.json").symlink_to(source / "manifest.json")
+        except OSError as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+        check = extension_copy_check(self.project, self.runtime)
+        self.assertEqual(check.status, "WARN")
+        self.assertIn("symlinks", check.message)
 
     def state(self, controller: ServiceController, *, pid: int = 43210) -> ServiceState:
         return ServiceState(

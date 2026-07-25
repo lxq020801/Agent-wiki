@@ -15,15 +15,15 @@
 
 ```bash
 python3.11 scripts/release_audit.py
-python3.11 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py server/runtime_manager.py server/service_entry.py server/launcher.py install/bootstrap.py scripts/release_audit.py
-python3.11 tests/test_runtime_manager.py
+python3.11 -m compileall -q install server scripts deps/douyin/scripts
 python3.11 tests/test_p0_static.py
-python3.11 tests/test_douyin_image_post_static.py
-python3.11 tests/test_runtime_version_protocol.py
-python3.11 tests/test_ci_integration.py
-python3.11 tests/test_release_audit.py
+python3.11 -m unittest discover -s tests -p 'test_*.py'
+node tests/test_douyin_current_video_title.js
 node tests/test_extension_runtime_version.js
 node tests/test_extension_contract.js
+node tests/test_first_run_onboarding.js
+node tests/test_github_extension_contract.js
+node tests/test_popup_ui_contract.js
 node --check chrome-extension/background.js
 node --check chrome-extension/runtime-version.js
 node --check chrome-extension/popup/popup.js

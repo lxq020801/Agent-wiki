@@ -27,7 +27,7 @@
 | `PyYAML` | `>=6.0` | MIT | vendor 配置读取 |
 | `pycryptodomex` | `>=3.19` | BSD / Public Domain | PyPI 元数据包含两类声明 |
 | `pydantic` | `>=2.0` | MIT | vendor 数据模型 |
-| `gmssl` | `>=3.2` | 需人工确认 | PyPI 元数据写 BSD，链接仓库当前许可证写 MIT |
+| `gmssl` | `>=3.2` | BSD（发布包元数据） | 已核对当前安装的 3.2.2：PyPI、wheel 元数据和项目说明均声明 BSD；项目主页现重定向到采用 MIT 的后续仓库，因此升级时必须重新复核 |
 | `browser-cookie3` | `>=0.19` | LGPL-3.0 | vendor import 链路 |
 | `qrcode` | `>=7.4` | BSD；含 Other/Proprietary classifier | 发布捆绑产物前复核实际包内容 |
 | `rich` | `>=13.0` | MIT | vendor 日志 |

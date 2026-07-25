@@ -204,6 +204,13 @@ class ReleaseAuditTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn("python scripts/release_audit.py --history", workflow)
 
+    def test_ci_runs_complete_python_and_extension_suites(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("python -m unittest discover -s tests -p 'test_*.py'", workflow)
+        for script in sorted((ROOT / "tests").glob("*.js")):
+            self.assertIn(f"node tests/{script.name}", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

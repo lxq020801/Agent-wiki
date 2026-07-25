@@ -15,15 +15,15 @@
 - [ ] 运行 `python3.11 scripts/release_audit.py --history`；报告中不复制疑似秘密正文。
 - [ ] 确认 `~/.agent-wiki/`、真实 vault、Cookie、API Key、日志、缓存和本地配置不在 Git 跟踪列表中。
 - [ ] 对实际解析出的 Python 直接/传递依赖重新生成清单并复核许可证。
-- [ ] 人工处理 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 中标记为“需人工确认”的许可元数据。
+- [ ] 复核 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 中与当前实际安装版本有关的许可说明；依赖升级后重新核对。
 - [ ] vendor commit、复制范围、本地修改标记和 Apache-2.0 归属说明保持一致。
 - [ ] GitHub Private vulnerability reporting 可用；若不可用，确认 `SECURITY.md` 的脱敏报告兜底仍适用。
 
 ## 验证
 
-- [ ] 运行 `python3.11 -m py_compile deps/douyin/scripts/analyzer.py deps/douyin/scripts/config_loader.py deps/douyin/scripts/ingest.py server/websocket_server.py server/runtime_manager.py server/service_entry.py server/launcher.py install/bootstrap.py scripts/release_audit.py`。
-- [ ] 运行 P0、图文、runtime manager、runtime version protocol、CI integration 和 release audit 六组 Python 测试。
-- [ ] 运行 `node tests/test_extension_runtime_version.js` 和 `node tests/test_extension_contract.js`。
+- [ ] 运行 `python3.11 -m compileall -q install server scripts deps/douyin/scripts`。
+- [ ] 运行 `python3.11 tests/test_p0_static.py` 与 `python3.11 -m unittest discover -s tests -p 'test_*.py'`。
+- [ ] 运行 `tests/` 下全部 JavaScript 测试；测试清单必须与 CI 一致。
 - [ ] 对 background、runtime-version、popup 和 content 四个扩展脚本运行 `node --check`。
 
 ## 发布

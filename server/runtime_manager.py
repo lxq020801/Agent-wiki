@@ -900,10 +900,20 @@ def _tree_manifest(root: Path) -> tuple[dict[str, str], int]:
         return manifest, errors
     for current, dirs, files in os.walk(root, followlinks=False):
         base = Path(current)
-        dirs[:] = [name for name in dirs if name not in EXTENSION_IGNORES and not _path_is_symlink(base / name)]
+        safe_dirs = []
+        for name in dirs:
+            if name in EXTENSION_IGNORES:
+                continue
+            if _path_is_symlink(base / name):
+                errors += 1
+                continue
+            safe_dirs.append(name)
+        dirs[:] = safe_dirs
         for name in files:
             path = base / name
-            if name in EXTENSION_IGNORES or _path_is_symlink(path):
+            if name in EXTENSION_IGNORES:
+                continue
+            if _path_is_symlink(path):
                 errors += 1
                 continue
             try:

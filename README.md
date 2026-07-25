@@ -199,8 +199,10 @@ Agent-wiki 是本地优先产品，但不是完全离线产品。使用前应理
 ```bash
 python3.11 scripts/release_audit.py
 python3.11 -m unittest discover -s tests -p 'test_*.py'
+python3.11 tests/test_p0_static.py
 node tests/test_extension_runtime_version.js
 node tests/test_extension_contract.js
+node tests/test_first_run_onboarding.js
 node tests/test_github_extension_contract.js
 node tests/test_douyin_current_video_title.js
 node tests/test_popup_ui_contract.js
