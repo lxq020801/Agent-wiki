@@ -430,7 +430,7 @@ class GitHubProtocolTests(unittest.TestCase):
                 "type": "handshake",
                 "client": "agent-wiki-extension",
                 "product": "agent-wiki",
-                "version": "0.4.4",
+                "version": "0.4.5",
                 "protocolVersion": 1,
             },
             {"type": "status_request"},

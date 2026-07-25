@@ -2147,7 +2147,13 @@ def test_repack_analysis_plan_merges_same_fps_segments() -> None:
         assert float(item["end_sec"]) - float(item["start_sec"]) <= 600.0 + 1e-6
     assert new_plan[0]["overlap_sec"] == 0.0
     assert all(c["recommended_fps"] == 2.0 for c in new_chunks)
-    assert "第1段" in new_chunks[0]["lite_brief"] and "第6段" in new_chunks[0]["lite_brief"]
+    assert "第1段" in new_chunks[0]["lite_brief"] and "第3段" in new_chunks[0]["lite_brief"]
+    assert "第6段" not in new_chunks[0]["lite_brief"]
+    assert all(
+        (chunk["start_sec"], chunk["end_sec"], chunk["overlap_sec"])
+        == (item["start_sec"], item["end_sec"], item["overlap_sec"])
+        for item, chunk in zip(new_plan, new_chunks)
+    )
 
     # 相邻不同 fps 不合并；5fps 段按 250 秒上限切
     mixed = {
@@ -2160,11 +2166,16 @@ def test_repack_analysis_plan_merges_same_fps_segments() -> None:
     plan3 = [dict(item) for item in plan[:3]]
     new_plan3, new_chunks3, changed3 = analyzer._repack_analysis_plan(plan3, mixed)
     assert changed3 is True
+    assert [item["part_index"] for item in new_plan3] == [1, 2, 3]
+    assert [item["part_index"] for item in new_chunks3] == [1, 2, 3]
     fps_by_part = {c["part_index"]: c["recommended_fps"] for c in new_chunks3}
     assert sorted(fps_by_part.values()) == [2.0, 5.0, 5.0]
     for item in new_plan3:
         fps = fps_by_part[item["part_index"]]
         assert (float(item["end_sec"]) - float(item["start_sec"])) * fps <= 1250 + 1e-6
+    assert new_chunks3[0]["lite_brief"] == "a b"
+    assert new_chunks3[1]["lite_brief"] == "b"
+    assert new_chunks3[2]["lite_brief"] == "c"
 
     # 无变化时原样返回，不触发重切
     single = [{"part_index": 1, "start_sec": 0.0, "end_sec": 200.0, "overlap_sec": 0.0}]
@@ -5501,6 +5512,7 @@ def main() -> int:
         test_prepare_long_video_strategy_repairs_json_with_strategy_model(tmp)
         test_prepare_long_video_strategy_chunks_unsafe_full_overview(tmp)
         test_strategy_log_redacts_sensitive_values(tmp)
+        test_repack_analysis_plan_merges_same_fps_segments()
         test_chunk_analysis_uses_strategy_fps_and_context(tmp)
         test_chunk_analysis_retries_transient_stream_failure(tmp)
         test_chunk_analysis_reuses_existing_chunk_artifact_on_rerun(tmp)

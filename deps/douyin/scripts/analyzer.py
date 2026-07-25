@@ -841,35 +841,48 @@ def _repack_analysis_plan(
         seg_end = float(plan_items[-1]["end_sec"])
         max_len = min(_FRAMES_SAFE_TARGET / fps, _ANALYSIS_CHUNK_MAX_LEN_SEC)
         stride = max_len - _CHUNK_OVERLAP_SEC
-        brief = " ".join(
-            text for text in (
-                str(item.get("lite_brief") or "").strip() for item in strategy_items
-            ) if text
-        )
-        confidences = [
-            float(item["confidence"]) for item in strategy_items
-            if item.get("confidence") is not None
-        ]
-        group_strategy = {
-            **dict(strategy_items[0]),
-            "recommended_fps": fps,
-            "lite_brief": brief,
-            "confidence": min(confidences) if confidences else None,
-        }
         start = seg_start
         while start < seg_end - 1e-6:
             end = min(seg_end, start + max_len)
-            new_plan.append({
+            overlap = 0.0 if part == 1 else _CHUNK_OVERLAP_SEC
+            new_plan_item = {
                 "part_index": part,
                 "start_sec": round(start, 3),
                 "end_sec": round(end, 3),
-                "overlap_sec": 0.0 if part == 1 else _CHUNK_OVERLAP_SEC,
+                "overlap_sec": overlap,
+            }
+            relevant = [
+                strategy_item
+                for plan_item, strategy_item in zip(plan_items, strategy_items)
+                if float(plan_item["start_sec"]) < end and float(plan_item["end_sec"]) > start
+            ] or strategy_items
+            briefs = list(dict.fromkeys(
+                text for text in (
+                    str(item.get("lite_brief") or "").strip() for item in relevant
+                ) if text
+            ))
+            confidences = [
+                float(item["confidence"]) for item in relevant
+                if item.get("confidence") is not None
+            ]
+            semantic_fps_values = [
+                float(item["semantic_strategy_fps"])
+                for item in relevant
+                if item.get("semantic_strategy_fps") is not None
+            ]
+            new_plan.append(new_plan_item)
+            new_chunks.append({
+                **dict(relevant[0]),
+                **new_plan_item,
+                "recommended_fps": fps,
+                "semantic_strategy_fps": max(semantic_fps_values) if semantic_fps_values else None,
+                "lite_brief": " ".join(briefs),
+                "confidence": min(confidences) if confidences else None,
             })
-            new_chunks.append({**group_strategy, "part_index": part})
+            part += 1
             if end >= seg_end - 1e-6:
                 break
             start += stride
-            part += 1
 
     changed = not (
         len(new_plan) == len(chunk_plan)
