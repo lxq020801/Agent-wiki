@@ -1765,7 +1765,7 @@ function derivedTone(item) {
   if (status === 'failed') return 'failed';
   if (status === 'running' || status === 'queued' || status === 'auto_ready') return 'running';
   if (status === 'needs_target') return 'needs-target';
-  if (status === 'ignored') return 'muted';
+  if (status === 'ignored' || status === 'cancelled') return 'muted';
   return 'candidate';
 }
 
@@ -1779,6 +1779,7 @@ function derivedStatusLabel(item) {
     running: '执行中',
     done: '已完成',
     failed: '失败',
+    cancelled: '已取消',
     ignored: '已忽略',
     existing_related: '已有资产'
   }[status] || status || '候选';

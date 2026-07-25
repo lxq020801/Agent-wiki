@@ -138,6 +138,7 @@ assert.doesNotMatch(statusTextRule, /text-overflow|white-space:\s*nowrap|overflo
 assert.match(css, /body\s*\{[\s\S]*?border:\s*0;[\s\S]*?border-radius:\s*0;/);
 assert.match(css, /\.view\s*\{[\s\S]*?overflow-y:\s*auto/);
 assert.match(css, /\.task-head\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto/);
+assert.match(js, /cancelled:\s*'已取消'/, 'cancelled derived tasks must have a Chinese status label');
 assert.match(css, /\.task-head strong\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
 assert.match(css, /button\.primary,[\s\S]*?button\.secondary\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
 const apiKeyLinkRule = css.match(/\.api-key-link\s*\{([^}]*)\}/)?.[1] || '';

@@ -351,22 +351,57 @@ def _derived_json_section(text: str) -> str:
     return text[start:]
 
 
+_DERIVED_COLLECTION_KEYS = ("candidates", "derived_candidates", "derived_tasks")
+
+
+def _candidate_collection(obj: dict[str, Any]) -> list[Any] | None:
+    for key in _DERIVED_COLLECTION_KEYS:
+        value = obj.get(key)
+        if isinstance(value, list):
+            return value
+    return None
+
+
+def _looks_like_derived_candidate(raw: dict[str, Any]) -> bool:
+    """Require enough of the prompt schema before accepting a heading-less fallback."""
+    name = str(raw.get("name") or raw.get("title") or raw.get("candidate_name") or "").strip()
+    target_type = str(raw.get("target_type") or raw.get("targetType") or "").strip()
+    if not name or target_type not in ALLOWED_TARGET_TYPES:
+        return False
+    evidence_keys = {
+        "subject_role", "subjectRole", "reason", "evidence", "confidence",
+        "requires_confirmation", "requiresConfirmation", "mentioned_context",
+        "mentionedContext", "parent_context", "parentContext",
+        "acceptance_criteria", "acceptanceCriteria",
+    }
+    return len(evidence_keys.intersection(raw)) >= 3
+
+
+def strip_derived_payloads(text: str) -> str:
+    """Remove model-only derivation JSON fences from user-facing source content."""
+    def replace(match: re.Match[str]) -> str:
+        block = match.group(0)
+        for obj in _extract_json_objects(block):
+            if _candidate_collection(obj) is not None:
+                return ""
+        return block
+
+    cleaned = re.sub(r"```(?:json)?\s*.*?```", replace, str(text or ""), flags=re.S | re.I)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
 def _candidates_from_json(text: str) -> list[dict[str, Any]]:
     section = _derived_json_section(text)
-    if not section:
-        return []
-    for obj in _extract_json_objects(section):
-        raw = obj.get("candidates")
-        if isinstance(raw, list):
-            items = [item for item in raw if isinstance(item, dict) and not _is_placeholder_candidate(item)]
-            if items:
-                return items
+    search_text = section or text
+    for obj in _extract_json_objects(search_text):
+        raw = _candidate_collection(obj)
+        if raw is None:
             continue
-        raw = obj.get("derived_candidates") or obj.get("derived_tasks")
-        if isinstance(raw, list):
-            items = [item for item in raw if isinstance(item, dict) and not _is_placeholder_candidate(item)]
-            if items:
-                return items
+        items = [item for item in raw if isinstance(item, dict) and not _is_placeholder_candidate(item)]
+        if not section:
+            items = [item for item in items if _looks_like_derived_candidate(item)]
+        if items:
+            return items
     return []
 
 

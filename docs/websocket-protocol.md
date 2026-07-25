@@ -248,7 +248,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 
 允许动作：
 
-- `confirm`：确认执行派生。只有 `candidate` / `auto_ready` / `needs_target` 且父资产已写入时可执行。
+- `confirm`：确认执行派生。`candidate` / `auto_ready` 可首次执行；`needs_target` 补充明确 URL 后可继续；`failed` / `cancelled` 可人工重试。父资产必须已经写入。
 - `ignore`：忽略候选。忽略动作不校验输入框 URL，也不会创建子任务；结果写入 `~/.agent-wiki/derived-actions/{parent_task_id}.json`，后续自动派生不会再次入队。
 
 `official_doc` / `web_research` 或其他缺目标候选必须提供公开 HTTPS URL。URL 不能包含账号密码、localhost/private IP，也会删除 token/key/secret/signature 等敏感 query。
@@ -465,9 +465,11 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 
 完整评分、证据、验收标准、去重信息、父资产追溯信息和 prompt/source material 不通过 WebSocket 全量返回；它们写入 runtime 的 `run-artifacts/{task_id}/05-derive/` / `run-artifacts/{child_task_id}/05-derive-executor/`，不作为普通入库的额外 vault 文件。
 
+派生子任务的 `done` / `needs_target` / `failed` / `cancelled` 终态会持久化回父任务、父资产公开投影和 `derived-actions` sidecar；失败原因与子任务 ID 在服务重启后仍可恢复。父 Markdown 的系统状态表同步终态，但只有子资产真实生成后才写入父子链接。
+
 ### `derived_task_action_done` / `derived_task_action_rejected`
 
-派生候选操作的确认或拒绝回包。`confirm` 成功后会返回 `childTaskId`；重复确认已经入队的候选时，服务端返回同一个 `childTaskId`，不会覆盖已存在的子任务状态。
+派生候选操作的确认或拒绝回包。`confirm` 成功后会返回 `childTaskId`；重复确认仍在排队或执行中的候选时，服务端返回同一个 `childTaskId`。终态失败、待补链接或取消后再次确认会创建新的重试子任务，并保留旧子任务记录。
 
 ```json
 {

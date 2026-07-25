@@ -56,7 +56,7 @@ from analyzer import (  # noqa: E402
 from config_loader import Config, ConfigError, load_config  # noqa: E402
 from cost_estimator import estimate_cost_rmb  # noqa: E402
 from derive_strategy import (  # noqa: E402
-    derive_tasks_from_analysis, public_derived_tasks,
+    derive_tasks_from_analysis, public_derived_tasks, strip_derived_payloads,
 )
 from downloader import (  # noqa: E402
     CookieInvalidError, DouyinError, DouyinRateLimitedError,
@@ -229,7 +229,9 @@ def _first_content_line(text: str) -> str:
 
 def _source_sections_from_analysis(text: str, fallback_title: str = "") -> dict[str, str]:
     """Map model Markdown into the three durable source-note sections."""
-    preamble, parsed = _markdown_h2_sections(text)
+    cleaned_text = strip_derived_payloads(text)
+    cleaned_text = re.sub(r"\A(\s*)#\s+[^\n]+\n?", r"\1", cleaned_text, count=1)
+    preamble, parsed = _markdown_h2_sections(cleaned_text)
     concise: list[str] = []
     complete: list[str] = []
     ai_analysis: list[str] = []
@@ -373,6 +375,97 @@ def mark_derived_candidate_executed(
             "AI 分析",
             new_ai_body,
         )
+    elif ai_body:
+        updated_parent = _replace_h2_section(
+            parent_text,
+            {"ai分析"},
+            "AI 分析",
+            ai_body.rstrip() + "\n\n### 派生状态（系统）\n\n" + status_body,
+        )
+    else:
+        updated_parent = _replace_h2_section(
+            parent_text,
+            {"派生状态", "派生任务候选", "派生候选"},
+            "派生状态",
+            status_body,
+        )
+    if updated_parent != parent_text:
+        parent_path.write_text(updated_parent, encoding="utf-8")
+        return [parent_path]
+    return []
+
+
+def mark_derived_candidate_status(
+    parent_path: Path | None,
+    *,
+    candidate_name: str,
+    execution_status: str,
+    candidate_type: str = "",
+    candidate_url: str = "",
+) -> list[Path]:
+    """Persist a non-success child state in the parent's system status table."""
+    if (
+        parent_path is None
+        or not parent_path.exists()
+        or execution_status not in {"queued", "running", "needs_target", "failed", "cancelled"}
+    ):
+        return []
+    parent_text = parent_path.read_text(encoding="utf-8")
+    _preamble, sections = _markdown_h2_sections(parent_text)
+    status_body = ""
+    ai_body = ""
+    status_span: tuple[int, int] | None = None
+    for heading, body in sections:
+        plain = _plain_heading(heading)
+        if plain in {"派生状态", "派生任务候选", "派生候选"}:
+            status_body = body
+            break
+        if plain == "ai分析":
+            ai_body = body
+            match = re.search(r"(?m)^###\s+派生状态(?:（系统）)?\s*$", body)
+            if match:
+                next_h3 = re.search(r"(?m)^###\s+", body[match.end():])
+                end = match.end() + next_h3.start() if next_h3 else len(body)
+                status_span = (match.start(), end)
+                status_body = body[match.end():end].strip()
+    lines = status_body.splitlines()
+    matched = False
+    for index, line in enumerate(lines):
+        if not line.strip().startswith("|"):
+            continue
+        columns = [
+            column.strip()
+            for column in re.split(r"(?<!\\)\|", line.strip().strip("|"))
+        ]
+        if len(columns) < 6:
+            continue
+        display_name = columns[2].replace("\\|", "|")
+        row_url = ""
+        link_match = re.fullmatch(r"\[([^]]+)]\((https?://.+)\)", display_name)
+        if link_match:
+            display_name, row_url = link_match.groups()
+        if display_name != candidate_name:
+            continue
+        if candidate_type and columns[1] != candidate_type:
+            continue
+        if candidate_url and row_url and row_url.rstrip("/") != candidate_url.rstrip("/"):
+            continue
+        columns[4] = execution_status
+        lines[index] = "| " + " | ".join(columns) + " |"
+        matched = True
+        break
+    if not matched:
+        return []
+    status_body = "\n".join(lines).strip()
+    if status_span is not None:
+        start, end = status_span
+        new_ai_body = (
+            ai_body[:start].rstrip()
+            + "\n\n### 派生状态（系统）\n\n"
+            + status_body
+            + ("\n\n" + ai_body[end:].lstrip() if ai_body[end:].strip() else "")
+        )
+        updated_parent = _replace_h2_section(parent_text, {"ai分析"}, "AI 分析", new_ai_body)
     elif ai_body:
         updated_parent = _replace_h2_section(
             parent_text,
@@ -711,6 +804,51 @@ def _source_asset_title(title: str, max_len: int = 42) -> str:
     return _asset_title(cleaned or first_line or "未命名来源", max_len=max_len)
 
 
+def _semantic_title_candidate(value: str, max_len: int = 42) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^#{1,6}\s*", "", text)
+    text = re.sub(r"^[一二三四五六七八九十0-9]+[、.．)）]\s*", "", text)
+    text = re.sub(r"!\[([^]]*)]\([^)]*\)", r"\1", text)
+    text = re.sub(r"\[([^]]+)]\([^)]*\)", r"\1", text)
+    text = re.sub(r"[*_`]+", "", text)
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"(?:\s*#[^#\s]+)+\s*$", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" -—:：|，,。！？!?《》")
+    placeholders = {"ai总结的语义标题", "语义标题", "标题", "在这里填写标题"}
+    if not text or re.sub(r"\s+", "", text).lower() in placeholders:
+        return ""
+    if len(text) <= max_len:
+        return text
+    shortened = text[:max_len].rstrip()
+    if (
+        len(text) > max_len
+        and re.search(r"[A-Za-z0-9]$", shortened)
+        and re.match(r"[A-Za-z0-9]", text[max_len])
+    ):
+        boundary = max(shortened.rfind(" "), shortened.rfind("-"), shortened.rfind("/"))
+        if boundary >= 8:
+            shortened = shortened[:boundary].rstrip()
+    return shortened.rstrip(" -—:：|，,。！？!?")
+
+
+def _analysis_asset_title(text: str, fallback_title: str, concise: str = "", max_len: int = 42) -> str:
+    """Prefer the model's semantic title, then its concise summary, then source text."""
+    h1 = re.search(r"(?m)^#(?!#)\s+(.+?)\s*$", str(text or ""))
+    if h1:
+        title = _semantic_title_candidate(h1.group(1), max_len=max_len)
+        if title:
+            return title
+    if not concise:
+        concise = _source_sections_from_analysis(text, "")["concise"]
+    first_line = _first_content_line(concise)
+    if first_line:
+        sentence = re.split(r"(?<=[。！？!?])\s*", first_line, maxsplit=1)[0]
+        title = _semantic_title_candidate(sentence or first_line, max_len=max_len)
+        if title:
+            return title
+    return _source_asset_title(fallback_title, max_len=max_len)
+
+
 def _source_title_quote(title: str) -> str:
     lines = [line.strip() for line in str(title or "").splitlines() if line.strip()]
     if not lines:
@@ -930,7 +1068,7 @@ def _write_to_vault_locked(
     md_dir.mkdir(parents=True, exist_ok=True)
     date = time.strftime("%Y%m%d")
     date_iso = datetime.now().strftime("%Y-%m-%d")
-    asset_title = _source_asset_title(meta.title)
+    asset_title = _analysis_asset_title(result.text, meta.title, sections["concise"])
     slug = _slug_for_vault(asset_title, meta.aweme_id)
     md_path = md_dir / f"{date}-{slug}.md"
     asset_id = _schema_asset_id(config.vault_path, date, profile["id_kind"])
@@ -1027,7 +1165,7 @@ def _write_image_post_to_vault_locked(
 
     date = time.strftime("%Y%m%d")
     date_iso = datetime.now().strftime("%Y-%m-%d")
-    asset_title = _source_asset_title(meta.title)
+    asset_title = _analysis_asset_title(result.text, meta.title, sections["concise"])
     slug = _slug_for_vault(asset_title, meta.aweme_id)
     raw_dir = config.vault_path / "raw" / "images" / f"{date}-{slug}"
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -1140,7 +1278,7 @@ def _record_asset_generation_projection(
         sections_present={key: bool(value) for key, value in sections.items()},
         section_count=sum(bool(value) for value in sections.values()),
     )
-    title = _source_asset_title(meta.title)
+    title = _analysis_asset_title(analysis_text, meta.title, sections["concise"])
     tags = _tags_for_asset(ingest_intent, source_media, analysis_text)
     date = datetime.now().strftime("%Y-%m-%d")
     filename = f"{date}-{_slug_for_vault(title, meta.aweme_id)}.md"
@@ -1368,13 +1506,14 @@ async def run_task(
         chunk_count=chunk_count,
         audit_artifacts=getattr(result, "audit_artifacts", {}),
     )
-    _record_asset_generation_projection(
+    projection = _record_asset_generation_projection(
         sw,
         analysis_text=result.text,
         meta=meta,
         source_media="douyin_video",
         ingest_intent=ingest_intent,
     )
+    asset_title = projection["title"]
 
     # ── 阶段 3：成本估算 ──
     cost = estimate_cost_rmb(result.model, result.usage)
@@ -1428,7 +1567,7 @@ async def run_task(
     asset = {
         "ingest_intent": ingest_intent,
         "asset_family": profile["asset_family"],
-        "title": meta.title,
+        "title": asset_title,
         "vault_path": str(md_path),
         "git_status": git_status,
         "derived_tasks": public_derived_tasks(derived_decision),
@@ -1439,6 +1578,7 @@ async def run_task(
 
     return {
         "vault_path": asset["vault_path"],
+        "title": asset_title,
         "git_status": asset["git_status"],
         "assets": [asset],
         "video_path": str(video_path),
@@ -1518,13 +1658,14 @@ async def run_image_post_task(
         image_count=result.image_count,
         media_type="image_post",
     )
-    _record_asset_generation_projection(
+    projection = _record_asset_generation_projection(
         sw,
         analysis_text=result.text,
         meta=meta,
         source_media="douyin_image_post",
         ingest_intent=ingest_intent,
     )
+    asset_title = projection["title"]
 
     cost = estimate_cost_rmb(result.model, result.usage)
     sw.update(cost_estimate=cost)
@@ -1575,7 +1716,7 @@ async def run_image_post_task(
     asset = {
         "ingest_intent": ingest_intent,
         "asset_family": profile["asset_family"],
-        "title": meta.title,
+        "title": asset_title,
         "vault_path": str(md_path),
         "git_status": git_status,
         "derived_tasks": public_derived_tasks(derived_decision),
@@ -1585,6 +1726,7 @@ async def run_image_post_task(
 
     return {
         "vault_path": asset["vault_path"],
+        "title": asset_title,
         "git_status": asset["git_status"],
         "assets": [asset],
         "image_paths": [str(path) for path in image_paths],

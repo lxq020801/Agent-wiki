@@ -5152,6 +5152,252 @@ def test_websocket_rejects_removed_viral_intent(tmp: Path) -> None:
     assert reply["reason"] == "invalid_ingest_intent"
 
 
+def test_ai_semantic_title_and_headingless_derived_json_are_preserved_correctly(tmp: Path) -> None:
+    import sys
+
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "semantic-title-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    from derive_strategy import derive_tasks_from_analysis, public_derived_tasks
+    from ingest import _analysis_asset_title, _source_sections_from_analysis
+
+    scores = {
+        "knowledge_value": 5,
+        "parent_dependency": 5,
+        "evidence_strength": 5,
+        "actionability": 5,
+        "freshness_risk": 4,
+        "novelty": 4,
+        "asset_fit": 5,
+        "cost_risk_inverse": 4,
+        "ambiguity_inverse": 4,
+    }
+    analysis = (
+        "# InsForge：开源 AI 后端开发平台\n\n"
+        "## 简洁概括\n"
+        "InsForge 把数据库、鉴权和文件存储整合为面向 AI 应用的后端平台。\n\n"
+        "## 完整内容整理\n"
+        "视频展示了数据库、鉴权和文件存储能力。\n\n"
+        "## AI 分析\n"
+        "从当前来源看，它可能用于快速搭建 AI 应用后端。\n\n"
+        "```json\n"
+        + json.dumps({"candidates": [{
+            "name": "InsForge",
+            "subject_role": "primary",
+            "target_type": "github_project",
+            "search_query": "InsForge GitHub repository",
+            "mentioned_context": "视频重点演示了 InsForge。",
+            "parent_context": "它是视频唯一的主要介绍对象。",
+            "reason": "可形成独立的 GitHub 项目资产。",
+            "evidence": ["画面和口播持续展示 InsForge"],
+            "acceptance_criteria": ["确认官方仓库"],
+            "confidence": 0.9,
+            "requires_confirmation": False,
+            "scores": scores,
+        }]}, ensure_ascii=False)
+        + "\n```"
+    )
+    assert _analysis_asset_title(analysis, "原始作者长文案") == "InsForge：开源 AI 后端开发平台"
+    sections = _source_sections_from_analysis(analysis, "原始作者长文案")
+    assert "candidates" not in sections["ai_analysis"]
+    assert "InsForge GitHub repository" not in "\n".join(sections.values())
+    assert not sections["complete"].startswith("# ")
+
+    decision = derive_tasks_from_analysis(
+        analysis,
+        source_id="insforge-source",
+        source_url="https://v.douyin.com/insforge/",
+        source_media="douyin_video",
+        ingest_intent="knowledge_ingest",
+        vault_path=tmp / "semantic-title-vault",
+        task_id="insforge-task",
+    )
+    public = public_derived_tasks(decision)
+    assert len(public) == 1
+    assert public[0]["name"] == "InsForge"
+    assert public[0]["status"] == "auto_ready"
+
+
+def test_derive_executor_uses_keychain_token_retries_and_serializes(tmp: Path) -> None:
+    import concurrent.futures
+    import sys
+    import threading
+    import urllib.error
+    from contextlib import contextmanager
+
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "derive-github-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    import derive_executor
+
+    original_token_store = derive_executor.MacOSKeychainTokenStore
+    original_token_cache = derive_executor._GITHUB_TOKEN_CACHE
+    original_slot = derive_executor._github_request_slot
+    original_urlopen = derive_executor.urllib.request.urlopen
+    original_sleep = derive_executor.time.sleep
+    requests = []
+    delays = []
+
+    @contextmanager
+    def no_slot():
+        yield
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"ok":true}'
+
+    class FakeTokenStore:
+        def get(self):
+            return "test-keychain-token"
+
+    def fake_urlopen(request, timeout=20):
+        requests.append((request, timeout))
+        if len(requests) < 3:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                403,
+                "rate limited",
+                {"Retry-After": "0", "X-RateLimit-Remaining": "0"},
+                None,
+            )
+        return Response()
+
+    try:
+        derive_executor.MacOSKeychainTokenStore = FakeTokenStore
+        derive_executor._GITHUB_TOKEN_CACHE = derive_executor._GITHUB_TOKEN_UNSET
+        derive_executor._github_request_slot = no_slot
+        derive_executor.urllib.request.urlopen = fake_urlopen
+        derive_executor.time.sleep = delays.append
+        assert derive_executor._json_request("https://api.github.com/user") == {"ok": True}
+    finally:
+        derive_executor.MacOSKeychainTokenStore = original_token_store
+        derive_executor._GITHUB_TOKEN_CACHE = original_token_cache
+        derive_executor._github_request_slot = original_slot
+        derive_executor.urllib.request.urlopen = original_urlopen
+        derive_executor.time.sleep = original_sleep
+
+    assert len(requests) == 3
+    assert len(delays) == 2
+    assert requests[0][0].get_header("Authorization") == f"{'Bearer'} {FakeTokenStore().get()}"
+
+    active = 0
+    peak = 0
+    state_lock = threading.Lock()
+    original_interval = derive_executor.GITHUB_REQUEST_MIN_INTERVAL_SEC
+    derive_executor.GITHUB_REQUEST_MIN_INTERVAL_SEC = 0
+
+    def enter_slot(_index):
+        nonlocal active, peak
+        with derive_executor._github_request_slot():
+            with state_lock:
+                active += 1
+                peak = max(peak, active)
+            original_sleep(0.01)
+            with state_lock:
+                active -= 1
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            list(pool.map(enter_slot, range(3)))
+    finally:
+        derive_executor.GITHUB_REQUEST_MIN_INTERVAL_SEC = original_interval
+    assert peak == 1
+
+
+def test_websocket_persists_derived_child_terminal_states(tmp: Path) -> None:
+    import sys
+
+    runtime = tmp / "derived-terminal-runtime"
+    os.environ["AGENT_WIKI_HOME"] = str(runtime)
+    sys.path.insert(0, str(ROOT / "server"))
+    from websocket_server import LibrarianServer
+
+    parent_path = tmp / "vault" / "知识资产" / "parent.md"
+    parent_path.parent.mkdir(parents=True, exist_ok=True)
+    candidates = [
+        ("dt-needs", "Needs URL", "auto_ready"),
+        ("dt-failed", "Failed Repo", "auto_ready"),
+        ("dt-cancelled", "Cancelled Repo", "auto_ready"),
+        ("dt-done", "Done Repo", "auto_ready"),
+    ]
+    rows = "\n".join(
+        f"| candidate | github_project | {name} | 90 | {status} | 测试候选 |"
+        for _candidate_id, name, status in candidates
+    )
+    parent_path.write_text(
+        "# Parent\n\n## AI 分析\n\n正文\n\n### 派生状态（系统）\n\n"
+        "| 决策 | 类型 | 名称 | 分数 | 状态 | 原因 |\n"
+        "|---|---|---|---:|---|---|\n"
+        + rows
+        + "\n",
+        encoding="utf-8",
+    )
+    public_candidates = [{
+        "id": candidate_id,
+        "name": name,
+        "targetType": "github_project",
+        "decision": "candidate",
+        "status": status,
+    } for candidate_id, name, status in candidates]
+    parent_status = {
+        "id": "parent-terminal",
+        "ok": True,
+        "stage": "done",
+        "vault_path": str(parent_path),
+        "derived_tasks": public_candidates,
+        "assets": [{"vault_path": str(parent_path), "derived_tasks": public_candidates}],
+    }
+    status_dir = runtime / "status"
+    status_dir.mkdir(parents=True)
+    (status_dir / "parent-terminal.json").write_text(
+        json.dumps(parent_status, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    server = LibrarianServer(enable_task_runner=False)
+    outcomes = {
+        "dt-needs": {"ok": False, "stage": "failed", "error_kind": "ambiguous_target", "error": "目标不唯一"},
+        "dt-failed": {"ok": False, "stage": "failed", "error_kind": "github_api_error", "error": "HTTP 500"},
+        "dt-cancelled": {"ok": False, "stage": "cancelled", "error_kind": "cancelled", "error": "用户取消"},
+        "dt-done": {"ok": True, "stage": "done", "vault_path": str(tmp / "child.md")},
+    }
+    for candidate_id, child in outcomes.items():
+        candidate = next(item for item in public_candidates if item["id"] == candidate_id)
+        child_id = f"child-{candidate_id}"
+        server._sync_derived_child_status(
+            {
+                "id": child_id,
+                "parent_task_id": "parent-terminal",
+                "parent_asset_path": str(parent_path),
+                "candidate": candidate,
+            },
+            {"id": child_id, "derived_candidate_id": candidate_id, **child},
+        )
+
+    saved = json.loads((status_dir / "parent-terminal.json").read_text(encoding="utf-8"))
+    saved_states = {item["id"]: item["status"] for item in saved["derived_tasks"]}
+    assert saved_states == {
+        "dt-needs": "needs_target",
+        "dt-failed": "failed",
+        "dt-cancelled": "cancelled",
+        "dt-done": "done",
+    }
+    assert {item["id"]: item["status"] for item in saved["assets"][0]["derived_tasks"]} == saved_states
+    sidecar = json.loads((runtime / "derived-actions" / "parent-terminal.json").read_text(encoding="utf-8"))
+    assert {key: value["status"] for key, value in sidecar["items"].items()} == saved_states
+    parent_text = parent_path.read_text(encoding="utf-8")
+    assert "| needs_target | 测试候选 |" in parent_text
+    assert "| failed | 测试候选 |" in parent_text
+    assert "| cancelled | 测试候选 |" in parent_text
+
+    restarted = LibrarianServer(enable_task_runner=False)
+    merged = restarted._merge_derived_actions("parent-terminal", public_candidates)
+    assert {item["id"]: item["status"] for item in merged} == saved_states
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
@@ -5230,6 +5476,9 @@ def main() -> int:
         test_derived_completion_matches_exact_candidate_identity(tmp)
         test_derive_executor_main_preserves_derived_ingest_status(tmp)
         test_websocket_auto_enqueue_respects_ignored_candidate(tmp)
+        test_ai_semantic_title_and_headingless_derived_json_are_preserved_correctly(tmp)
+        test_derive_executor_uses_keychain_token_retries_and_serializes(tmp)
+        test_websocket_persists_derived_child_terminal_states(tmp)
         test_websocket_rejects_removed_viral_intent(tmp)
     print("P0 static checks passed")
     return 0

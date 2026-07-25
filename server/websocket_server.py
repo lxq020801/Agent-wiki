@@ -1890,7 +1890,7 @@ class LibrarianServer:
     def _write_derived_actions(self, parent_task_id, actions):
         actions["parentTaskId"] = parent_task_id
         actions["updatedAt"] = time.time()
-        _write_json_atomic(self._derived_actions_path(parent_task_id), actions)
+        _write_json_atomic(self._derived_actions_path(parent_task_id), _redact_runtime_value(actions))
 
     def _derived_child_task_id(self, parent_task_id, candidate_id):
         safe = ''.join(ch if ch.isalnum() or ch in '-_' else '-' for ch in str(candidate_id or 'derived'))
@@ -1925,9 +1925,18 @@ class LibrarianServer:
                     if child_status.get("ok") is True:
                         current["status"] = "done"
                         current["candidateStatus"] = "done"
+                    elif child_status.get("stage") == "cancelled":
+                        current["status"] = "cancelled"
+                        current["candidateStatus"] = "cancelled"
                     elif child_status.get("ok") is False:
-                        current["status"] = "failed"
-                        current["candidateStatus"] = "failed"
+                        child_error_kind = str(child_status.get("error_kind") or "")
+                        child_outcome = (
+                            "needs_target"
+                            if child_error_kind in {"ambiguous_target", "needs_target"}
+                            else "failed"
+                        )
+                        current["status"] = child_outcome
+                        current["candidateStatus"] = child_outcome
                         current["error"] = child_status.get("error") or current.get("error") or ""
                     elif child_status:
                         current["status"] = "running" if child_status.get("stage") != "queued" else "queued"
@@ -1946,6 +1955,117 @@ class LibrarianServer:
         item["updatedAt"] = time.time()
         self._write_derived_actions(parent_task_id, actions)
         return item
+
+    def _sync_derived_child_status(self, task, child_status):
+        """Persist a derived child terminal state back to every parent projection."""
+        parent_task_id = str(task.get('parent_task_id') or task.get('parentTaskId') or '').strip()
+        candidate = task.get('candidate') if isinstance(task.get('candidate'), dict) else {}
+        candidate_id = str(
+            child_status.get('derived_candidate_id')
+            or candidate.get('id')
+            or ''
+        ).strip()
+        if not parent_task_id or not candidate_id:
+            return
+        child_stage = str(child_status.get('stage') or '')
+        error_kind = str(child_status.get('error_kind') or '')
+        if child_status.get('ok') is True:
+            outcome = 'done'
+        elif child_stage == 'cancelled':
+            outcome = 'cancelled'
+        elif error_kind in {'ambiguous_target', 'needs_target'}:
+            outcome = 'needs_target'
+        elif child_status.get('ok') is False:
+            outcome = 'failed'
+        else:
+            return
+        child_id = str(child_status.get('id') or task.get('id') or '')
+        error = str(child_status.get('error') or '')[:1000]
+        fields = {
+            'status': outcome,
+            'childStatus': outcome,
+            'childTaskId': child_id,
+            'childStage': child_stage,
+            'childVaultPath': str(child_status.get('vault_path') or ''),
+            'error': error,
+            'errorKind': error_kind,
+            'hint': str(child_status.get('hint') or '')[:1000],
+            'retryable': bool(child_status.get('recoverable')),
+            'finishedAt': child_status.get('finished_at') or time.time(),
+        }
+        self._update_derived_action_item(parent_task_id, candidate_id, **fields)
+
+        parent_status_path = self._task_dirs()['status'] / f'{parent_task_id}.json'
+        parent_status = _json_file(parent_status_path) or {}
+
+        def update_candidates(items):
+            updated = []
+            for raw in items if isinstance(items, list) else []:
+                if not isinstance(raw, dict):
+                    continue
+                item = dict(raw)
+                if str(item.get('id') or '') == candidate_id:
+                    item.update(fields)
+                    item['candidateStatus'] = outcome
+                updated.append(item)
+            return updated
+
+        parent_status['derived_tasks'] = update_candidates(parent_status.get('derived_tasks'))
+        assets = []
+        for raw_asset in parent_status.get('assets') if isinstance(parent_status.get('assets'), list) else []:
+            if not isinstance(raw_asset, dict):
+                continue
+            asset = dict(raw_asset)
+            asset['derived_tasks'] = update_candidates(asset.get('derived_tasks'))
+            assets.append(asset)
+        if assets:
+            parent_status['assets'] = assets
+        parent_status['updated_at'] = time.time()
+        self._write_task_status(parent_task_id, parent_status)
+
+        if outcome != 'done':
+            parent_asset = str(
+                task.get('parent_asset_path')
+                or self._parent_asset_path(parent_status, candidate_id)
+                or ''
+            ).strip()
+            if parent_asset:
+                try:
+                    from ingest import mark_derived_candidate_status
+                    from server.vault_writer import vault_write_transaction
+
+                    parent_path = Path(parent_asset).expanduser()
+                    vault_root = next(
+                        (ancestor.parent for ancestor in parent_path.parents if ancestor.name == '知识资产'),
+                        parent_path.parent,
+                    )
+                    with vault_write_transaction(vault_root):
+                        mark_derived_candidate_status(
+                            parent_path,
+                            candidate_name=str(candidate.get('name') or ''),
+                            execution_status=outcome,
+                            candidate_type=str(candidate.get('targetType') or candidate.get('target_type') or ''),
+                            candidate_url=str(candidate.get('targetUrl') or candidate.get('target_url') or ''),
+                        )
+                except Exception as exc:
+                    log(f"[Server] 父资产派生状态写入失败: {type(exc).__name__}")
+
+        parent_operation_id = str(task.get('parent_id') or task.get('parentId') or '')
+        if parent_operation_id:
+            try:
+                self.audit_store.record_event(
+                    parent_operation_id,
+                    stage='derived_child_terminal',
+                    state='started',
+                    result={
+                        'candidateId': candidate_id,
+                        'childTaskId': child_id,
+                        'childStatus': outcome,
+                    },
+                    related={'tasks': [parent_task_id, child_id]},
+                )
+            except Exception:
+                pass
 
     def _find_derived_candidate(self, parent_status, candidate_id):
         for item in parent_status.get('derived_tasks') or []:
@@ -2035,7 +2155,13 @@ class LibrarianServer:
                 'timestamp': datetime.now().isoformat(),
             }
         existing_action = self._read_derived_actions(parent_task_id).get('items', {}).get(candidate_id)
-        if isinstance(existing_action, dict) and existing_action.get('childTaskId'):
+        existing_action_status = existing_action.get('status') if isinstance(existing_action, dict) else ''
+        terminal_retry_statuses = {'needs_target', 'failed', 'cancelled'}
+        if (
+            isinstance(existing_action, dict)
+            and existing_action.get('childTaskId')
+            and not (action == 'confirm' and existing_action_status in terminal_retry_statuses)
+        ):
             return {
                 'type': 'derived_task_action_done',
                 'requestId': request_id,
@@ -2046,7 +2172,6 @@ class LibrarianServer:
                 'message': '这个派生候选已经进入队列',
                 'timestamp': datetime.now().isoformat(),
             }
-        existing_action_status = existing_action.get('status') if isinstance(existing_action, dict) else ''
         if action == 'confirm' and existing_action_status == 'ignored':
             return {
                 'type': 'derived_task_action_rejected',
@@ -2072,7 +2197,7 @@ class LibrarianServer:
             }
         candidate_status = str(candidate.get('status') or candidate.get('candidateStatus') or '').strip()
         candidate_decision = str(candidate.get('decision') or '').strip()
-        allowed_statuses = {'candidate', 'auto_ready', 'needs_target'}
+        allowed_statuses = {'candidate', 'auto_ready', 'needs_target', 'failed', 'cancelled'}
         if candidate_decision and candidate_decision != 'candidate':
             return {
                 'type': 'derived_task_action_rejected',
@@ -2141,7 +2266,7 @@ class LibrarianServer:
                     'timestamp': datetime.now().isoformat(),
                 }
             candidate['targetUrl'] = clean_url
-        elif candidate.get('status') == 'needs_target':
+        elif candidate.get('status') == 'needs_target' or existing_action_status == 'needs_target':
             return {
                 'type': 'derived_task_action_rejected',
                 'requestId': request_id,
@@ -2176,6 +2301,11 @@ class LibrarianServer:
         child_id = self._derived_child_task_id(parent_task_id, candidate_id)
         dirs = self._task_dirs()
         dirs['inbox'].mkdir(parents=True, exist_ok=True)
+        base_status = _json_file(dirs['status'] / f'{child_id}.json')
+        if isinstance(base_status, dict) and (
+            base_status.get('ok') is not None or base_status.get('stage') == 'cancelled'
+        ):
+            child_id = f"{child_id}-r{uuid.uuid4().hex[:6]}"
         child_file = dirs['inbox'] / f'{child_id}.json'
         parent_title = parent_status.get('title') or ''
         parent_operation_id = str(parent_status.get('operation_id') or parent_status.get('operationId') or '')
@@ -2638,6 +2768,7 @@ class LibrarianServer:
         task_file = Path(task_file)
         task = self._read_task_file(task_file)
         task_id = task.get('id') or task_file.stem
+        task_type = task.get('type') or 'douyin_ingest'
         operation_id = str(task.get('operation_id') or f'task-{task_id}')
         parent_id = str(task.get('parent_id') or '')
         if task.get('cancel_requested'):
@@ -2663,7 +2794,6 @@ class LibrarianServer:
                 python = select_runtime_python()
             except Exception:
                 python = Path(sys.executable)
-            task_type = task.get('type') or 'douyin_ingest'
             if task_type == 'derived_ingest':
                 script = PROJECT_ROOT / 'deps' / 'douyin' / 'scripts' / 'derive_executor.py'
             else:
@@ -2794,6 +2924,12 @@ class LibrarianServer:
                     pass
             log(f"[Server] 任务执行失败: {task_id} {type(exc).__name__}")
         finally:
+            if task_type == 'derived_ingest':
+                child_status = _json_file(self._task_dirs()['status'] / f'{task_id}.json') or {}
+                try:
+                    self._sync_derived_child_status(task, child_status)
+                except Exception as exc:
+                    log(f"[Server] 派生父子状态同步失败: {type(exc).__name__}")
             self.task_processes.pop(task_id, None)
             _safe_remove_task_video_cache(self.runtime_root / 'cache' / 'videos', task_id)
             self.running_task_ids.discard(task_id)

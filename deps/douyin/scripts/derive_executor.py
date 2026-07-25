@@ -9,17 +9,20 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import ipaddress
 import json
 import os
 import re
 import sys
+import threading
 import time
 import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from contextlib import contextmanager
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -45,7 +48,11 @@ try:
         clean_readme,
         validate_source_sections,
     )
-    from server.github_service import register_derived_repository
+    from server.github_service import (
+        GitHubServiceError,
+        MacOSKeychainTokenStore,
+        register_derived_repository,
+    )
     from server.vault_writer import VAULT_GIT_STATUS, vault_write_transaction
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -54,7 +61,11 @@ except ImportError:
         clean_readme,
         validate_source_sections,
     )
-    from server.github_service import register_derived_repository
+    from server.github_service import (
+        GitHubServiceError,
+        MacOSKeychainTokenStore,
+        register_derived_repository,
+    )
     from server.vault_writer import VAULT_GIT_STATUS, vault_write_transaction
 
 
@@ -65,6 +76,12 @@ AUTO_MATCH_MARGIN = 2
 MAX_GITHUB_SEARCH_QUERIES = 8
 MAX_GITHUB_REPOS_TO_SCORE = 10
 MAX_GITHUB_REPOS_README = 4
+GITHUB_REQUEST_ATTEMPTS = 3
+GITHUB_REQUEST_MIN_INTERVAL_SEC = 0.2
+GITHUB_RETRY_MAX_DELAY_SEC = 2.0
+_GITHUB_REQUEST_THREAD_LOCK = threading.Lock()
+_GITHUB_TOKEN_UNSET = object()
+_GITHUB_TOKEN_CACHE: object | str = _GITHUB_TOKEN_UNSET
 SECRET_PATTERNS = [
     (re.compile(r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer [REDACTED]"),
     (re.compile(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@"), r"\1[REDACTED]@"),
@@ -421,18 +438,111 @@ def _archive_task(task_file: Path, base_dir: Path, ok: bool) -> Path:
     return dest
 
 
-def _json_request(url: str, *, timeout: int = 20) -> dict[str, Any]:
-    req = urllib.request.Request(url, headers={
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "agent-wiki-derive",
-    })
+def _github_auth_token() -> str:
+    global _GITHUB_TOKEN_CACHE
+    if _GITHUB_TOKEN_CACHE is not _GITHUB_TOKEN_UNSET:
+        return str(_GITHUB_TOKEN_CACHE or "")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as exc:
-        raise DeriveError("http_error", f"HTTP {exc.code}: {_display_url(url)}", recoverable=True) from exc
-    except Exception as exc:
-        raise DeriveError("network_error", f"{type(exc).__name__}: {exc}", recoverable=True) from exc
+        token = MacOSKeychainTokenStore().get()
+    except (GitHubServiceError, OSError):
+        token = ""
+    _GITHUB_TOKEN_CACHE = token
+    return token
+
+
+@contextmanager
+def _github_request_slot():
+    """Serialize GitHub API calls across child processes and keep a small gap."""
+    lock_path = _runtime_root() / "github" / "api-request.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _GITHUB_REQUEST_THREAD_LOCK:
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                handle.seek(0)
+                try:
+                    previous = float((handle.read() or "0").strip())
+                except ValueError:
+                    previous = 0.0
+                wait_for = GITHUB_REQUEST_MIN_INTERVAL_SEC - (time.time() - previous)
+                if wait_for > 0:
+                    time.sleep(wait_for)
+                yield
+            finally:
+                try:
+                    handle.seek(0)
+                    handle.truncate()
+                    handle.write(f"{time.time():.6f}")
+                    handle.flush()
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _http_header(headers: Any, name: str) -> str:
+    if headers is None:
+        return ""
+    try:
+        return str(headers.get(name) or headers.get(name.lower()) or "")
+    except Exception:
+        return ""
+
+
+def _github_retry_delay(exc: urllib.error.HTTPError, attempt: int) -> float:
+    retry_after = _http_header(exc.headers, "Retry-After")
+    try:
+        requested = float(retry_after)
+    except (TypeError, ValueError):
+        requested = 0.0
+    exponential = 0.25 * (2 ** attempt)
+    return min(GITHUB_RETRY_MAX_DELAY_SEC, max(exponential, requested))
+
+
+def _json_request(url: str, *, timeout: int = 20) -> dict[str, Any]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "agent-wiki-derive",
+    }
+    token = _github_auth_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
+    last_http_error: urllib.error.HTTPError | None = None
+    for attempt in range(GITHUB_REQUEST_ATTEMPTS):
+        try:
+            with _github_request_slot():
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    value = json.loads(resp.read().decode("utf-8", errors="replace"))
+            if not isinstance(value, dict):
+                raise DeriveError("github_api_error", "GitHub API 返回了无效数据", recoverable=True)
+            return value
+        except urllib.error.HTTPError as exc:
+            last_http_error = exc
+            retryable_status = exc.code in {403, 429} or 500 <= exc.code < 600
+            if retryable_status and attempt + 1 < GITHUB_REQUEST_ATTEMPTS:
+                time.sleep(_github_retry_delay(exc, attempt))
+                continue
+            break
+        except DeriveError:
+            raise
+        except Exception as exc:
+            raise DeriveError("network_error", f"{type(exc).__name__}: {_redact_text(exc)}", recoverable=True) from exc
+    assert last_http_error is not None
+    status = int(last_http_error.code)
+    if status == 401:
+        raise DeriveError("auth_expired", "GitHub 登录已失效，请重新登录", recoverable=True) from last_http_error
+    if status in {403, 429}:
+        raise DeriveError(
+            "github_rate_limited",
+            "GitHub API 请求过于频繁，自动重试后仍未恢复",
+            hint="请稍后重试；已登录时系统会自动复用 GitHub 授权。",
+            recoverable=True,
+        ) from last_http_error
+    raise DeriveError(
+        "github_api_error",
+        f"GitHub API 请求失败（HTTP {status}）: {_display_url(url)}",
+        recoverable=status >= 500,
+    ) from last_http_error
 
 
 def _text_request(url: str, *, timeout: int = 25) -> tuple[str, str]:
