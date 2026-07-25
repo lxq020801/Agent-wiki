@@ -88,7 +88,7 @@ class DouyinImagePostStaticTests(unittest.TestCase):
             file_active_timeout_sec=120,
             cookie_path=runtime / "cookie" / "douyin.txt",
             vault_path=vault,
-            vault_relative_root="知识资产/知识入库",
+            vault_relative_root="知识资产",
             server_enabled=True,
             server_host="127.0.0.1",
             server_port=8765,
@@ -280,7 +280,7 @@ class DouyinImagePostStaticTests(unittest.TestCase):
                 self.assertEqual(ingest_intent, "knowledge_ingest")
                 self.assertEqual(derived_decision, image_derived_decision)
                 self.assertEqual(task_id, "image-task")
-                md_path = config.vault_path / "知识资产" / "知识入库" / "fake.md"
+                md_path = config.vault_path / "知识资产" / "fake.md"
                 md_path.parent.mkdir(parents=True, exist_ok=True)
                 md_path.write_text("# fake", encoding="utf-8")
                 return md_path, "committed"
@@ -332,7 +332,7 @@ class DouyinImagePostStaticTests(unittest.TestCase):
             "derive",
             "write",
         ])
-        self.assertTrue(summary["vault_path"].endswith("知识资产/知识入库/fake.md"))
+        self.assertTrue(summary["vault_path"].endswith("知识资产/fake.md"))
         self.assertEqual(summary["analysis"]["file_id"], "inline-images")
         expected_derived_tasks = [{
             "id": "dt-image",
@@ -400,7 +400,7 @@ class DouyinImagePostStaticTests(unittest.TestCase):
             )
 
             self.assertTrue(md_path.exists())
-            self.assertIn("知识资产/知识入库", str(md_path))
+            self.assertIn("知识资产", str(md_path))
             text = md_path.read_text(encoding="utf-8")
             self.assertIn("type: image_post_analysis", text)
             self.assertIn("asset_family: knowledge_asset", text)

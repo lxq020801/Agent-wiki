@@ -94,7 +94,7 @@ def _config(tmp: Path, vault: Path, runtime_name: str = "runtime") -> Config:
         file_active_timeout_sec=120,
         cookie_path=runtime / "cookie" / "douyin.txt",
         vault_path=vault,
-        vault_relative_root="知识资产/知识入库",
+        vault_relative_root="知识资产",
         server_enabled=True,
         server_host="127.0.0.1",
         server_port=8765,
@@ -620,7 +620,7 @@ class ImagePipelineCacheTests(unittest.TestCase):
 
             def fake_write(*args, **kwargs):
                 calls.append("write")
-                md_path = cfg.vault_path / "知识资产" / "知识入库" / "fake.md"
+                md_path = cfg.vault_path / "知识资产" / "fake.md"
                 md_path.parent.mkdir(parents=True, exist_ok=True)
                 md_path.write_text("# fake", encoding="utf-8")
                 return md_path, "not_managed"

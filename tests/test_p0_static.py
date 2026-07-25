@@ -50,7 +50,7 @@ cookie_path = "{tmp / 'runtime' / 'cookie' / 'douyin.txt'}"
 
 [vault]
 path = "{vault}"
-relative_root = "知识资产/知识入库"
+relative_root = "知识资产"
 
 [server]
 enabled = true
@@ -61,7 +61,7 @@ port = 8765
     )
     cfg = load_config(config)
     assert cfg.vault_path == vault.resolve()
-    assert cfg.vault_relative_root == "知识资产/知识入库"
+    assert cfg.vault_relative_root == "知识资产"
     assert cfg.default_quality == "quality"
     assert cfg.strategy_model == "doubao-seed-2-0-mini-260428"
     assert cfg.video_fps_mode == "fixed_3"
@@ -110,7 +110,7 @@ cookie_path = "{config.parent / 'cookie' / 'douyin.txt'}"
 
 [vault]
 path = "{vault}"
-relative_root = "知识资产/知识入库"
+relative_root = "知识资产"
 
 [server]
 enabled = true
@@ -402,7 +402,7 @@ def _fake_config(tmp: Path, vault: Path, runtime_name: str = "test-runtime"):
         file_active_timeout_sec=120,
         cookie_path=runtime / "cookie" / "douyin.txt",
         vault_path=vault,
-        vault_relative_root="知识资产/知识入库",
+        vault_relative_root="知识资产",
         server_enabled=True,
         server_host="127.0.0.1",
         server_port=8765,
@@ -895,7 +895,7 @@ def test_vault_write_schema(tmp: Path) -> None:
         file_active_timeout_sec=120,
         cookie_path=runtime / "cookie" / "douyin.txt",
         vault_path=vault,
-        vault_relative_root="知识资产/知识入库",
+        vault_relative_root="知识资产",
         server_enabled=True,
         server_host="127.0.0.1",
         server_port=8765,
@@ -909,7 +909,7 @@ def test_vault_write_schema(tmp: Path) -> None:
         {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3, "cost_rmb_estimate": 0.1},
     )
     assert md_path.exists()
-    assert "知识资产/知识入库" in str(md_path)
+    assert md_path.parent == vault / "知识资产"
     text = md_path.read_text(encoding="utf-8")
     assert re.search(r'^id: "?\d{8}-knowledge-\d{3}"?$', text, re.MULTILINE)
     assert "type: video_analysis" in text
@@ -977,9 +977,44 @@ def test_duplicate_source_ingest_is_idempotent_and_preserves_existing_git(tmp: P
     assert second_status == "existing_source"
     assert second_path == first_path
     assert first_path.read_text(encoding="utf-8") == first_text
-    assert len(list((vault / "知识资产" / "知识入库").glob("*.md"))) == 1
+    assert len(list((vault / "知识资产").glob("*.md"))) == 1
     assert "资产总数：1" in (vault / "index.md").read_text(encoding="utf-8")
     assert head.read_text(encoding="utf-8") == "ref: refs/heads/user-history\n"
+
+
+def test_duplicate_source_ingest_finds_legacy_knowledge_directory(tmp: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from ingest import write_to_vault
+
+    vault = tmp / "legacy-duplicate-vault"
+    legacy_root = vault / "知识资产" / "知识入库"
+    legacy_root.mkdir(parents=True)
+    legacy_path = legacy_root / "20260720-legacy.md"
+    legacy_text = (
+        "---\n"
+        'source_id: "1234567890123456789"\n'
+        'source_url: "https://www.douyin.com/video/1234567890123456789"\n'
+        "---\n"
+        "# Legacy asset\n"
+    )
+    legacy_path.write_text(legacy_text, encoding="utf-8")
+    video = tmp / "legacy-duplicate.mp4"
+    video.write_bytes(b"unused-video")
+
+    result_path, result_status = write_to_vault(
+        _fake_config(tmp, vault, "legacy-duplicate-runtime"),
+        FakeMeta(),
+        video,
+        FakeResult(text="这个内容不应生成新资产。"),
+        {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+    )
+
+    assert result_status == "existing_source"
+    assert result_path == legacy_path
+    assert legacy_path.read_text(encoding="utf-8") == legacy_text
+    assert list((vault / "知识资产").glob("*.md")) == []
 
 
 def test_index_count_only_includes_valid_indexed_assets(tmp: Path) -> None:
@@ -997,7 +1032,7 @@ def test_index_count_only_includes_valid_indexed_assets(tmp: Path) -> None:
         cfg, FakeMeta(), video, FakeResult(),
         {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
     )
-    orphan = vault / "知识资产" / "知识入库" / "orphan.md"
+    orphan = vault / "知识资产" / "orphan.md"
     orphan.write_text(
         "---\nid: orphan-001\nstatus: active\n---\n# Orphan\n",
         encoding="utf-8",
@@ -1102,7 +1137,7 @@ def test_vault_write_includes_derived_tasks_and_record(tmp: Path) -> None:
         file_active_timeout_sec=120,
         cookie_path=runtime / "cookie" / "douyin.txt",
         vault_path=vault,
-        vault_relative_root="知识资产/知识入库",
+        vault_relative_root="知识资产",
         server_enabled=True,
         server_host="127.0.0.1",
         server_port=8765,
@@ -1334,7 +1369,7 @@ def test_image_post_vault_write_schema(tmp: Path) -> None:
         file_active_timeout_sec=120,
         cookie_path=runtime / "cookie" / "douyin.txt",
         vault_path=vault,
-        vault_relative_root="知识资产/知识入库",
+        vault_relative_root="知识资产",
         server_enabled=True,
         server_host="127.0.0.1",
         server_port=8765,
@@ -1356,7 +1391,7 @@ def test_image_post_vault_write_schema(tmp: Path) -> None:
     )
 
     assert md_path.exists()
-    assert "知识资产/知识入库" in str(md_path)
+    assert "知识资产" in str(md_path)
     text = md_path.read_text(encoding="utf-8")
     assert re.search(r'^id: "?\d{8}-knowledge-\d{3}"?$', text, re.MULTILINE)
     assert "type: image_post_analysis" in text
@@ -1458,7 +1493,7 @@ def test_vault_write_uses_knowledge_root_and_rejects_removed_intent(tmp: Path) -
         {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3, "cost_rmb_estimate": 0.1},
     )
 
-    assert md_path.parent == vault / "知识资产" / "知识入库"
+    assert md_path.parent == vault / "知识资产"
     text = md_path.read_text(encoding="utf-8")
     assert "asset_family: knowledge_asset" in text
     assert "ingest_intent: knowledge_ingest" in text
@@ -1510,7 +1545,7 @@ def test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp: Path) 
         file_active_timeout_sec=120,
         cookie_path=runtime / "cookie" / "douyin.txt",
         vault_path=vault,
-        vault_relative_root="知识资产/知识入库",
+        vault_relative_root="知识资产",
         server_enabled=True,
         server_host="127.0.0.1",
         server_port=8765,
@@ -1612,7 +1647,7 @@ def test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp: Path) 
                    derived_decision=None, task_id=""):
         calls.append(("write_to_vault", ingest_intent))
         calls.append(("write_derived", ingest_intent, derived_decision, task_id))
-        md_path = config.vault_path / "知识资产" / "知识入库" / "fake.md"
+        md_path = config.vault_path / "知识资产" / "fake.md"
         md_path.parent.mkdir(parents=True, exist_ok=True)
         md_path.write_text("# fake", encoding="utf-8")
         return md_path, "committed"
@@ -1852,7 +1887,7 @@ def test_websocket_config_writer(tmp: Path) -> None:
     cfg = load_config(tmp / "ws-runtime" / "config.toml")
     assert cfg.ark_api_key == "test-key"
     assert cfg.vault_path == vault.resolve()
-    assert cfg.vault_relative_root == "知识资产/知识入库"
+    assert cfg.vault_relative_root == "知识资产"
     assert cfg.default_quality == "quality"
     assert cfg.quality_target_frames == 1250
     assert cfg.fps_min == 2.0
@@ -3701,7 +3736,7 @@ cookie_path = "{runtime / 'cookie' / 'douyin.txt'}"
 
 [vault]
 path = "{vault}"
-relative_root = "知识资产/知识入库"
+relative_root = "知识资产"
 
 [server]
 enabled = true
@@ -4352,7 +4387,7 @@ def test_websocket_auto_enqueues_derived_ingest_task(tmp: Path) -> None:
         "source_url": "https://v.douyin.com/auto/",
         "title": "Agent Harness 视频",
         "assets": [{
-            "vault_path": str(tmp / "vault" / "知识资产" / "知识入库" / "20260705-parent.md"),
+            "vault_path": str(tmp / "vault" / "知识资产" / "20260705-parent.md"),
         }],
         "derived_tasks": [{
             "id": "dt-auto",
@@ -4419,7 +4454,7 @@ def test_websocket_derived_actions_require_ready_parent_and_valid_state(tmp: Pat
     assert reply["type"] == "derived_task_action_rejected"
     assert reply["reason"] == "parent_asset_not_ready"
 
-    parent_asset = tmp / "vault" / "知识资产" / "知识入库" / "20260705-parent.md"
+    parent_asset = tmp / "vault" / "知识资产" / "20260705-parent.md"
     parent_asset.parent.mkdir(parents=True)
     parent_asset.write_text("---\nrelated: []\n---\n# Parent\n", encoding="utf-8")
     parent_file.write_text(json.dumps({
@@ -4455,7 +4490,7 @@ def test_websocket_derived_enqueue_is_idempotent_and_redacts_urls(tmp: Path) -> 
     from websocket_server import LibrarianServer
 
     vault = tmp / "vault"
-    parent = vault / "知识资产" / "知识入库" / "20260705-parent.md"
+    parent = vault / "知识资产" / "20260705-parent.md"
     parent.parent.mkdir(parents=True, exist_ok=True)
     parent.write_text("---\nrelated: []\n---\n# Parent\n", encoding="utf-8")
     server = LibrarianServer(enable_task_runner=False)
@@ -4676,7 +4711,7 @@ def test_derive_executor_parent_link_prefers_clean_frontmatter_title(tmp: Path) 
     import derive_executor
 
     vault = tmp / "vault"
-    parent = vault / "知识资产" / "知识入库" / "20260705-parent-long-title.md"
+    parent = vault / "知识资产" / "20260705-parent-long-title.md"
     parent.parent.mkdir(parents=True, exist_ok=True)
     parent.write_text(
         "---\n"
@@ -4757,7 +4792,7 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
     from config_loader import Config
 
     vault = tmp / "derive-e2e-vault"
-    parent = vault / "知识资产" / "知识入库" / "20260705-parent.md"
+    parent = vault / "知识资产" / "20260705-parent.md"
     parent.parent.mkdir(parents=True)
     parent.write_text(
         "---\n"
@@ -4786,7 +4821,7 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
         file_active_timeout_sec=120,
         cookie_path=tmp / "cookie.txt",
         vault_path=vault,
-        vault_relative_root="知识资产/知识入库",
+        vault_relative_root="知识资产",
         server_enabled=True,
         server_host="127.0.0.1",
         server_port=8765,
@@ -5136,6 +5171,7 @@ def main() -> int:
         test_normalize_ingest_intent_rejects_removed_viral_intent()
         test_vault_write_schema(tmp)
         test_duplicate_source_ingest_is_idempotent_and_preserves_existing_git(tmp)
+        test_duplicate_source_ingest_finds_legacy_knowledge_directory(tmp)
         test_index_count_only_includes_valid_indexed_assets(tmp)
         test_vault_write_includes_derived_tasks_and_record(tmp)
         test_image_post_metadata_detection_from_image_infos()

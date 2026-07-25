@@ -84,7 +84,7 @@ cookie_path = "__AGENT_WIKI_COOKIE_PATH__"
 
 [vault]
 path = ""
-relative_root = "知识资产/知识入库"
+relative_root = "知识资产"
 
 [server]
 enabled = true

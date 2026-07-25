@@ -128,7 +128,7 @@ def _source_meta(source_id: str) -> SimpleNamespace:
 
 
 def _source_config(vault: Path) -> SimpleNamespace:
-    return SimpleNamespace(vault_path=vault, vault_relative_root="知识资产/知识入库")
+    return SimpleNamespace(vault_path=vault, vault_relative_root="知识资产")
 
 
 def _derive_config(root: Path, vault: Path):
@@ -148,7 +148,7 @@ def _derive_config(root: Path, vault: Path):
         file_active_timeout_sec=1,
         cookie_path=root / "mock-cookie.txt",
         vault_path=vault,
-        vault_relative_root="知识资产/知识入库",
+        vault_relative_root="知识资产",
         server_enabled=False,
         server_host="127.0.0.1",
         server_port=8765,
@@ -505,7 +505,7 @@ class VaultGitRegressionTests(unittest.TestCase):
                 vault.mkdir()
                 if existing_git:
                     (vault / "raw").mkdir()
-                    (vault / "知识资产" / "知识入库").mkdir(parents=True)
+                    (vault / "知识资产").mkdir(parents=True)
                     (vault / "index.md").write_text("# Existing managed vault\n", encoding="utf-8")
                     (vault / ".agent-wiki-vault.json").write_text(json.dumps({
                         "schemaVersion": 1,
@@ -536,7 +536,7 @@ class VaultGitRegressionTests(unittest.TestCase):
                         verify_websocket=False,
                     )
                 self.assertTrue(result.ok)
-                self.assertTrue((vault / "知识资产" / "知识入库").is_dir())
+                self.assertTrue((vault / "知识资产").is_dir())
                 self.assertTrue((vault / "index.md").is_file())
                 if existing_git:
                     self.assertEqual(_git_snapshot(vault), before)

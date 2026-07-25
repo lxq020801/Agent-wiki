@@ -318,7 +318,7 @@ def load_config(path: Optional[Path] = None) -> Config:
         data,
         "vault",
         "relative_root",
-        default="知识资产/知识入库",
+        default="知识资产",
     )
 
     # server（预留）
@@ -408,7 +408,7 @@ cookie_path = "~/.agent-wiki/cookie/douyin.txt"
 # ⚠️ Obsidian 仓库根目录（必填）
 path = ""
 # 默认知识资产相对路径。
-relative_root = "知识资产/知识入库"
+relative_root = "知识资产"
 
 [server]
 # Agent 控制服务；task_concurrency 控制同时处理多少个入库任务。

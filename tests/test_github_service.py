@@ -700,7 +700,7 @@ class GitHubServiceTests(unittest.TestCase):
             video.write_bytes(b"video")
             config = SimpleNamespace(
                 vault_path=vault,
-                vault_relative_root="知识资产/知识入库",
+                vault_relative_root="知识资产",
             )
             meta = SimpleNamespace(
                 aweme_id="concurrent-source-1",

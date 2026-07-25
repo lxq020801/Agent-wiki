@@ -3240,7 +3240,7 @@ cookie_path = "{_toml_escape(str(self.runtime_root / 'cookie' / 'douyin.txt'))}"
 
 [vault]
 path = "{_toml_escape(vault_path)}"
-relative_root = "知识资产/知识入库"
+relative_root = "知识资产"
 
 [server]
 enabled = true

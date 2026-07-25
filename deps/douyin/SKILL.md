@@ -48,7 +48,7 @@ The WebSocket control server writes:
    `preprocess_configs.video.model`, wait for the file to become `active`, then
    call Responses API with `input_video.file_id` and `store=true`.
 5. `ingest.py` chooses the media-specific knowledge prompt and writes one
-   SCHEMA-compliant source note to `知识资产/知识入库/` with
+   SCHEMA-compliant source note directly to `知识资产/` with
    `asset_family: knowledge_asset` and `ingest_intent: knowledge_ingest`. It then
    updates `index.md` without initializing, staging, or committing Git.
 6. For `knowledge_ingest`, `derive_strategy.py` turns model-discovered primary

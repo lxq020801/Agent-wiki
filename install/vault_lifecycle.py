@@ -36,7 +36,7 @@ VAULT_IDENTITY_SCHEMA_VERSION = 1
 VAULT_REGISTRY_SCHEMA_VERSION = 1
 PRODUCT_ID = "agent-wiki"
 DEFAULT_OBSIDIAN_ROOT_NAME = "Obsidian"
-MINIMAL_VAULT_DIRECTORIES = ("raw", "知识资产/知识入库")
+MINIMAL_VAULT_DIRECTORIES = ("raw", "知识资产")
 MIGRATION_EXCLUDED_NAMES = frozenset({
     ".git",
     ".obsidian",
@@ -361,7 +361,7 @@ def _clear_vault_path_in_config(config_path: Path) -> None:
         return
     text = config_path.read_text(encoding="utf-8")
     if "[vault]" not in text:
-        text = text.rstrip() + '\n\n[vault]\npath = ""\nrelative_root = "知识资产/知识入库"\n'
+        text = text.rstrip() + '\n\n[vault]\npath = ""\nrelative_root = "知识资产"\n'
     else:
         lines = text.splitlines()
         output: list[str] = []

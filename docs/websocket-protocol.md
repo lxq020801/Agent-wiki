@@ -162,7 +162,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 也可用
 `AGENT_WIKI_TASK_CONCURRENCY` 作为启动时覆盖值。
 
-抖音任务固定使用 `ingest_intent: knowledge_ingest`：写入 `知识资产/知识入库/`，生成一份 `knowledge_asset` 来源笔记。该字段由服务端写入任务和状态，扩展不再发送可选入库意图。
+抖音任务固定使用 `ingest_intent: knowledge_ingest`：直接写入 `知识资产/`，生成一份 `knowledge_asset` 来源笔记。该字段由服务端写入任务和状态，扩展不再发送可选入库意图。
 
 视频超过 10 分钟时，执行层会先做全片概览，再自动切片精拆，并在任务进度中出现：
 
@@ -544,7 +544,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 
 当前 UI 常见 `state` 包括 `first_use`、`selection_required`、`selected`、`initialized`、`confirmation_required`、`cancelled`、`ready`、`disconnected`、`reconnected` 和 `error`。
 
-最小原地初始化只创建缺失的 `index.md`、`raw/`、`知识资产/知识入库/` 和 `.agent-wiki-vault.json`；不覆盖已有 index 或文件，不复制、迁移、删除内容，也不创建 `.obsidian/` 或 `.git/`。
+最小原地初始化只创建缺失的 `index.md`、`raw/`、`知识资产/` 和 `.agent-wiki-vault.json`；不覆盖已有 index 或文件，不复制、迁移、删除内容，也不创建 `.obsidian/` 或 `.git/`。
 
 旧响应 `vault_status` 仅保留给旧扩展兼容。新 UI 使用上述正式生命周期消息。`model_status`、`config_synced` 和 `cookie_synced` 分别确认模型健康检查、配置落盘和 Cookie 落盘。
 

@@ -73,7 +73,7 @@ class BootstrapIntegrationTests(unittest.TestCase):
             self.assertIn(f"explicit vault configured: {vault.resolve()}", result.actions)
             self.assertIn(f"vault selected by explicit config: {vault.resolve()}", result.actions)
             self.assertIn("WebSocket health check skipped by explicit isolation option", result.actions)
-            self.assertTrue((vault / "知识资产" / "知识入库").is_dir())
+            self.assertTrue((vault / "知识资产").is_dir())
             self.assertTrue((vault / "index.md").is_file())
 
     def test_invalid_explicit_vault_reports_without_discovery(self) -> None:

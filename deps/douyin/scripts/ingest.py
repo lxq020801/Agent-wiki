@@ -67,9 +67,11 @@ from status_writer import StatusWriter, write_terminal  # noqa: E402
 from server.vault_writer import VAULT_GIT_STATUS, vault_write_transaction  # noqa: E402
 
 DEFAULT_INGEST_INTENT = "knowledge_ingest"
+KNOWLEDGE_ASSET_ROOT = Path("知识资产")
+LEGACY_KNOWLEDGE_ASSET_ROOT = KNOWLEDGE_ASSET_ROOT / "知识入库"
 INGEST_PROFILE = {
     "asset_family": "knowledge_asset",
-    "relative_root": "知识资产/知识入库",
+    "relative_root": str(KNOWLEDGE_ASSET_ROOT),
     "section": "知识入库",
     "id_kind": "knowledge",
     "tags": ("knowledge-asset",),
@@ -768,24 +770,25 @@ def _frontmatter_scalar_values(text: str) -> dict[str, str]:
 
 
 def _existing_source_asset(vault_path: Path, source_id: str, source_url: str) -> Path | None:
-    root = vault_path / "知识资产" / "知识入库"
-    if not root.exists():
-        return None
-    for path in root.glob("*.md"):
-        try:
-            values = _frontmatter_scalar_values(path.read_text(encoding="utf-8", errors="ignore"))
-        except OSError:
+    for relative_root in (KNOWLEDGE_ASSET_ROOT, LEGACY_KNOWLEDGE_ASSET_ROOT):
+        root = vault_path / relative_root
+        if not root.exists():
             continue
-        stored_id = values.get("source_id") or values.get("aweme_id")
-        if source_id and stored_id == source_id:
-            return path
-        if source_url and values.get("source_url") == source_url:
-            return path
+        for path in root.glob("*.md"):
+            try:
+                values = _frontmatter_scalar_values(path.read_text(encoding="utf-8", errors="ignore"))
+            except OSError:
+                continue
+            stored_id = values.get("source_id") or values.get("aweme_id")
+            if source_id and stored_id == source_id:
+                return path
+            if source_url and values.get("source_url") == source_url:
+                return path
     return None
 
 
 def _vault_relative_dir(config: Config) -> Path:
-    rel = str(config.vault_relative_root or "知识资产/知识入库").strip().strip("/")
+    rel = str(config.vault_relative_root or KNOWLEDGE_ASSET_ROOT).strip().strip("/")
     rel_path = Path(rel)
     if rel_path.is_absolute() or ".." in rel_path.parts:
         raise ValueError("[vault].relative_root 必须是 vault 内的相对路径")
@@ -820,7 +823,7 @@ def _summary_from_text(text: str, title: str) -> str:
 
 def _ensure_vault_structure(vault_path: Path) -> None:
     """Create write targets without copying project rules into the user vault."""
-    (vault_path / "知识资产" / "知识入库").mkdir(parents=True, exist_ok=True)
+    (vault_path / KNOWLEDGE_ASSET_ROOT).mkdir(parents=True, exist_ok=True)
 
     index = vault_path / "index.md"
     if not index.exists():
