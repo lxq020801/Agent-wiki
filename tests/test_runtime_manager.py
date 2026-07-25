@@ -86,7 +86,7 @@ class RuntimeManagerTests(unittest.TestCase):
         source.mkdir(parents=True)
         destination.mkdir(parents=True)
         for root in (source, destination):
-            (root / "manifest.json").write_text('{"version":"0.4.0"}\n', encoding="utf-8")
+            (root / "manifest.json").write_text('{"version":"0.4.1"}\n', encoding="utf-8")
         (source / ".DS_Store").write_bytes(b"finder metadata")
 
         check = extension_copy_check(self.project, self.runtime)

@@ -97,6 +97,39 @@ class OperationAuditStoreTests(unittest.TestCase):
             self.assertEqual(payload["events"][-1]["stage"], "service_restart_recovery")
             self.assertTrue(payload["events"][-1]["result"]["recovered"])
 
+    def test_restart_recovery_does_not_replay_terminal_history(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            store = OperationAuditStore(raw)
+            for index in range(250):
+                operation_id = f"op-terminal-{index:03d}"
+                op_dir = store.operation_dir(operation_id)
+                op_dir.mkdir(parents=True)
+                (op_dir / "summary.json").write_text(
+                    json.dumps({
+                        "operationId": operation_id,
+                        "state": "succeeded",
+                        "stage": "completed",
+                    }),
+                    encoding="utf-8",
+                )
+                (op_dir / "timeline.jsonl").write_text("terminal history\n", encoding="utf-8")
+
+            store.ensure_operation("op-active", operation_type="test.recovery", stage="working")
+
+            from server import operation_audit
+
+            original_read_timeline = operation_audit._read_timeline
+
+            def read_active_timeline_only(path: Path, operation_id: str = ""):
+                if operation_id.startswith("op-terminal-"):
+                    raise AssertionError("terminal operation timeline was replayed")
+                return original_read_timeline(path, operation_id)
+
+            with mock.patch.object(operation_audit, "_read_timeline", side_effect=read_active_timeline_only):
+                recovered = OperationAuditStore(raw).recover_incomplete()
+
+            self.assertEqual(recovered, ["op-active"])
+
     def test_success_after_retry_clears_current_error_summary(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             store = OperationAuditStore(raw)

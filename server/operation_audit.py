@@ -726,6 +726,13 @@ class OperationAuditStore:
         recovered: list[str] = []
         for op_dir in sorted(path for path in self.operations_root.glob("*") if path.is_dir()):
             operation_id = normalize_identifier(op_dir.name)
+            summary = _read_json(op_dir / "summary.json")
+            if (
+                summary
+                and normalize_identifier(summary.get("operationId")) == operation_id
+                and summary.get("state") in TERMINAL_STATES
+            ):
+                continue
             payload = self.get(operation_id, include_events=True)
             summary = payload.get("summary") if payload else None
             if not summary or summary.get("state") != "started":
