@@ -1832,6 +1832,20 @@ class LibrarianServer:
         intent = str(raw or '').strip() or DEFAULT_INGEST_INTENT
         return intent if intent == DEFAULT_INGEST_INTENT else ''
 
+    def _extract_video_fps(self, msg):
+        raw = msg.get('videoFps')
+        if raw is None and isinstance(msg.get('data'), dict):
+            raw = msg['data'].get('videoFps')
+        if raw is None or raw == '':
+            return 5.0
+        if isinstance(raw, bool):
+            return None
+        try:
+            fps = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return fps if fps in {1.0, 2.0, 5.0} else None
+
     def _write_task_status(self, task_id, payload):
         status_dir = self._task_dirs()['status']
         status_dir.mkdir(parents=True, exist_ok=True)
@@ -2410,6 +2424,15 @@ class LibrarianServer:
                 'message': '当前只支持知识入库',
                 'timestamp': datetime.now().isoformat(),
             }
+        video_fps = self._extract_video_fps(msg)
+        if video_fps is None:
+            return {
+                'type': 'task_rejected',
+                'requestId': request_id,
+                'reason': 'invalid_video_fps',
+                'message': '视频拆解档位只支持 1、2、5 FPS',
+                'timestamp': datetime.now().isoformat(),
+            }
 
         task_id = self._task_id()
         operation_id = str(msg.get('operationId') or new_operation_id('ingest'))
@@ -2419,7 +2442,11 @@ class LibrarianServer:
             operation_type='task.ingest',
             task_id=task_id,
             parent_id=parent_id,
-            params={'source': msg.get('source') or 'extension', 'url': url},
+            params={
+                'source': msg.get('source') or 'extension',
+                'url': url,
+                'videoFps': video_fps,
+            },
             stage='task_received',
         )
         created_at = datetime.now().isoformat()
@@ -2433,6 +2460,7 @@ class LibrarianServer:
             'url': url,
             'type': 'douyin_ingest',
             'ingest_intent': ingest_intent,
+            'video_fps': video_fps,
             'source': msg.get('source') or 'extension',
             'page_title': msg.get('pageTitle') or '',
             'page_url': msg.get('pageUrl') or '',
@@ -2455,6 +2483,7 @@ class LibrarianServer:
             'source': task['source'],
             'source_url': url,
             'ingest_intent': ingest_intent,
+            'video_fps': video_fps,
             'page_url': task['page_url'],
             'page_title': task['page_title'],
             'aweme_id': task['aweme_id'],
@@ -2490,6 +2519,7 @@ class LibrarianServer:
                 'stage': 'queued',
                 'source': task['source'],
                 'ingestIntent': ingest_intent,
+                'videoFps': video_fps,
                 'createdAt': created_at,
             },
             'message': '任务已进入队列',
@@ -2607,7 +2637,10 @@ class LibrarianServer:
             operation_type='task.retry_execution',
             task_id=retry_task_id,
             parent_id=source_operation_id,
-            params={'retryOfTaskId': task_id},
+            params={
+                'retryOfTaskId': task_id,
+                'videoFps': task.get('video_fps', 5.0),
+            },
             stage='retry_queued',
         )
         self._write_task_status(retry_task_id, {
@@ -2624,6 +2657,7 @@ class LibrarianServer:
             'source': task.get('source') or 'retry',
             'source_url': task.get('url') or '',
             'ingest_intent': task.get('ingest_intent') or DEFAULT_INGEST_INTENT,
+            'video_fps': task.get('video_fps', 5.0),
             'retry_of_task_id': task_id,
         })
         if self.enable_task_runner:
@@ -3122,6 +3156,7 @@ class LibrarianServer:
             'url': status.get('source_url') or status.get('url') or '',
             'source': status.get('source') or 'agent',
             'ingestIntent': status.get('ingest_intent') or DEFAULT_INGEST_INTENT,
+            'videoFps': status.get('video_fps'),
             'assetFamily': status.get('asset_family') or '',
             'startedAt': started,
             'updatedAt': updated,

@@ -64,6 +64,7 @@ from downloader import (  # noqa: E402
     download_video, fetch_metadata,
 )
 from status_writer import StatusWriter, write_terminal  # noqa: E402
+from video_sampling import DEFAULT_VIDEO_FPS, normalize_video_fps  # noqa: E402
 from server.vault_writer import VAULT_GIT_STATUS, vault_write_transaction  # noqa: E402
 
 DEFAULT_INGEST_INTENT = "knowledge_ingest"
@@ -1029,6 +1030,7 @@ async def run_task(
     task_id: str,
     url: str,
     ingest_intent: str | None = None,
+    video_fps: float = DEFAULT_VIDEO_FPS,
     config: Config,
     sw: StatusWriter,
     cache_dir: Path,
@@ -1041,6 +1043,7 @@ async def run_task(
     cache_dir.parent / "images"。
     """
     ingest_intent = normalize_ingest_intent(ingest_intent)
+    video_fps = normalize_video_fps(video_fps)
     profile = _intent_profile(ingest_intent)
 
     # ── 阶段 1：取 metadata 并按内容形态下载 ──
@@ -1055,6 +1058,7 @@ async def run_task(
         url=url,
         ingest_intent=ingest_intent,
         asset_family=profile["asset_family"],
+        video_fps=video_fps,
     )
     try:
         meta = await fetch_metadata(url, config.cookie_path)
@@ -1187,6 +1191,7 @@ async def run_task(
             source_id=meta.aweme_id,
             audit_id=task_id,
             analysis_key=ingest_intent,
+            video_fps=video_fps,
             file_active_timeout_sec=config.file_active_timeout_sec,
             response_timeout_sec=config.response_timeout_sec,
             chunk_concurrency=config.chunk_concurrency,
@@ -1549,6 +1554,18 @@ def main(argv: list[str] | None = None) -> int:
         intent_raw = DEFAULT_INGEST_INTENT
 
     try:
+        video_fps = normalize_video_fps((task_data or {}).get("video_fps"))
+    except ValueError as e:
+        write_terminal(task_id, status_dir, {
+            "ok": False, "stage": "task_invalid",
+            "error": str(e),
+        })
+        if task_file:
+            _archive_task(task_file, base_dir, ok=False)
+        print(f"✗ {e}", file=sys.stderr)
+        return 2
+
+    try:
         ingest_intent = normalize_ingest_intent(intent_raw)
     except ValueError as e:
         write_terminal(task_id, status_dir, {
@@ -1599,6 +1616,7 @@ def main(argv: list[str] | None = None) -> int:
         source_url=url,
         ingest_intent=ingest_intent,
         asset_family=_intent_profile(ingest_intent)["asset_family"],
+        video_fps=video_fps,
         **task_meta,
     )
 
@@ -1608,6 +1626,7 @@ def main(argv: list[str] | None = None) -> int:
             summary = asyncio.run(run_task(
                 task_id=task_id, url=url,
                 ingest_intent=ingest_intent,
+                video_fps=video_fps,
                 config=config, sw=sw, cache_dir=cache_dir,
                 image_cache_dir=image_cache_dir,
             ))

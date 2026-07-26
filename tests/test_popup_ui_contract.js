@@ -77,6 +77,25 @@ assert.match(videoSettingsSection, /data-value="mini" data-model-id="doubao-seed
 assert.match(videoSettingsSection, /id="task-concurrency" value="2"/);
 assert.match(videoSettingsSection, /id="chunk-concurrency" value="2"/);
 
+const ingestCard = html.match(/<section class="action-block primary-action ingest-card">[\s\S]*?<\/section>/)?.[0] || '';
+assert.match(ingestCard, /id="ingest-video-fps" value="5"/);
+assert.match(ingestCard, /class="choice-group ingest-fps-group" role="radiogroup" aria-label="视频拆解精度"/);
+for (const [fps, label] of [[1, '省成本'], [2, '均衡'], [5, '精细']]) {
+  assert.match(
+    ingestCard,
+    new RegExp(`role="radio"[^>]+data-control="ingest-video-fps"[^>]+data-value="${fps}"[\\s\\S]*?<b>${fps} FPS<\\/b><small>${label}<\\/small>`)
+  );
+}
+assert.equal((ingestCard.match(/aria-checked="true"/g) || []).length, 1);
+assert.match(ingestCard, /aria-checked="true"[^>]+data-control="ingest-video-fps"[^>]+data-value="5"/);
+assert.match(css, /\.ingest-fps-group\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
+assert.match(css, /\.ingest-fps-button\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?flex-direction:\s*column/);
+assert.match(js, /const ALLOWED_VIDEO_INGEST_FPS = new Set\(\[1, 2, 5\]\)/);
+assert.match(js, /'videoIngestFps'[\s\S]*?setControlValue\('ingest-video-fps', normalizeVideoIngestFps\(result\.videoIngestFps\)\)/);
+assert.match(js, /action:\s*'submitDouyinIngestFromPopup',[\s\S]*?videoFps/);
+assert.match(js, /chrome\.storage\.local\.set\(\{ videoIngestFps \}\)/);
+assert.match(js, /const fpsLabel = ALLOWED_VIDEO_INGEST_FPS\.has\(fps\) \? `\$\{fps\} FPS` : ''/);
+
 for (const id of [
   'select-knowledge-base',
   'vault-confirmation-modal',

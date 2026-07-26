@@ -1729,6 +1729,7 @@ def test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp: Path) 
         ))
         assert video_path_arg == video
         assert prompt.strip()
+        assert kwargs.get("video_fps") == 2.0
         return SimpleNamespace(
             text="knowledge_ingest 输出",
             file_id="file-one-upload",
@@ -1814,6 +1815,7 @@ def test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp: Path) 
             task_id="single-ingest",
             url="https://v.douyin.com/test/",
             ingest_intent="knowledge_ingest",
+            video_fps=2,
             config=cfg,
             sw=sw,
             cache_dir=cache,
@@ -2047,25 +2049,36 @@ def test_websocket_config_writer(tmp: Path) -> None:
     assert ready_status["cookieCount"] == 6
 
 
-def test_system_video_fps_is_fixed() -> None:
+def test_video_fps_tiers_are_fixed_per_task() -> None:
     import sys
 
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
-    from video_sampling import system_sampling_decision
+    from video_sampling import normalize_video_fps, sampling_decision
 
-    for duration in (0, 51.5, 250, 250.001, 3600):
-        decision = system_sampling_decision(duration)
-        assert decision["mode"] == "fixed_5"
-        assert decision["selected_fps"] == 5.0
+    for fps in (1.0, 2.0, 5.0):
+        decision = sampling_decision(51.5, fps)
+        assert decision["mode"] == f"fixed_{fps:g}"
+        assert decision["selected_fps"] == fps
         assert decision["fallback_applied"] is False
-        assert decision["decision_reasons"] == ["system-wide fixed upload rate of 5 FPS"]
+        assert decision["decision_reasons"] == [f"task-selected fixed upload rate of {fps:g} FPS"]
 
-    assert analyzer._chunk_plan(250.0) == []
-    assert analyzer._chunk_plan(250.001) == [
-        {"part_index": 1, "start_sec": 0.0, "end_sec": 250.0, "overlap_sec": 0.0},
-        {"part_index": 2, "start_sec": 240.0, "end_sec": 250.001, "overlap_sec": 10.0},
-    ]
+    for fps, threshold in ((1.0, 1250.0), (2.0, 625.0), (5.0, 250.0)):
+        assert analyzer._chunk_plan(threshold, fps) == []
+        plan = analyzer._chunk_plan(threshold + 0.001, fps)
+        assert plan == [
+            {"part_index": 1, "start_sec": 0.0, "end_sec": threshold, "overlap_sec": 0.0},
+            {"part_index": 2, "start_sec": threshold - 10.0, "end_sec": threshold + 0.001, "overlap_sec": 10.0},
+        ]
+
+    assert normalize_video_fps(None) == 5.0
+    for invalid in (0, 3, 6, True, "auto"):
+        try:
+            normalize_video_fps(invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid FPS must be rejected: {invalid!r}")
 
 
 def test_mechanical_chunk_plan_uses_one_fps_without_semantic_strategy() -> None:
@@ -2092,7 +2105,7 @@ def test_mechanical_chunk_plan_uses_one_fps_without_semantic_strategy() -> None:
     assert "doubao-seed-2-0-mini" not in source
 
 
-def test_analyzer_uses_system_fixed_fps_without_prescan(tmp: Path) -> None:
+def test_analyzer_uses_task_fixed_fps_without_prescan(tmp: Path) -> None:
     import asyncio
     import sys
 
@@ -2150,6 +2163,7 @@ def test_analyzer_uses_system_fixed_fps_without_prescan(tmp: Path) -> None:
             model="doubao-seed-2-0-lite-260428",
             source_id="source-fixed",
             audit_id="task-fixed",
+            video_fps=2,
             on_progress=on_progress,
         ))
     finally:
@@ -2160,11 +2174,11 @@ def test_analyzer_uses_system_fixed_fps_without_prescan(tmp: Path) -> None:
         analyzer._wait_for_active = old_wait
         analyzer._stream_responses = old_stream
 
-    assert uploads == [("low-change-51s.mp4", 5.0, "doubao-seed-2-0-lite-260428")]
-    assert result.fps_used == 5.0
-    assert result.actual_frames_estimate == 257
+    assert uploads == [("low-change-51s.mp4", 2.0, "doubao-seed-2-0-lite-260428")]
+    assert result.fps_used == 2.0
+    assert result.actual_frames_estimate == 103
     assert not any(stage.startswith("prescanning_") for stage, _ in progress)
-    assert any(stage == "fps_decided" and info["mode"] == "fixed_5" for stage, info in progress)
+    assert any(stage == "fps_decided" and info["mode"] == "fixed_2" for stage, info in progress)
     evidence_path = runtime / "run-artifacts" / "task-fixed" / "01-sampling" / "evidence.json"
     evidence_text = evidence_path.read_text(encoding="utf-8")
     evidence = json.loads(evidence_text)
@@ -2347,8 +2361,12 @@ def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
-    assert analyzer.should_chunk_video(250) is False
-    assert analyzer.should_chunk_video(251) is True
+    assert analyzer.should_chunk_video(1250, 1) is False
+    assert analyzer.should_chunk_video(1251, 1) is True
+    assert analyzer.should_chunk_video(625, 2) is False
+    assert analyzer.should_chunk_video(626, 2) is True
+    assert analyzer.should_chunk_video(250, 5) is False
+    assert analyzer.should_chunk_video(251, 5) is True
     assert analyzer._chunk_plan(250) == []
     assert len(analyzer._chunk_plan(300)) == 2
     plan = analyzer._chunk_plan(601)
@@ -2905,7 +2923,7 @@ def test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp: Path) 
     assert synth_previous == ["resp-old"]
     assert saves and saves[0]["response_id"] is None
     assert saves[0]["file_id"] == "file-part-001"
-    assert saves[0]["flow_version"] == "chunked-v1"
+    assert saves[0]["flow_version"] == "chunked-v1-fps-5"
     assert saves[0]["chunked"] is True
 
 
@@ -3268,6 +3286,20 @@ def test_analyzer_ark_file_protocol(tmp: Path) -> None:
     fallback_preprocess = fallback_client.files.create_kwargs["extra_body"]["preprocess_configs"]["video"]
     assert fallback_preprocess == {"fps": 5.0, "model": "doubao-seed-2-1-pro-260628"}
 
+    for allowed_fps in (1.0, 2.0):
+        allowed_client = FakeClient()
+        allowed_result = asyncio.run(analyzer._upload_with_preprocess(
+            allowed_client,
+            video,
+            fps=allowed_fps,
+            model="doubao-seed-2-1-pro-260628",
+        ))
+        assert allowed_result.id == "file-uploaded"
+        assert (
+            allowed_client.files.create_kwargs["preprocess_configs"]["video"]["fps"]
+            == allowed_fps
+        )
+
     try:
         asyncio.run(analyzer._upload_with_preprocess(
             client,
@@ -3276,7 +3308,7 @@ def test_analyzer_ark_file_protocol(tmp: Path) -> None:
             model="doubao-seed-2-1-pro-260628",
         ))
     except analyzer.AnalyzerError as e:
-        assert "系统固定 5" in str(e)
+        assert "只支持 1、2、5" in str(e)
     else:
         raise AssertionError("model video uploads must never use a non-system FPS")
 
@@ -3630,6 +3662,7 @@ def test_websocket_accepts_task_request(tmp: Path) -> None:
         "taskType": "douyin_ingest",
         "url": "https://www.douyin.com/video/7390000000000000000",
         "pageTitle": "测试视频",
+        "videoFps": 2,
     }))
     assert socket.sent
     reply = json.loads(socket.sent[-1])
@@ -3643,22 +3676,47 @@ def test_websocket_accepts_task_request(tmp: Path) -> None:
     task = json.loads(task_file.read_text(encoding="utf-8"))
     assert task["type"] == "douyin_ingest"
     assert task["ingest_intent"] == "knowledge_ingest"
+    assert task["video_fps"] == 2.0
     assert "ingest_intents" not in task
     assert status_file.exists()
     status = json.loads(status_file.read_text(encoding="utf-8"))
     assert status["stage"] == "queued"
     assert status["source"] == "extension_popup"
     assert status["ingest_intent"] == "knowledge_ingest"
+    assert status["video_fps"] == 2.0
     assert "ingest_intents" not in status
     assert reply["task"]["ingestIntent"] == "knowledge_ingest"
+    assert reply["task"]["videoFps"] == 2.0
     assert "ingestIntents" not in reply["task"]
 
+    rejected = asyncio.run(server.handle_task_request({
+        "type": "task_request",
+        "requestId": "req-invalid-fps",
+        "url": "https://www.douyin.com/video/7390000000000000001",
+        "videoFps": 3,
+    }))
+    assert rejected["type"] == "task_rejected"
+    assert rejected["reason"] == "invalid_video_fps"
+
+    defaulted = asyncio.run(server.handle_task_request({
+        "type": "task_request",
+        "requestId": "req-default-fps",
+        "url": "https://www.douyin.com/video/7390000000000000002",
+    }))
+    default_task = json.loads(
+        (Path(os.environ["AGENT_WIKI_HOME"]) / "inbox" / f"{defaulted['task']['id']}.json")
+        .read_text(encoding="utf-8")
+    )
+    assert defaulted["task"]["videoFps"] == 5.0
+    assert default_task["video_fps"] == 5.0
+
     snapshot = server.task_status_snapshot()
-    assert snapshot["running"] == 1
-    assert snapshot["items"][0]["id"] == task_id
-    assert snapshot["items"][0]["stageLabel"] == "排队中"
-    assert snapshot["items"][0]["ingestIntent"] == "knowledge_ingest"
-    assert "ingestIntents" not in snapshot["items"][0]
+    assert snapshot["running"] == 2
+    public_task = next(item for item in snapshot["items"] if item["id"] == task_id)
+    assert public_task["stageLabel"] == "排队中"
+    assert public_task["ingestIntent"] == "knowledge_ingest"
+    assert public_task["videoFps"] == 2.0
+    assert "ingestIntents" not in public_task
 
 
 def test_websocket_public_task_status_exposes_derived_candidates(tmp: Path) -> None:
@@ -4747,8 +4805,8 @@ def main() -> int:
         test_analyzer_single_wrappers_preserve_analysis_key()
         test_analyzer_rejects_empty_response_text(tmp)
         test_websocket_config_writer(tmp)
-        test_system_video_fps_is_fixed()
-        test_analyzer_uses_system_fixed_fps_without_prescan(tmp)
+        test_video_fps_tiers_are_fixed_per_task()
+        test_analyzer_uses_task_fixed_fps_without_prescan(tmp)
         test_sampling_audit_keeps_truth_boundaries_and_redacts(tmp)
         test_official_tiered_cost_and_display_rules()
         test_video_chunk_threshold_and_memory_store(tmp)

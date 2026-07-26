@@ -42,7 +42,7 @@ The WebSocket control server writes:
    Cookie path. The current runtime always uses the `quality` analysis profile.
 3. `downloader.py` converts the extension's Netscape Cookie file into a header
    string and monkey-patches the vendor crawler in memory.
-4. `analyzer.py` uses the system-wide fixed 5 FPS policy, then follows the
+4. `analyzer.py` uses the task-selected fixed 1/2/5 FPS policy, then follows the
    ordinary Ark API path only: upload the local video through Files API
    with `preprocess_configs.video.fps` and
    `preprocess_configs.video.model`, wait for the file to become `active`, then
@@ -82,8 +82,8 @@ The WebSocket control server writes:
   error.
 - Ordinary Ark Responses content uses `{"type": "input_video", "file_id": ...}`
   plus an `input_text` prompt.
-- The current runtime has no quality/FPS mode configuration. Model uploads use
-  the system-wide fixed 5 FPS value and do not run a local visual-change prescan.
+- The current runtime has no adaptive quality/FPS configuration. Each task uses
+  one explicit fixed 1, 2, or 5 FPS value (default 5) and does not run a local visual-change prescan.
   Legacy quality, target-frame, FPS range, and `video_fps_mode` keys are ignored
   and removed when config is rewritten.
 - Re-upload when fps/model preprocessing changes; do not cache `file_id`.
@@ -93,10 +93,10 @@ The WebSocket control server writes:
 - One configured model performs all video understanding. Mini remains an
   optional main-model preset; there is no separate Mini overview or strategy
   call.
-- The whole video uses the same system-fixed 5 FPS value without prescan.
-- A video is split only when `duration * 5` exceeds the 1250-frame
-  safety target. Each mechanical slice is fixed at 250 seconds and overlaps
-  the previous slice by 10 seconds, so the next slice starts 240 seconds later.
+- The whole video uses the same task-selected FPS value without prescan.
+- A video is split only when `duration * selected_fps` exceeds the 1250-frame
+  safety target. Each mechanical slice is `1250 / selected_fps` seconds and
+  overlaps the previous slice by 10 seconds.
 - Slices are uploaded and analyzed independently with default 2-way concurrency,
   configurable from 1 to 4. A text-only Responses call then removes overlap and
   synthesizes the final asset body. There is no semantic 240-second plan, rough

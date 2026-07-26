@@ -67,7 +67,7 @@ async function main() {
   const context = vm.createContext({
     AgentWikiRuntime: {
       PROTOCOL_VERSION: 1,
-      extensionVersion: () => '0.4.6',
+      extensionVersion: () => '0.4.7',
       canSendMessage: () => true,
       buildHandshake: () => ({ type: 'handshake' }),
       evaluateRuntimeCompatibility: () => ({
@@ -76,7 +76,7 @@ async function main() {
         state: 'compatible',
         message: '版本一致',
         runtime: {
-          productVersion: '0.4.6',
+          productVersion: '0.4.7',
           protocolVersion: 1,
           sourceRevision: 'abcdef123456'
         }

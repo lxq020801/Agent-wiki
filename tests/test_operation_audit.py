@@ -503,6 +503,7 @@ class ControlPlaneAuditTests(unittest.TestCase):
                     "requestId": "request-submit",
                     "url": "https://www.douyin.com/video/123456789",
                     "source": "extension_popup",
+                    "videoFps": 2,
                 })
                 task_id = accepted["task"]["id"]
                 public = server.task_status_snapshot()["items"][0]
@@ -517,11 +518,17 @@ class ControlPlaneAuditTests(unittest.TestCase):
                     "operationId": "op-retry",
                     "taskId": task_id,
                 })
-                return public, cancelled, retried
+                retry_task = json.loads(
+                    (runtime / "inbox" / f"{retried['taskId']}.json").read_text(encoding="utf-8")
+                )
+                retry_status = json.loads(
+                    (runtime / "status" / f"{retried['taskId']}.json").read_text(encoding="utf-8")
+                )
+                return public, cancelled, retried, retry_task, retry_status
 
         with tempfile.TemporaryDirectory() as raw:
             runtime = Path(raw)
-            public, cancelled, retried = asyncio.run(scenario(runtime))
+            public, cancelled, retried, retry_task, retry_status = asyncio.run(scenario(runtime))
             self.assertEqual(public["operationId"], "op-submit")
             self.assertEqual(public["diagnostics"]["operationId"], "op-submit")
             self.assertEqual(cancelled["parentId"], "op-submit")
@@ -529,6 +536,8 @@ class ControlPlaneAuditTests(unittest.TestCase):
             self.assertTrue((runtime / "failed" / f"{cancelled['taskId']}.json").exists())
             self.assertEqual(retried["operationId"], "op-retry")
             self.assertEqual(retried["parentId"], "op-submit")
+            self.assertEqual(retry_task["video_fps"], 2.0)
+            self.assertEqual(retry_status["video_fps"], 2.0)
             retry_payload = OperationAuditStore(runtime).get("op-retry")
             assert retry_payload is not None
             self.assertEqual(retry_payload["summary"]["parentId"], "op-submit")

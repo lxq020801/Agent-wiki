@@ -21,6 +21,8 @@ const DEFAULT_PROVIDER = 'doubao';
 const DEFAULT_MODEL_PRESET = 'lite';
 const DEFAULT_TASK_CONCURRENCY = 2;
 const DEFAULT_CHUNK_CONCURRENCY = 2;
+const DEFAULT_VIDEO_INGEST_FPS = 5;
+const ALLOWED_VIDEO_INGEST_FPS = new Set([1, 2, 5]);
 const POPUP_ROUTE_STORAGE_KEY = 'popupRoute';
 const AGENT_START_COMMAND = './agent-wiki start';
 const LEGACY_GITHUB_ROUTE = 'github';
@@ -358,6 +360,12 @@ function normalizeTaskConcurrency(value) {
 
 function normalizeChunkConcurrency(value) {
   return normalizeBoundedInt(value, DEFAULT_CHUNK_CONCURRENCY);
+}
+
+function normalizeVideoIngestFps(value) {
+  if (typeof value === 'boolean') return DEFAULT_VIDEO_INGEST_FPS;
+  const parsed = Number(value);
+  return ALLOWED_VIDEO_INGEST_FPS.has(parsed) ? parsed : DEFAULT_VIDEO_INGEST_FPS;
 }
 
 function normalizeEndpoint(value, provider) {
@@ -1790,7 +1798,9 @@ function taskMetaText(task) {
   const elapsed = formatElapsed(task.elapsedSec);
   const source = task.source === 'extension_popup' ? '扩展' : 'Agent';
   const updatedAt = formatTaskTime(task.updatedAt || task.createdAt);
-  return [stage, elapsed, source, updatedAt].filter(Boolean).join(' · ');
+  const fps = Number(task.videoFps);
+  const fpsLabel = ALLOWED_VIDEO_INGEST_FPS.has(fps) ? `${fps} FPS` : '';
+  return [stage, fpsLabel, elapsed, source, updatedAt].filter(Boolean).join(' · ');
 }
 
 function stageLabel(stage) {
@@ -1886,7 +1896,8 @@ async function loadConfig() {
     'cookieSyncedAt',
     'vaultPath',
     'modelStatus',
-    'videoAnalysisStatus'
+    'videoAnalysisStatus',
+    'videoIngestFps'
   ]);
   const provider = normalizeProvider(result.llmProvider || result.provider);
   const info = providerInfo(provider);
@@ -1897,6 +1908,7 @@ async function loadConfig() {
   setControlValue('analysis-model-id', readStoredModelId(result));
   setControlValue('task-concurrency', normalizeTaskConcurrency(result.serverTaskConcurrency || result.taskConcurrency));
   setControlValue('chunk-concurrency', normalizeChunkConcurrency(result.videoChunkConcurrency));
+  setControlValue('ingest-video-fps', normalizeVideoIngestFps(result.videoIngestFps));
   updateVideoSettingsSummary();
   setupState.api.configured = Boolean(readStoredApiKey(result));
   setupState.vault.configured = Boolean(result.vaultPath);
@@ -2144,6 +2156,7 @@ async function handleProviderChange() {
 async function submitDouyinIngestFromPopup() {
   const shareInput = document.getElementById('douyin-share-text');
   const shareText = shareInput?.value.trim() || '';
+  const videoFps = normalizeVideoIngestFps(document.getElementById('ingest-video-fps')?.value);
   const hintId = 'ingest-hint';
   const buttons = [document.getElementById('share-knowledge')].filter(Boolean);
   if (!isAgentConnected) {
@@ -2161,7 +2174,8 @@ async function submitDouyinIngestFromPopup() {
   try {
     const response = await chrome.runtime.sendMessage({
       action: 'submitDouyinIngestFromPopup',
-      shareText
+      shareText,
+      videoFps
     });
     if (response?.ok) {
       showHint(hintId, '知识入库任务已进入队列', 'success');
@@ -2792,6 +2806,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     btn.setAttribute('aria-pressed', input.type === 'text' ? 'true' : 'false');
   });
   document.getElementById('douyin-share-text').addEventListener('input', scheduleDouyinPreviewRefresh);
+  document.getElementById('ingest-video-fps').addEventListener('change', event => {
+    const videoIngestFps = normalizeVideoIngestFps(event.target.value);
+    setControlValue('ingest-video-fps', videoIngestFps);
+    void chrome.storage.local.set({ videoIngestFps });
+  });
   document.getElementById('douyin-preview-image').addEventListener('error', () => {
     setPreviewImage('', 'video');
   });

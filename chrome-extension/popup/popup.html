@@ -92,6 +92,18 @@
           <div class="preview-meta" id="douyin-preview-meta">打开抖音页面后自动检测；也可以粘贴分享链接。</div>
         </div>
       </div>
+      <input type="hidden" id="ingest-video-fps" value="5">
+      <div class="choice-group ingest-fps-group" role="radiogroup" aria-label="视频拆解精度">
+        <button class="choice-button ingest-fps-button" type="button" role="radio" aria-checked="false" data-control="ingest-video-fps" data-value="1">
+          <b>1 FPS</b><small>省成本</small>
+        </button>
+        <button class="choice-button ingest-fps-button" type="button" role="radio" aria-checked="false" data-control="ingest-video-fps" data-value="2">
+          <b>2 FPS</b><small>均衡</small>
+        </button>
+        <button class="choice-button ingest-fps-button selected" type="button" role="radio" aria-checked="true" data-control="ingest-video-fps" data-value="5">
+          <b>5 FPS</b><small>精细</small>
+        </button>
+      </div>
       <div class="button-row">
         <button class="primary" id="share-knowledge" type="button">知识入库</button>
       </div>

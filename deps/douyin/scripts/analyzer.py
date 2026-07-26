@@ -3,7 +3,7 @@ analyzer.py — 火山方舟视频拆解
 
 职责：
   1. ffprobe 测视频时长
-  2. 使用系统固定 5fps
+  2. 使用任务选择的固定 1/2/5 FPS
   3. 普通 Ark Files API 上传（带 preprocess_configs.video.model + fps）
   4. 普通 Ark 轮询 file.status 直到 active
   5. Responses API 得到结构化拆解结果
@@ -13,12 +13,12 @@ analyzer.py — 火山方舟视频拆解
      不作为运行通道
   ② Files API 上传必须传 preprocess_configs.video.model（否则回落 640 帧上限）
   ③ file_id 模式 fps 必须在上传时设，分析时再设无效
-  ④ fps=5 是抽帧不是逐帧；fps × duration 先按 1250 安全目标控制，
+  ④ fps 是抽帧不是逐帧；fps × duration 先按 1250 安全目标控制，
      1280 是方舟硬上限
   ⑤ Files API 默认托管空间支持 ≤512MB；超过 512MB P0 直接失败
   ⑥ file_id 模式必须等 file.status == "active" 才能分析
   ⑦ 超过 1250 帧安全目标时，按同一 fps 机械切片，
-     单片 250s，相邻切片重叠 10s
+     单片长度为 1250/fps，相邻切片重叠 10s
 
 公共契约：
     analyze_video(video_path, prompt, *, config, on_progress=None) -> AnalyzeResult
@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from video_sampling import SYSTEM_FPS_MODE, SYSTEM_VIDEO_FPS, system_sampling_decision
+from video_sampling import DEFAULT_VIDEO_FPS, normalize_video_fps, sampling_decision
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -201,7 +201,7 @@ def get_duration_sec(video_path: Path) -> float:
 
 # 项目侧安全目标：比硬上限留 30 帧冗余，避免擦边导致服务端再抽样。
 _FRAMES_SAFE_TARGET = 1250
-# 知识分析上传使用系统固定 5fps。
+# 知识分析上传使用任务选择的固定 1/2/5 FPS。
 _TRUSTED_ARK_HOSTS = {"ark.cn-beijing.volces.com"}
 _RESPONSE_RETRY_MAX_ATTEMPTS = 3
 _RESPONSE_RETRY_BASE_DELAY_SEC = 1.2
@@ -335,7 +335,7 @@ def _new_sampling_evidence(
         "truth_boundaries": {
             "upload_request_facts": {
                 "description": "FPS values requested in Ark Files API preprocessing; not proof of consumed frames.",
-                "mode": SYSTEM_FPS_MODE,
+                "mode": decision.get("mode", ""),
                 "decision": decision,
                 "requests": [],
             },
@@ -684,12 +684,14 @@ async def _retry_response_call(
 
 def _chunk_plan(
     duration_sec: float,
+    video_fps: float = DEFAULT_VIDEO_FPS,
 ) -> list[dict[str, float | int]]:
-    if duration_sec * SYSTEM_VIDEO_FPS <= _FRAMES_SAFE_TARGET:
+    fps = normalize_video_fps(video_fps)
+    if duration_sec * fps <= _FRAMES_SAFE_TARGET:
         return []
     plan: list[dict[str, float | int]] = []
     start = 0.0
-    chunk_len = _FRAMES_SAFE_TARGET / SYSTEM_VIDEO_FPS
+    chunk_len = _FRAMES_SAFE_TARGET / fps
     stride = chunk_len - _CHUNK_OVERLAP_SEC
     index = 1
     while start < duration_sec:
@@ -714,8 +716,11 @@ def _prompt_hash(prompt: str) -> str:
 
 
 
-def should_chunk_video(duration_sec: float) -> bool:
-    return duration_sec * SYSTEM_VIDEO_FPS > _FRAMES_SAFE_TARGET
+def should_chunk_video(
+    duration_sec: float,
+    video_fps: float = DEFAULT_VIDEO_FPS,
+) -> bool:
+    return duration_sec * normalize_video_fps(video_fps) > _FRAMES_SAFE_TARGET
 
 
 
@@ -937,8 +942,10 @@ async def _upload_with_preprocess(
 
     阻塞 IO 跑在 thread。
     """
-    if float(fps) != SYSTEM_VIDEO_FPS:
-        raise AnalyzerError(f"模型视频上传 fps 必须为系统固定 5，实际 {fps!r}")
+    try:
+        fps = normalize_video_fps(fps)
+    except ValueError as exc:
+        raise AnalyzerError(f"模型视频上传 fps 只支持 1、2、5，实际 {fps!r}") from exc
 
     def _do_upload() -> Any:
         with video_path.open("rb") as f:
@@ -1298,6 +1305,7 @@ async def analyze_video(
     source_id: Optional[str] = None,
     audit_id: Optional[str] = None,
     analysis_key: str = "default",
+    video_fps: float = DEFAULT_VIDEO_FPS,
     file_active_timeout_sec: int = 120,
     response_timeout_sec: int = 900,
     chunk_concurrency: int = _CHUNK_ANALYSIS_CONCURRENCY,
@@ -1328,6 +1336,7 @@ async def analyze_video(
         file_endpoint=file_endpoint,
         source_id=source_id,
         audit_id=audit_id,
+        video_fps=video_fps,
         file_active_timeout_sec=file_active_timeout_sec,
         response_timeout_sec=response_timeout_sec,
         chunk_concurrency=chunk_concurrency,
@@ -1347,6 +1356,7 @@ async def analyze_video_many(
     file_endpoint: Optional[str] = None,
     source_id: Optional[str] = None,
     audit_id: Optional[str] = None,
+    video_fps: float = DEFAULT_VIDEO_FPS,
     file_active_timeout_sec: int = 120,
     response_timeout_sec: int = 900,
     chunk_concurrency: int = _CHUNK_ANALYSIS_CONCURRENCY,
@@ -1360,6 +1370,10 @@ async def analyze_video_many(
     """
     if not prompts:
         raise AnalyzerError("缺少视频分析 prompt")
+    try:
+        fps = normalize_video_fps(video_fps)
+    except ValueError as exc:
+        raise AnalyzerError(str(exc)) from exc
     endpoint = _validate_ark_endpoint(endpoint)
     file_endpoint = _validate_ark_endpoint(file_endpoint or _default_files_endpoint(endpoint))
 
@@ -1369,7 +1383,7 @@ async def analyze_video_many(
     memory_source_id = str(source_id or video_path.stem)
     audit_root = _audit_dir(audit_id, memory_source_id)
     audit_files: dict[str, Any] = {}
-    sampling_mode = SYSTEM_FPS_MODE
+    sampling_mode = f"fixed_{fps:g}"
     if audit_root is not None:
         _add_artifact(audit_files, "run_manifest", _write_audit_json(audit_root, "00-run-manifest.json", {
             "audit_id": audit_id,
@@ -1398,9 +1412,8 @@ async def analyze_video_many(
     # 2. 文件大小校验
     _check_size(video_path)
 
-    # 3. 系统固定 5fps；不做本地画面预扫描或按内容动态决策。
-    decision = system_sampling_decision(duration)
-    fps = SYSTEM_VIDEO_FPS
+    # 3. 使用任务选择的固定 FPS；不做本地画面预扫描或按内容动态决策。
+    decision = sampling_decision(duration, fps)
     target_frames = _FRAMES_SAFE_TARGET
     actual_frames_est = int(fps * duration)
     sampling_evidence = _new_sampling_evidence(
@@ -1426,7 +1439,7 @@ async def analyze_video_many(
         file_endpoint,
     )
 
-    chunk_plan = _chunk_plan(duration)
+    chunk_plan = _chunk_plan(duration, fps)
     if chunk_plan:
         chunk_len_sec = float(chunk_plan[0]["end_sec"]) - float(chunk_plan[0]["start_sec"])
         await _call_progress(on_progress, "chunking_plan", {
@@ -1464,6 +1477,7 @@ async def analyze_video_many(
                 files_client=files_client,
                 responses_client=responses_client,
                 model=model,
+                video_fps=fps,
                 full_duration=duration,
                 source_id=memory_source_id,
                 audit_dir=audit_root,
@@ -1539,7 +1553,7 @@ async def analyze_video_many(
             ingest_intent=intent,
             model=model,
             prompt_hash=prompt_hash,
-            flow_version="single-v1",
+            flow_version=f"single-v1-fps-{fps:g}",
             chunked=False,
         )
         previous_response_id = memory.get("response_id") if memory else None
@@ -1587,7 +1601,7 @@ async def analyze_video_many(
             ingest_intent=intent,
             model=model,
             prompt_hash=prompt_hash,
-            flow_version="single-v1",
+            flow_version=f"single-v1-fps-{fps:g}",
             response_id=call.response_id,
             file_id=file_id,
             chunked=False,
@@ -1617,6 +1631,7 @@ async def _analyze_video_chunks(
     files_client: Any,
     responses_client: Any,
     model: str,
+    video_fps: float = DEFAULT_VIDEO_FPS,
     full_duration: float,
     source_id: str,
     audit_dir: Optional[Path] = None,
@@ -1628,6 +1643,7 @@ async def _analyze_video_chunks(
     on_progress: ProgressCb,
 ) -> dict[str, AnalyzeResult]:
     """Analyze fixed video chunks and return one aggregated result per intent."""
+    video_fps = normalize_video_fps(video_fps)
     audit_files = audit_files if audit_files is not None else {}
     per_intent_texts: dict[str, list[tuple[int, str]]] = {intent: [] for intent in prompts}
     per_intent_usages: dict[str, list[dict[str, Any]]] = {intent: [] for intent in prompts}
@@ -1641,7 +1657,7 @@ async def _analyze_video_chunks(
     async def process_chunk(chunk_path: Path, plan_item: dict[str, float | int]) -> None:
         part_index = int(plan_item["part_index"])
         chunk_duration = float(plan_item["end_sec"]) - float(plan_item["start_sec"])
-        fps = SYSTEM_VIDEO_FPS
+        fps = video_fps
         target_frames = _FRAMES_SAFE_TARGET
         actual_frames_est = int(fps * chunk_duration)
         base_chunk_meta = {
@@ -1884,7 +1900,7 @@ async def _analyze_video_chunks(
             ingest_intent=intent,
             model=model,
             prompt_hash=prompt_hash,
-            flow_version="chunked-v1",
+            flow_version=f"chunked-v1-fps-{video_fps:g}",
             chunked=True,
         )
         previous_memory_response[intent] = memory.get("response_id") if memory else None
@@ -1967,7 +1983,7 @@ async def _analyze_video_chunks(
             ingest_intent=intent,
             model=model,
             prompt_hash=prompt_hash,
-            flow_version="chunked-v1",
+            flow_version=f"chunked-v1-fps-{video_fps:g}",
             response_id=synth.response_id,
             file_id=representative_file_id,
             chunked=True,
@@ -1977,7 +1993,7 @@ async def _analyze_video_chunks(
             text=text,
             file_id=representative_file_id,
             fps_used=max(
-                float(item.get("fps", SYSTEM_VIDEO_FPS))
+                float(item.get("fps", video_fps))
                 for item in ordered_chunks
             ),
             model=model,

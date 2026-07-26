@@ -27,6 +27,8 @@ const DEFAULT_TASK_CONCURRENCY = 2;
 const DEFAULT_CHUNK_CONCURRENCY = 2;
 const MIN_TASK_CONCURRENCY = 1;
 const MAX_TASK_CONCURRENCY = 4;
+const DEFAULT_VIDEO_INGEST_FPS = 5;
+const ALLOWED_VIDEO_INGEST_FPS = new Set([1, 2, 5]);
 const TRUSTED_ARK_HOSTS = new Set(['ark.cn-beijing.volces.com']);
 const CURRENT_DOUYIN_VIDEO_ACTION = 'getCurrentDouyinVideoV3';
 const DOUYIN_URL_PATTERN = /https?:\/\/(?:v\.douyin\.com\/[A-Za-z0-9_-]+\/?|(?:www\.)?(?:douyin|iesdouyin)\.com\/(?:video|share\/video|note|share\/note)\/\d+(?:[/?#][^\s"'<>，。！？、；：）)]*)?)/i;
@@ -74,6 +76,16 @@ function normalizeChunkConcurrency(value) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) return DEFAULT_CHUNK_CONCURRENCY;
   return Math.max(1, Math.min(4, parsed));
+}
+
+function normalizeVideoIngestFps(value) {
+  if (value === undefined || value === null || value === '') return DEFAULT_VIDEO_INGEST_FPS;
+  if (typeof value === 'boolean') throw new Error('视频拆解档位只支持 1、2、5 FPS');
+  const parsed = Number(value);
+  if (!ALLOWED_VIDEO_INGEST_FPS.has(parsed)) {
+    throw new Error('视频拆解档位只支持 1、2、5 FPS');
+  }
+  return parsed;
 }
 
 function normalizeEndpoint(value, provider) {
@@ -703,6 +715,7 @@ async function submitDouyinIngestTask(candidate, info, tab) {
   }
 
   const requestId = makeRequestId();
+  const videoFps = normalizeVideoIngestFps(info?.videoFps);
   const payload = {
     type: 'task_request',
     requestId,
@@ -711,6 +724,7 @@ async function submitDouyinIngestTask(candidate, info, tab) {
     url: candidate.url,
     awemeId: candidate.awemeId,
     videoType: candidate.type || 'video',
+    videoFps,
     title: candidate.title || '',
     coverUrl: candidate.coverUrl || '',
     pageTitle: candidate.pageTitle || tab?.title || '',
@@ -729,6 +743,7 @@ async function submitDouyinIngestTask(candidate, info, tab) {
         pageTitle: payload.pageTitle,
         requestedAt: payload.requestedAt,
         detectedBy: payload.detectedBy,
+        videoFps: payload.videoFps,
         taskId: ack.task?.id || ''
       }
     });
@@ -751,6 +766,12 @@ async function activeTab() {
 
 async function submitDouyinIngestFromPopup(request) {
   const shareText = String(request?.shareText || '').trim();
+  let videoFps;
+  try {
+    videoFps = normalizeVideoIngestFps(request?.videoFps);
+  } catch (err) {
+    return { ok: false, message: err.message || '视频拆解档位无效' };
+  }
   const tab = await activeTab();
   const pastedCandidate = shareText
     ? candidateFromText(shareText, 'popup-share-text', 1300)
@@ -773,7 +794,8 @@ async function submitDouyinIngestFromPopup(request) {
 
   return submitDouyinIngestTask(candidate, {
     pageUrl: tab?.url || '',
-    source: 'extension_popup'
+    source: 'extension_popup',
+    videoFps
   }, tab);
 }
 
