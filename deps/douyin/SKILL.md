@@ -42,8 +42,8 @@ The WebSocket control server writes:
    Cookie path. The current runtime always uses the `quality` analysis profile.
 3. `downloader.py` converts the extension's Netscape Cookie file into a header
    string and monkey-patches the vendor crawler in memory.
-4. `analyzer.py` runs a local change-only prescan for automatic mode, then uses
-   the ordinary Ark API path only: upload the local video through Files API
+4. `analyzer.py` uses the system-wide fixed 5 FPS policy, then follows the
+   ordinary Ark API path only: upload the local video through Files API
    with `preprocess_configs.video.fps` and
    `preprocess_configs.video.model`, wait for the file to become `active`, then
    call Responses API with `input_video.file_id` and `store=true`.
@@ -82,12 +82,10 @@ The WebSocket control server writes:
   error.
 - Ordinary Ark Responses content uses `{"type": "input_video", "file_id": ...}`
   plus an `input_text` prompt.
-- The current runtime fixes analysis to `quality` and supports
-  `analysis.video_fps_mode = "auto" | "fixed_2" | "fixed_3" | "fixed_5"`.
-  Automatic mode uses a local 1fps grayscale prescan only to measure visual
-  change, then requests 2-5fps for model analysis. Model video uploads reject
-  values below 2fps. The Chrome extension does not expose the legacy quality
-  or target-frame settings.
+- The current runtime fixes analysis to `quality` and model uploads to 5 FPS.
+  It does not run a local visual-change prescan. Legacy `video_fps_mode`
+  values are ignored and normalized to `fixed_5` when config is rewritten.
+  The Chrome extension does not expose legacy quality or target-frame settings.
 - Re-upload when fps/model preprocessing changes; do not cache `file_id`.
 - Responses memory is short-term only. Store returned `response_id` under
   `~/.agent-wiki/responses-memory/` for 3 days; never write it into
@@ -95,11 +93,10 @@ The WebSocket control server writes:
 - One configured model performs all video understanding. Mini remains an
   optional main-model preset; there is no separate Mini overview or strategy
   call.
-- Automatic mode runs one local change-only prescan and chooses one global FPS
-  for the whole video. Fixed modes use their selected FPS without prescan.
-- A video is split only when `duration * selected_fps` exceeds the 1250-frame
-  safety target. Each mechanical slice uses the same FPS, spans at most
-  `min(600, 1250/fps)` seconds, and overlaps the previous slice by 10 seconds.
+- The whole video uses the same system-fixed 5 FPS value without prescan.
+- A video is split only when `duration * 5` exceeds the 1250-frame
+  safety target. Each mechanical slice is fixed at 250 seconds and overlaps
+  the previous slice by 10 seconds, so the next slice starts 240 seconds later.
 - Slices are uploaded and analyzed independently with default 2-way concurrency,
   configurable from 1 to 4. A text-only Responses call then removes overlap and
   synthesizes the final asset body. There is no semantic 240-second plan, rough

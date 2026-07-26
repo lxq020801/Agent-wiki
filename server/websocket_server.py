@@ -43,7 +43,7 @@ from server.operation_audit import (
     new_operation_id,
     normalize_identifier,
 )
-from video_sampling import normalize_fps_mode
+from video_sampling import SYSTEM_FPS_MODE
 
 
 PRODUCT_ID = "agent-wiki"
@@ -3203,13 +3203,6 @@ class LibrarianServer:
             'chunk_concurrency',
             '2',
         )
-        existing_video_fps_mode = _simple_config_value(
-            config_path,
-            'analysis',
-            'video_fps_mode',
-            'auto',
-        )
-
         vault_path = existing_vault_path or ''
         lifecycle_status = self.vault_lifecycle_manager().status()
         if lifecycle_status.get('state') == 'ready':
@@ -3239,16 +3232,8 @@ class LibrarianServer:
             incoming_chunk_concurrency if incoming_chunk_concurrency is not None else existing_chunk_concurrency,
             default=_normalize_chunk_concurrency(existing_chunk_concurrency),
         )
-        video_fps_mode_raw = (
-            _first_config_value(video_config, ('fpsMode', 'videoFpsMode', 'video_fps_mode'))
-            or _first_config_value(config_data, ('videoFpsMode', 'video_fps_mode'))
-            or existing_video_fps_mode
-            or 'auto'
-        )
-        try:
-            video_fps_mode = normalize_fps_mode(video_fps_mode_raw)
-        except ValueError as exc:
-            raise ValueError('video fps mode must be auto, fixed_2, fixed_3, or fixed_5') from exc
+        # FPS is a system policy. Ignore legacy client/config mode values.
+        video_fps_mode = SYSTEM_FPS_MODE
 
         previous_active_key = _provider_api_key(config_path, previous_provider)
         if legacy_agent_plan_payload:

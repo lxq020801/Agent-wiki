@@ -64,9 +64,9 @@ port = 8765
     assert cfg.vault_relative_root == "知识资产"
     assert cfg.default_quality == "quality"
     assert not hasattr(cfg, "strategy_model")
-    assert cfg.video_fps_mode == "fixed_3"
+    assert cfg.video_fps_mode == "fixed_5"
     assert cfg.fps_min == 2.0
-    assert cfg.quality_params("quality")["fps_mode"] == "fixed_3"
+    assert cfg.quality_params("quality")["fps_mode"] == "fixed_5"
 
 
 def test_config_loader_rejects_invalid_ark_endpoints(tmp: Path) -> None:
@@ -1913,13 +1913,14 @@ def test_websocket_config_writer(tmp: Path) -> None:
     assert cfg.response_timeout_sec == 900
     assert not hasattr(cfg, "strategy_model")
     assert cfg.chunk_concurrency == 4
-    assert cfg.video_fps_mode == "auto"
+    assert cfg.video_fps_mode == "fixed_5"
     assert server.task_concurrency == 3
 
     config_path = tmp / "ws-runtime" / "config.toml"
     config_text = config_path.read_text(encoding="utf-8")
     assert "task_concurrency = 3" in config_text
     assert "chunk_concurrency = 4" in config_text
+    assert 'video_fps_mode = "fixed_5"' in config_text
     assert "strategy =" not in config_text
     assert "analyzer_fallback =" not in config_text
     assert oct(config_path.stat().st_mode & 0o777) == "0o600"
@@ -1947,142 +1948,24 @@ def test_websocket_config_writer(tmp: Path) -> None:
     assert ready_status["cookieCount"] == 6
 
 
-def test_quality_fps_stays_5_until_safe_frame_target() -> None:
+def test_system_video_fps_is_fixed() -> None:
     import sys
 
     sys.path.insert(0, str(SCRIPTS))
-    from analyzer import calc_fps
+    import analyzer
+    from video_sampling import system_sampling_decision
 
-    fps, target, truncated = calc_fps(250, "quality")
-    assert fps == 5.0
-    assert target == 1250
-    assert truncated is False
+    for duration in (0, 51.5, 250, 250.001, 3600):
+        decision = system_sampling_decision(duration)
+        assert decision["mode"] == "fixed_5"
+        assert decision["selected_fps"] == 5.0
+        assert decision["fallback_applied"] is False
 
-    fps, target, truncated = calc_fps(251, "quality")
-    assert fps == 4.98
-    assert target == 1250
-    assert truncated is False
-
-    fps, target, truncated = calc_fps(300, "quality")
-    assert fps == 4.16
-    assert target == 1250
-    assert truncated is False
-
-
-def _prescan_metrics(
-    *,
-    mean: float,
-    p90: float,
-    peak: float,
-    point_ratio: float,
-    coverage_ratio: float = 1.0,
-) -> dict:
-    return {
-        "ok": True,
-        "mean_change_score": mean,
-        "p90_change_score": p90,
-        "peak_change_score": peak,
-        "change_point_ratio": point_ratio,
-        "coverage_ratio": coverage_ratio,
-    }
-
-
-def test_adaptive_sampling_regression_scenarios() -> None:
-    import sys
-
-    sys.path.insert(0, str(SCRIPTS))
-    from video_sampling import decide_sampling_fps
-
-    low_change_51s = decide_sampling_fps(
-        mode="auto",
-        duration_sec=51.5,
-        prescan=_prescan_metrics(
-            mean=0.003,
-            p90=0.009,
-            peak=0.08,
-            point_ratio=0.02,
-        ),
-    )
-    assert low_change_51s["selected_fps"] == 2.0
-    assert low_change_51s["fallback_applied"] is False
-
-    complex_demo = decide_sampling_fps(
-        mode="auto",
-        duration_sec=180,
-        prescan=_prescan_metrics(
-            mean=0.041,
-            p90=0.11,
-            peak=0.45,
-            point_ratio=0.22,
-        ),
-        risk_hints={"presentation_risk": 4, "ocr_risk": 5, "action_risk": 5},
-    )
-    assert complex_demo["selected_fps"] == 5.0
-
-    ultra_long = decide_sampling_fps(
-        mode="auto",
-        duration_sec=3600,
-        prescan=_prescan_metrics(
-            mean=0.002,
-            p90=0.008,
-            peak=0.04,
-            point_ratio=0.01,
-            coverage_ratio=1 / 6,
-        ),
-    )
-    assert ultra_long["selected_fps"] == 3.0
-    assert any("ultra-long" in reason for reason in ultra_long["decision_reasons"])
-
-    failed = decide_sampling_fps(
-        mode="auto",
-        duration_sec=51.5,
-        prescan={"ok": False, "failure_reason": "ffmpeg timeout"},
-    )
-    assert failed["selected_fps"] == 5.0
-    assert failed["fallback_applied"] is True
-    assert failed["fallback_reason"] == "ffmpeg timeout"
-
-    for mode, expected in (("fixed_2", 2.0), ("fixed_3", 3.0), ("fixed_5", 5.0)):
-        fixed = decide_sampling_fps(
-            mode=mode,
-            duration_sec=51.5,
-            prescan={"ok": False, "failure_reason": "must be ignored"},
-        )
-        assert fixed["selected_fps"] == expected
-        assert fixed["fallback_applied"] is False
-
-
-def test_local_prescan_writes_reproduction_evidence(tmp: Path) -> None:
-    import sys
-
-    sys.path.insert(0, str(SCRIPTS))
-    import video_sampling
-
-    frame_size = 96 * 54
-    raw = bytes(frame_size) + bytes(frame_size) + bytes([255]) * frame_size
-    calls = []
-
-    def fake_runner(command, **kwargs):
-        calls.append((command, kwargs))
-        return SimpleNamespace(returncode=0, stdout=raw, stderr=b"")
-
-    result = video_sampling.prescan_video(
-        tmp / "sample.mp4",
-        51.5,
-        thumbnail_dir=tmp / "thumbs",
-        runner=fake_runner,
-    )
-
-    assert result["ok"] is True
-    assert result["purpose"] == "local_visual_change_measurement_only"
-    assert result["sample_fps"] == 1.0
-    assert result["sample_count"] == 3
-    assert result["timestamps_sec"] == [0.0, 1.0, 2.0]
-    assert [item["timestamp_sec"] for item in result["change_points"]] == [2.0]
-    assert result["visual_risk_proxies"]["basis"] == "visual_change_only_not_ocr_or_content_recognition"
-    assert result["visual_risk_proxies"]["action_risk"] == 5.0
-    assert len(list((tmp / "thumbs").glob("*.pgm"))) == 3
-    assert "fps=1" in calls[0][0][calls[0][0].index("-vf") + 1]
+    assert analyzer._chunk_plan(250.0) == []
+    assert analyzer._chunk_plan(250.001) == [
+        {"part_index": 1, "start_sec": 0.0, "end_sec": 250.0, "overlap_sec": 0.0},
+        {"part_index": 2, "start_sec": 240.0, "end_sec": 250.001, "overlap_sec": 10.0},
+    ]
 
 
 def test_mechanical_chunk_plan_uses_one_fps_without_semantic_strategy() -> None:
@@ -2091,7 +1974,7 @@ def test_mechanical_chunk_plan_uses_one_fps_without_semantic_strategy() -> None:
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
-    plan = analyzer._chunk_plan(520.809, fps=5.0)
+    plan = analyzer._chunk_plan(520.809)
     assert [(item["start_sec"], item["end_sec"]) for item in plan] == [
         (0.0, 250.0),
         (240.0, 490.0),
@@ -2101,13 +1984,6 @@ def test_mechanical_chunk_plan_uses_one_fps_without_semantic_strategy() -> None:
     assert [item["overlap_sec"] for item in plan] == [0.0, 10.0, 10.0]
     assert all((float(item["end_sec"]) - float(item["start_sec"])) * 5.0 <= 1250 for item in plan)
 
-    assert analyzer._chunk_plan(520.809, fps=2.0) == []
-    long_plan = analyzer._chunk_plan(700.0, fps=2.0)
-    assert [(item["start_sec"], item["end_sec"]) for item in long_plan] == [
-        (0.0, 600.0),
-        (590.0, 700.0),
-    ]
-
     import inspect
     source = inspect.getsource(analyzer.analyze_video_many)
     assert "_prepare_long_video_strategy" not in source
@@ -2116,35 +1992,11 @@ def test_mechanical_chunk_plan_uses_one_fps_without_semantic_strategy() -> None:
     assert "doubao-seed-2-0-mini" not in source
 
 
-def test_prescan_timeout_scales_with_duration() -> None:
-    import sys
-
-    sys.path.insert(0, str(SCRIPTS))
-    import video_sampling
-
-    assert video_sampling.prescan_timeout_for_duration(0) == 30.0
-    assert video_sampling.prescan_timeout_for_duration(30) == 30.0
-    assert video_sampling.prescan_timeout_for_duration(51.5) == 30.0
-    assert video_sampling.prescan_timeout_for_duration(569.5) == 284.75
-    assert video_sampling.prescan_timeout_for_duration(3600) == 600.0
-
-    calls = []
-
-    def fake_runner(command, **kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(returncode=0, stdout=bytes(96 * 54), stderr=b"")
-
-    video_sampling.prescan_video(Path("fake.mp4"), 569.5, runner=fake_runner)
-    assert calls[0]["timeout"] == 284.75
-    video_sampling.prescan_video(Path("fake.mp4"), 120.0, runner=fake_runner)
-    assert calls[1]["timeout"] == 60.0
-
-
-def test_analyzer_uses_adaptive_sampling_and_persists_provider_facts(tmp: Path) -> None:
+def test_analyzer_uses_system_fixed_fps_without_prescan(tmp: Path) -> None:
     import asyncio
     import sys
 
-    runtime = tmp / "adaptive-analyzer-runtime"
+    runtime = tmp / "fixed-analyzer-runtime"
     os.environ["AGENT_WIKI_HOME"] = str(runtime)
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
@@ -2163,7 +2015,7 @@ def test_analyzer_uses_adaptive_sampling_and_persists_provider_facts(tmp: Path) 
 
     async def fake_stream(*args, **kwargs):
         return analyzer.ResponseCallResult(
-            text="自适应分析结果",
+            text="固定 FPS 分析结果",
             usage={
                 "input_tokens": 100,
                 "input_tokens_details": {"audio_tokens": 10},
@@ -2178,7 +2030,6 @@ def test_analyzer_uses_adaptive_sampling_and_persists_provider_facts(tmp: Path) 
         progress.append((stage, info))
 
     old_duration = analyzer.get_duration_sec
-    old_prescan = analyzer.prescan_video
     old_build_client = analyzer._build_client
     old_build_response = analyzer._build_response_client
     old_upload = analyzer._upload_with_preprocess
@@ -2186,20 +2037,6 @@ def test_analyzer_uses_adaptive_sampling_and_persists_provider_facts(tmp: Path) 
     old_stream = analyzer._stream_responses
     try:
         analyzer.get_duration_sec = lambda path: 51.5
-        analyzer.prescan_video = lambda *args, **kwargs: {
-            **_prescan_metrics(mean=0.002, p90=0.008, peak=0.03, point_ratio=0.01),
-            "purpose": "local_visual_change_measurement_only",
-            "sample_fps": 1.0,
-            "sample_count": 52,
-            "elapsed_sec": 0.7,
-            "timestamps_sec": [float(i) for i in range(52)],
-            "thumbnail_manifest": [
-                {"timestamp_sec": float(i), "thumbnail": f"frame-{i:04d}.pgm"}
-                for i in range(52)
-            ],
-            "change_points": [],
-            "failure_reason": "",
-        }
         analyzer._build_client = lambda *args, **kwargs: SimpleNamespace()
         analyzer._build_response_client = lambda *args, **kwargs: SimpleNamespace()
         analyzer._upload_with_preprocess = fake_upload
@@ -2218,18 +2055,17 @@ def test_analyzer_uses_adaptive_sampling_and_persists_provider_facts(tmp: Path) 
         ))
     finally:
         analyzer.get_duration_sec = old_duration
-        analyzer.prescan_video = old_prescan
         analyzer._build_client = old_build_client
         analyzer._build_response_client = old_build_response
         analyzer._upload_with_preprocess = old_upload
         analyzer._wait_for_active = old_wait
         analyzer._stream_responses = old_stream
 
-    assert uploads == [("low-change-51s.mp4", 2.0, "doubao-seed-2-0-lite-260428")]
-    assert result.fps_used == 2.0
-    assert result.actual_frames_estimate == 103
-    assert any(stage == "prescanning_done" for stage, _ in progress)
-    assert any(stage == "fps_decided" and info["mode"] == "auto" for stage, info in progress)
+    assert uploads == [("low-change-51s.mp4", 5.0, "doubao-seed-2-0-lite-260428")]
+    assert result.fps_used == 5.0
+    assert result.actual_frames_estimate == 257
+    assert not any(stage.startswith("prescanning_") for stage, _ in progress)
+    assert any(stage == "fps_decided" and info["mode"] == "fixed_5" for stage, info in progress)
     evidence_path = runtime / "run-artifacts" / "task-adaptive" / "01-sampling" / "evidence.json"
     evidence_text = evidence_path.read_text(encoding="utf-8")
     evidence = json.loads(evidence_text)
@@ -2247,24 +2083,15 @@ def test_sampling_audit_keeps_truth_boundaries_and_redacts(tmp: Path) -> None:
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
-    prescan = {
-        "ok": True,
-        "purpose": "local_visual_change_measurement_only",
-        "sample_count": 2,
-        "timestamps_sec": [0.0, 1.0],
-        "thumbnail_manifest": [{"timestamp_sec": 0.0, "thumbnail": "frame.pgm"}],
-    }
-    decision = {"mode": "auto", "selected_fps": 2.0, "policy_version": "test"}
+    decision = {"mode": "fixed_5", "selected_fps": 5.0, "policy_version": "test"}
     evidence = analyzer._new_sampling_evidence(
-        mode="auto",
         duration_sec=51.5,
-        prescan=prescan,
         decision=decision,
     )
     analyzer._record_upload_evidence(
         evidence,
         phase="precision_analysis",
-        fps=2.0,
+        fps=5.0,
         duration_sec=51.5,
         model="doubao-seed-2-0-lite-260428",
         file_obj={
@@ -2288,10 +2115,10 @@ def test_sampling_audit_keeps_truth_boundaries_and_redacts(tmp: Path) -> None:
     payload = json.loads((tmp / "01-sampling" / "evidence.json").read_text(encoding="utf-8"))
     text = json.dumps(payload)
 
-    assert payload["truth_boundaries"]["local_reproduction_evidence"]["facts"]["sample_count"] == 2
+    assert "local_reproduction_evidence" not in payload["truth_boundaries"]
     request = payload["truth_boundaries"]["upload_request_facts"]["requests"][0]
-    assert request["requested_fps"] == 2.0
-    assert request["planned_frame_count"] == 103
+    assert request["requested_fps"] == 5.0
+    assert request["planned_frame_count"] == 257
     vendor = payload["truth_boundaries"]["vendor_returned_facts"]
     assert vendor["actual_model_frames"] is None
     assert vendor["actual_model_frames_availability"] == "not_returned_by_provider"
@@ -2677,7 +2504,6 @@ def test_chunk_analysis_uses_one_fps_without_semantic_context(tmp: Path) -> None
             quality="quality",
             full_duration=470.0,
             source_id="aweme-strategy",
-            sampling_fps=5.0,
             audit_dir=audit_dir,
             audit_files=audit_files,
             file_active_timeout_sec=120,
@@ -2778,7 +2604,6 @@ def test_chunk_analysis_retries_transient_stream_failure(tmp: Path) -> None:
             quality="quality",
             full_duration=470.0,
             source_id="aweme-retry",
-            sampling_fps=5.0,
             audit_dir=audit_dir,
             audit_files={},
             file_active_timeout_sec=120,
@@ -2879,7 +2704,6 @@ def test_chunk_analysis_reuses_existing_chunk_artifact_on_rerun(tmp: Path) -> No
             quality="quality",
             full_duration=470.0,
             source_id="aweme-resume",
-            sampling_fps=5.0,
             audit_dir=audit_dir,
             audit_files={},
             file_active_timeout_sec=120,
@@ -2969,7 +2793,6 @@ def test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp: Path) 
             quality="quality",
             full_duration=120.0,
             source_id="aweme-memory",
-            sampling_fps=5.0,
             file_active_timeout_sec=120,
             response_timeout_sec=900,
             on_progress=None,
@@ -3320,14 +3143,14 @@ def test_analyzer_ark_file_protocol(tmp: Path) -> None:
         analyzer._upload_with_preprocess(
             client,
             video,
-            fps=2.0,
+            fps=5.0,
             model="doubao-seed-2-1-pro-260628",
         )
     )
     assert result.id == "file-uploaded"
     assert client.files.create_kwargs["purpose"] == "user_data"
     preprocess = client.files.create_kwargs["preprocess_configs"]["video"]
-    assert preprocess == {"fps": 2.0, "model": "doubao-seed-2-1-pro-260628"}
+    assert preprocess == {"fps": 5.0, "model": "doubao-seed-2-1-pro-260628"}
 
     class FallbackFiles:
         def __init__(self) -> None:
@@ -3346,26 +3169,26 @@ def test_analyzer_ark_file_protocol(tmp: Path) -> None:
         analyzer._upload_with_preprocess(
             fallback_client,
             video,
-            fps=3.0,
+            fps=5.0,
             model="doubao-seed-2-1-pro-260628",
         )
     )
     assert fallback_result.id == "file-fallback"
     assert fallback_client.files.calls == 2
     fallback_preprocess = fallback_client.files.create_kwargs["extra_body"]["preprocess_configs"]["video"]
-    assert fallback_preprocess == {"fps": 3.0, "model": "doubao-seed-2-1-pro-260628"}
+    assert fallback_preprocess == {"fps": 5.0, "model": "doubao-seed-2-1-pro-260628"}
 
     try:
         asyncio.run(analyzer._upload_with_preprocess(
             client,
             video,
-            fps=1.0,
+            fps=3.0,
             model="doubao-seed-2-1-pro-260628",
         ))
     except analyzer.AnalyzerError as e:
-        assert "2-5" in str(e)
+        assert "系统固定 5" in str(e)
     else:
-        raise AssertionError("model video uploads must never use 1 FPS")
+        raise AssertionError("model video uploads must never use a non-system FPS")
 
     safe_size = tmp / "500mb.mp4"
     with safe_size.open("wb") as f:
@@ -4795,10 +4618,8 @@ def main() -> int:
         test_analyzer_single_wrappers_preserve_analysis_key()
         test_analyzer_rejects_empty_response_text(tmp)
         test_websocket_config_writer(tmp)
-        test_quality_fps_stays_5_until_safe_frame_target()
-        test_adaptive_sampling_regression_scenarios()
-        test_local_prescan_writes_reproduction_evidence(tmp)
-        test_analyzer_uses_adaptive_sampling_and_persists_provider_facts(tmp)
+        test_system_video_fps_is_fixed()
+        test_analyzer_uses_system_fixed_fps_without_prescan(tmp)
         test_sampling_audit_keeps_truth_boundaries_and_redacts(tmp)
         test_official_tiered_cost_and_display_rules()
         test_video_chunk_threshold_and_memory_store(tmp)

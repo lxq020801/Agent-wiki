@@ -96,9 +96,9 @@ AUDIT_COVERAGE_MATRIX: dict[int, dict[str, Any]] = {
         "stages": ("source_identified", "cookie_availability_checked", "source_metadata_read", "download_file_validated", "probed_duration"),
     },
     4: {
-        "title": "视频拆解：预扫描、画面变化、自动/固定 FPS 决策、分段、实际抽帧、上传/模型请求、响应元数据、Token 与成本、汇总和失败兜底。",
+        "title": "视频拆解：固定 FPS、机械切片、实际抽帧、上传/模型请求、响应元数据、Token 与成本、汇总和失败兜底。",
         "modules": ("deps/douyin/scripts/analyzer.py", "deps/douyin/scripts/ingest.py", "deps/douyin/scripts/status_writer.py"),
-        "stages": ("prescanning_started", "fps_decided", "chunking_plan", "chunk_uploading", "analyzing", "analysis_retrying", "cost_estimated", "synthesizing_chunks"),
+        "stages": ("fps_decided", "chunking_plan", "chunk_uploading", "analyzing", "analysis_retrying", "cost_estimated", "synthesizing_chunks"),
     },
     5: {
         "title": "图文/网页/GitHub 等其他来源：来源抓取、清洗、统一模型处理和结果验证。",

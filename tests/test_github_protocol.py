@@ -462,7 +462,7 @@ class GitHubProtocolTests(unittest.TestCase):
             updated = config.read_text(encoding="utf-8")
             self.assertIn('[github]\nclient_id = "Iv1Example123"', updated)
             self.assertIn("fps_min = 2.0", updated)
-            self.assertIn('video_fps_mode = "fixed_3"', updated)
+            self.assertIn('video_fps_mode = "fixed_5"', updated)
 
     def test_path_only_config_is_never_reported_as_connected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

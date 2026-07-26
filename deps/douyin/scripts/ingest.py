@@ -1187,15 +1187,6 @@ async def run_task(
             file_api_key=config.files_api_key,
             file_endpoint=config.files_endpoint,
             quality=quality,
-            quality_params={
-                "fps_mode": config.video_fps_mode,
-                "fps_min": config.fps_min,
-                "fps_max": config.fps_max,
-                "target_frames": (
-                    config.quality_target_frames if quality == "quality"
-                    else config.balanced_target_frames
-                ),
-            },
             source_id=meta.aweme_id,
             audit_id=task_id,
             analysis_key=ingest_intent,

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from video_sampling import FPS_MODE_AUTO, normalize_fps_mode
+from video_sampling import SYSTEM_FPS_MODE
 
 try:
     import tomllib  # Python 3.11+
@@ -124,7 +124,7 @@ class Config:
     files_endpoint: str = DEFAULT_DOUBAO_ENDPOINT
     response_timeout_sec: int = 900
     chunk_concurrency: int = 2
-    video_fps_mode: str = FPS_MODE_AUTO
+    video_fps_mode: str = SYSTEM_FPS_MODE
 
     # 计算属性（不暴露给 toml）
     @property
@@ -254,14 +254,8 @@ def load_config(path: Optional[Path] = None) -> Config:
     )))
     if fps_min > fps_max:
         raise ConfigError("[analysis].fps_min 不能大于 fps_max")
-    try:
-        video_fps_mode = normalize_fps_mode(
-            _get(data, "analysis", "video_fps_mode", default=FPS_MODE_AUTO)
-        )
-    except ValueError as exc:
-        raise ConfigError(
-            "[analysis].video_fps_mode 只支持 auto、fixed_2、fixed_3、fixed_5"
-        ) from exc
+    # 旧配置可能仍包含 auto/fixed_2/fixed_3；正式运行统一固定 5fps。
+    video_fps_mode = SYSTEM_FPS_MODE
     file_active_timeout_sec = int(
         _get(data, "analysis", "file_active_timeout_sec", default=120)
     )
@@ -364,10 +358,8 @@ client_id = ""
 analyzer = "doubao-seed-2-0-lite-260428"
 
 [analysis]
-# 视频模型默认按本地画面变化在 2-5fps 自动选择。
-# 可选：auto、fixed_2、fixed_3、fixed_5。本地变化预扫描固定 1fps，
-# 但它不调用模型，也不生成知识。
-video_fps_mode = "auto"
+# 视频模型统一固定 5fps；不做本地预扫描或按内容动态决策。
+video_fps_mode = "fixed_5"
 # balanced 仅保留为调试兼容档。
 default_quality = "quality"
 balanced_target_frames = 240

@@ -3,7 +3,7 @@ analyzer.py — 火山方舟视频拆解
 
 职责：
   1. ffprobe 测视频时长
-  2. 本地 1fps 变化预扫描后，在 2-5fps 内自动决策或使用固定档
+  2. 使用系统固定 5fps
   3. 普通 Ark Files API 上传（带 preprocess_configs.video.model + fps）
   4. 普通 Ark 轮询 file.status 直到 active
   5. Responses API 得到结构化拆解结果
@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import mimetypes
 import os
 import re
@@ -44,12 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from video_sampling import (
-    FPS_MODE_AUTO,
-    decide_sampling_fps,
-    normalize_fps_mode,
-    prescan_video,
-)
+from video_sampling import SYSTEM_FPS_MODE, SYSTEM_VIDEO_FPS, system_sampling_decision
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -210,64 +204,14 @@ def get_duration_sec(video_path: Path) -> float:
     return dur
 
 
-# ─────────────────────────────────────────────────────────────────
-# 动态 fps 计算（8 个坑里的 ③④）
-# ─────────────────────────────────────────────────────────────────
-
-
 # 火山 Seed 2.0 系列单视频抽帧硬上限
 _FRAMES_HARD_CAP = 1280
 # 项目侧安全目标：比硬上限留 30 帧冗余，避免擦边导致服务端再抽样。
 _FRAMES_SAFE_TARGET = 1250
-# 知识分析上传只允许使用已确认的 2-5fps；本地变化预扫描另用 1fps。
-_FPS_MIN = 2.0
-_FPS_MAX = 5.0
+# 知识分析上传使用系统固定 5fps。
 _TRUSTED_ARK_HOSTS = {"ark.cn-beijing.volces.com"}
 _RESPONSE_RETRY_MAX_ATTEMPTS = 3
 _RESPONSE_RETRY_BASE_DELAY_SEC = 1.2
-
-
-def calc_fps(
-    duration_sec: float,
-    quality: str,
-    *,
-    fps_min: float = _FPS_MIN,
-    fps_max: float = _FPS_MAX,
-    balanced_target_frames: int = 240,
-    quality_target_frames: int = 1250,
-) -> tuple[float, int, bool]:
-    """根据质量档位和视频时长算 fps。
-
-    Returns:
-        (fps, target_frames, will_truncate)
-        - fps: 实际用于上传的 fps（向下保留两位）
-        - target_frames: 目标抽帧数（按 quality 档，quality 默认 1250）
-        - will_truncate: True 表示 fps×duration 会超 1280 上限，火山会做均匀抽样
-    """
-    if quality == "quality":
-        target = min(max(1, int(quality_target_frames)), _FRAMES_SAFE_TARGET)
-    elif quality == "balanced":
-        target = balanced_target_frames
-    else:
-        raise AnalyzerError(f"未知 quality: {quality!r}")
-
-    if duration_sec <= 0:
-        raise AnalyzerError(f"非法 duration_sec: {duration_sec}")
-
-    # quality 档优先使用 5fps；超过 1250 安全目标才下调，1280 只作为硬上限兜底。
-    if quality == "quality":
-        raw = fps_max if duration_sec * fps_max <= target else target / duration_sec
-    else:
-        raw = target / duration_sec
-    fps = max(fps_min, min(fps_max, raw))
-    # 向下保留两位小数，避免擦边
-    fps = math.floor(fps * 100) / 100.0
-    if fps < fps_min:
-        fps = fps_min
-
-    actual_frames = int(fps * duration_sec)
-    will_truncate = actual_frames > _FRAMES_HARD_CAP
-    return fps, target, will_truncate
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -390,22 +334,16 @@ def _safe_api_metadata(value: Any) -> dict[str, Any]:
 
 def _new_sampling_evidence(
     *,
-    mode: str,
     duration_sec: float,
-    prescan: dict[str, Any],
     decision: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "created_at": time.time(),
         "truth_boundaries": {
-            "local_reproduction_evidence": {
-                "description": "Locally decoded grayscale samples used only to measure visual change.",
-                "facts": prescan,
-            },
             "upload_request_facts": {
                 "description": "FPS values requested in Ark Files API preprocessing; not proof of consumed frames.",
-                "mode": mode,
+                "mode": SYSTEM_FPS_MODE,
                 "decision": decision,
                 "requests": [],
             },
@@ -754,16 +692,15 @@ async def _retry_response_call(
 
 def _chunk_plan(
     duration_sec: float,
-    *,
-    fps: float = _FPS_MAX,
-    force_for_frame_budget: bool = False,
 ) -> list[dict[str, float | int]]:
-    selected_fps = max(_FPS_MIN, min(_FPS_MAX, float(fps or _FPS_MAX)))
-    if duration_sec * selected_fps <= _FRAMES_SAFE_TARGET and not force_for_frame_budget:
+    if duration_sec * SYSTEM_VIDEO_FPS <= _FRAMES_SAFE_TARGET:
         return []
     plan: list[dict[str, float | int]] = []
     start = 0.0
-    chunk_len = min(_ANALYSIS_CHUNK_MAX_LEN_SEC, _FRAMES_SAFE_TARGET / selected_fps)
+    chunk_len = min(
+        _ANALYSIS_CHUNK_MAX_LEN_SEC,
+        _FRAMES_SAFE_TARGET / SYSTEM_VIDEO_FPS,
+    )
     stride = chunk_len - _CHUNK_OVERLAP_SEC
     index = 1
     while start < duration_sec:
@@ -789,7 +726,7 @@ def _prompt_hash(prompt: str) -> str:
 
 
 def should_chunk_video(duration_sec: float) -> bool:
-    return duration_sec * _FPS_MAX > _FRAMES_SAFE_TARGET
+    return duration_sec * SYSTEM_VIDEO_FPS > _FRAMES_SAFE_TARGET
 
 
 
@@ -1011,10 +948,8 @@ async def _upload_with_preprocess(
 
     阻塞 IO 跑在 thread。
     """
-    if not (_FPS_MIN <= float(fps) <= _FPS_MAX):
-        raise AnalyzerError(
-            f"模型视频上传 fps 必须在 {_FPS_MIN:g}-{_FPS_MAX:g}，实际 {fps!r}"
-        )
+    if float(fps) != SYSTEM_VIDEO_FPS:
+        raise AnalyzerError(f"模型视频上传 fps 必须为系统固定 5，实际 {fps!r}")
 
     def _do_upload() -> Any:
         with video_path.open("rb") as f:
@@ -1392,8 +1327,7 @@ async def analyze_video(
       model: Files API 预处理用的模型 ID（必须传，否则回落 640 帧）
               同时也是 Responses API 推理用的模型
       quality: 'balanced' | 'quality'
-      quality_params: {target_frames, fps_min, fps_max, fps_mode}，可选；
-                      不传则使用默认（balanced=240, quality=1250）
+      quality_params: 仅为兼容旧调用保留，不再影响系统固定 5fps。
       file_active_timeout_sec: 等 file active 的最长秒数
       response_timeout_sec: 等 Responses API 返回的最长秒数
       on_progress: async (stage:str, info:dict) -> None，可选进度回调
@@ -1454,11 +1388,7 @@ async def analyze_video_many(
     memory_source_id = str(source_id or video_path.stem)
     audit_root = _audit_dir(audit_id, memory_source_id)
     audit_files: dict[str, Any] = {}
-    q_params = quality_params or {}
-    try:
-        sampling_mode = normalize_fps_mode(q_params.get("fps_mode", FPS_MODE_AUTO))
-    except ValueError as exc:
-        raise AnalyzerError(str(exc)) from exc
+    sampling_mode = SYSTEM_FPS_MODE
     if audit_root is not None:
         _add_artifact(audit_files, "run_manifest", _write_audit_json(audit_root, "00-run-manifest.json", {
             "audit_id": audit_id,
@@ -1488,67 +1418,14 @@ async def analyze_video_many(
     # 2. 文件大小校验
     _check_size(video_path)
 
-    # 3. 本地变化预扫描 + 2-5fps 决策。固定档无需预扫描。
-    if sampling_mode == FPS_MODE_AUTO:
-        await _call_progress(on_progress, "prescanning_started", {
-            "purpose": "local_visual_change_measurement_only",
-            "sample_fps": 1.0,
-            "duration_sec": duration,
-        })
-        thumbnail_dir = audit_root / "01-sampling" / "thumbnails" if audit_root else None
-        prescan = await asyncio.to_thread(
-            prescan_video,
-            video_path,
-            duration,
-            ffmpeg_path=_ffmpeg_command(),
-            thumbnail_dir=thumbnail_dir,
-        )
-        await _call_progress(
-            on_progress,
-            "prescanning_done" if prescan.get("ok") else "prescanning_failed",
-            {
-                "ok": bool(prescan.get("ok")),
-                "elapsed_sec": prescan.get("elapsed_sec"),
-                "sample_count": prescan.get("sample_count"),
-                "change_point_count": len(prescan.get("change_points") or []),
-                "coverage_ratio": prescan.get("coverage_ratio"),
-                "failure_reason": prescan.get("failure_reason"),
-            },
-        )
-    else:
-        prescan = {
-            "ok": False,
-            "skipped": True,
-            "purpose": "local_visual_change_measurement_only",
-            "sample_fps": 1.0,
-            "sample_count": 0,
-            "elapsed_sec": 0.0,
-            "timestamps_sec": [],
-            "thumbnail_manifest": [],
-            "change_points": [],
-            "failure_reason": "fixed FPS mode does not require prescan",
-        }
-        await _call_progress(on_progress, "prescanning_skipped", {
-            "mode": sampling_mode,
-            "reason": prescan["failure_reason"],
-        })
-
-    decision = decide_sampling_fps(
-        mode=sampling_mode,
-        duration_sec=duration,
-        prescan=prescan,
-    )
-    fps = float(decision["selected_fps"])
-    target_frames = min(
-        _FRAMES_SAFE_TARGET,
-        max(1, int(q_params.get("target_frames", _FRAMES_SAFE_TARGET))),
-    )
+    # 3. 系统固定 5fps；不做本地画面预扫描或按内容动态决策。
+    decision = system_sampling_decision(duration)
+    fps = SYSTEM_VIDEO_FPS
+    target_frames = _FRAMES_SAFE_TARGET
     actual_frames_est = int(fps * duration)
     will_truncate = actual_frames_est > _FRAMES_HARD_CAP
     sampling_evidence = _new_sampling_evidence(
-        mode=sampling_mode,
         duration_sec=duration,
-        prescan=prescan,
         decision=decision,
     )
     _persist_sampling_evidence(audit_root, audit_files, sampling_evidence)
@@ -1572,12 +1449,7 @@ async def analyze_video_many(
         file_endpoint,
     )
 
-    frame_budget_requires_chunks = actual_frames_est > _FRAMES_SAFE_TARGET
-    chunk_plan = _chunk_plan(
-        duration,
-        fps=fps,
-        force_for_frame_budget=frame_budget_requires_chunks,
-    )
+    chunk_plan = _chunk_plan(duration)
     if chunk_plan:
         chunk_len_sec = float(chunk_plan[0]["end_sec"]) - float(chunk_plan[0]["start_sec"])
         await _call_progress(on_progress, "chunking_plan", {
@@ -1618,7 +1490,6 @@ async def analyze_video_many(
                 quality=quality,
                 full_duration=duration,
                 source_id=memory_source_id,
-                sampling_fps=fps,
                 audit_dir=audit_root,
                 audit_files=audit_files,
                 sampling_evidence=sampling_evidence,
@@ -1775,7 +1646,6 @@ async def _analyze_video_chunks(
     quality: str,
     full_duration: float,
     source_id: str,
-    sampling_fps: float,
     audit_dir: Optional[Path] = None,
     audit_files: Optional[dict[str, Any]] = None,
     sampling_evidence: Optional[dict[str, Any]] = None,
@@ -1798,7 +1668,7 @@ async def _analyze_video_chunks(
     async def process_chunk(chunk_path: Path, plan_item: dict[str, float | int]) -> None:
         part_index = int(plan_item["part_index"])
         chunk_duration = float(plan_item["end_sec"]) - float(plan_item["start_sec"])
-        fps = max(_FPS_MIN, min(_FPS_MAX, float(sampling_fps)))
+        fps = SYSTEM_VIDEO_FPS
         target_frames = _FRAMES_SAFE_TARGET
         will_truncate = int(fps * chunk_duration) > _FRAMES_HARD_CAP
         actual_frames_est = int(fps * chunk_duration)
@@ -2136,7 +2006,7 @@ async def _analyze_video_chunks(
             text=text,
             file_id=representative_file_id,
             fps_used=max(
-                float(item.get("fps", _FPS_MAX))
+                float(item.get("fps", SYSTEM_VIDEO_FPS))
                 for item in ordered_chunks
             ),
             quality=quality,

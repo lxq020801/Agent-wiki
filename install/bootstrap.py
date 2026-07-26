@@ -69,7 +69,7 @@ endpoint = "https://ark.cn-beijing.volces.com/api/v3"
 analyzer = "doubao-seed-2-0-lite-260428"
 
 [analysis]
-video_fps_mode = "auto"
+video_fps_mode = "fixed_5"
 default_quality = "quality"
 balanced_target_frames = 240
 quality_target_frames = 1250
