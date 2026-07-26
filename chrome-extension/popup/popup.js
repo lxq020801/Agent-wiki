@@ -2604,6 +2604,21 @@ function showHint(id, text, type, options = {}) {
   }
 }
 
+function openExtensionManagement() {
+  if (typeof chrome === 'undefined' || !chrome.runtime?.id || !chrome.tabs?.create) {
+    showHint('extension-management-hint', '当前浏览器不支持打开扩展管理页', 'error');
+    return;
+  }
+  const url = `chrome://extensions/?id=${encodeURIComponent(chrome.runtime.id)}`;
+  chrome.tabs.create({ url }, () => {
+    if (chrome.runtime.lastError) {
+      showHint('extension-management-hint', '无法打开扩展管理页，请手动打开 chrome://extensions', 'error', { persist: true });
+      return;
+    }
+    window.close();
+  });
+}
+
 function dateFromTimestamp(value) {
   if (!value) return '';
   const raw = typeof value === 'number' ? value : Number.NaN;
@@ -2740,6 +2755,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
   bindClick('toggle-first-run', toggleFirstRunWizard);
+  bindClick('open-extension-management', openExtensionManagement);
   bindClick('copy-agent-start-command', copyAgentStartCommand);
   bindClick('retry-agent-connection', retryAgentConnection);
   document.querySelectorAll('.settings-card').forEach(button => {

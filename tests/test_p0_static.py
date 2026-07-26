@@ -1923,6 +1923,7 @@ def test_system_video_fps_is_fixed() -> None:
         assert decision["mode"] == "fixed_5"
         assert decision["selected_fps"] == 5.0
         assert decision["fallback_applied"] is False
+        assert decision["decision_reasons"] == ["system-wide fixed upload rate of 5 FPS"]
 
     assert analyzer._chunk_plan(250.0) == []
     assert analyzer._chunk_plan(250.001) == [

@@ -21,6 +21,6 @@ def system_sampling_decision(duration_sec: float) -> dict[str, Any]:
         "selected_fps": SYSTEM_VIDEO_FPS,
         "fallback_applied": False,
         "fallback_reason": "",
-        "decision_reasons": ["system-wide fixed upload rate of 5 FPS"],
+        "decision_reasons": [f"system-wide fixed upload rate of {SYSTEM_VIDEO_FPS:g} FPS"],
         "duration_sec": round(max(0.0, float(duration_sec)), 3),
     }

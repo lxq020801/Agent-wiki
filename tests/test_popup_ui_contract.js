@@ -183,6 +183,10 @@ assert.match(js, /function setView\(viewId\) \{\s*releaseFocusBeforeViewChange\(
 assert.match(js, /DOMContentLoaded[\s\S]*?initColorScheme\(\)/);
 assert.match(js, /back-settings-index'\)\.addEventListener\('click', closeSettingsDetailToIndex\)/);
 assert.doesNotMatch(js, /system-summary|系统就绪/);
+assert.match(html, /id="open-extension-management"[^>]*title="打开 Chrome 扩展管理页"/);
+assert.match(html, /id="open-extension-management"[\s\S]*?data-lucide-icon="external-link"[\s\S]*?>管理扩展</);
+assert.match(js, /function openExtensionManagement\(\)[\s\S]*?chrome:\/\/extensions\/\?id=\$\{encodeURIComponent\(chrome\.runtime\.id\)\}[\s\S]*?chrome\.tabs\.create\(\{ url \}/);
+assert.match(js, /bindClick\('open-extension-management', openExtensionManagement\)/);
 
 async function main() {
   const stored = {};
