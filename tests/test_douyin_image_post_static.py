@@ -234,13 +234,13 @@ class DouyinImagePostStaticTests(unittest.TestCase):
                 "counts": {"candidate": 1, "rejected": 0, "suppressed": 0},
                 "items": [{
                     "id": "dt-image",
-                    "name": "Image API",
-                    "target_type": "official_doc",
-                    "target_url": "https://example.com/docs/image-api",
+                    "name": "Image Project",
+                    "target_type": "github_project",
+                    "target_url": "https://github.com/example/image-project",
                     "decision": "candidate",
                     "execution_status": "candidate",
                     "score": 81,
-                    "reason": "图文里出现可复用接口，需要核验官方文档。",
+                    "reason": "图文明确介绍了这个开源项目。",
                 }],
             }
 
@@ -327,12 +327,12 @@ class DouyinImagePostStaticTests(unittest.TestCase):
         self.assertEqual(summary["analysis"]["file_id"], "inline-images")
         expected_derived_tasks = [{
             "id": "dt-image",
-            "name": "Image API",
-            "targetType": "official_doc",
-            "targetUrl": "https://example.com/docs/image-api",
+            "name": "Image Project",
+            "targetType": "github_project",
+            "targetUrl": "https://github.com/example/image-project",
             "decision": "candidate",
             "status": "candidate",
-            "reason": "图文里出现可复用接口，需要核验官方文档。",
+            "reason": "图文明确介绍了这个开源项目。",
         }]
         self.assertEqual(len(summary["derived_tasks"]), 1)
         for key, value in expected_derived_tasks[0].items():
@@ -370,9 +370,9 @@ class DouyinImagePostStaticTests(unittest.TestCase):
                 "counts": {"candidate": 1, "rejected": 0, "suppressed": 0},
                 "items": [{
                     "id": "dt-image-write",
-                    "name": "Image Write API",
-                    "target_type": "official_doc",
-                    "target_url": "https://example.com/docs/image-write-api",
+                    "name": "Image Write Project",
+                    "target_type": "github_project",
+                    "target_url": "https://github.com/example/image-write-project",
                     "decision": "candidate",
                     "execution_status": "candidate",
                     "score": 83,

@@ -19,7 +19,12 @@ from typing import Any
 
 
 _AUDIT_ROOT_NAME = "run-artifacts"
-ALLOWED_TARGET_TYPES = {"github_project", "official_doc", "web_research"}
+ALLOWED_TARGET_TYPES = {"github_project"}
+OPEN_SOURCE_EVIDENCE_RE = re.compile(
+    r"github|gitlab|开源|开放源代码|代码仓库|源码仓库|仓库地址|"
+    r"open[ -]?source|source[ -]?available|repository|\brepo\b",
+    re.I,
+)
 
 SCORE_WEIGHTS = {
     "knowledge_value": 1.4,
@@ -259,28 +264,23 @@ def _url_safety_reason(value: Any) -> str:
 
 def _target_type_from_action(action: str, name: str = "", item_type: str = "") -> str:
     text = f"{action} {name} {item_type}".lower()
-    if "github" in text or "repo" in text or "仓库" in text:
+    if OPEN_SOURCE_EVIDENCE_RE.search(text):
         return "github_project"
-    if "api" in text or "文档" in text or "官方" in text or "docs" in text:
-        return "official_doc"
-    return "web_research"
+    return ""
 
 
 def _relation_type(target_type: str, subtype: str = "") -> str:
     if target_type == "github_project":
         return "implements"
-    if subtype == "api_doc":
-        return "documents"
-    if target_type == "official_doc":
-        return "verifies"
-    return "expands"
+    return ""
 
 
-def _canonical_target(target_type: str, name: str, url: str) -> str:
+def _canonical_target(target_type: str, name: str, url: str, search_query: str = "") -> str:
     canonical = canonicalize_url(url)
     if canonical:
         return canonical
-    normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", name.lower()).strip("-")
+    identity = name or search_query
+    normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", identity.lower()).strip("-")
     return f"name:{target_type}:{normalized}" if normalized else ""
 
 
@@ -360,8 +360,10 @@ def _candidate_collection(obj: dict[str, Any]) -> list[Any] | None:
 def _looks_like_derived_candidate(raw: dict[str, Any]) -> bool:
     """Require enough of the prompt schema before accepting a heading-less fallback."""
     name = str(raw.get("name") or raw.get("title") or raw.get("candidate_name") or "").strip()
+    target_url = str(raw.get("target_url") or raw.get("targetUrl") or "").strip()
+    search_query = str(raw.get("search_query") or raw.get("searchQuery") or "").strip()
     target_type = str(raw.get("target_type") or raw.get("targetType") or "").strip()
-    if not name or target_type not in ALLOWED_TARGET_TYPES:
+    if not (name or target_url or search_query) or target_type not in ALLOWED_TARGET_TYPES:
         return False
     evidence_keys = {
         "subject_role", "subjectRole", "reason", "evidence", "confidence",
@@ -431,7 +433,6 @@ def _candidates_from_markdown(text: str) -> list[dict[str, Any]]:
         candidates.append({
             "name": name,
             "target_type": target_type,
-            "subtype": "api_doc" if "api" in action.lower() else "",
             "mentioned_context": context,
             "reason": action,
             "evidence": [context],
@@ -478,7 +479,7 @@ def _heuristic_scores(name: str, target_type: str, action: str, item_type: str, 
         "knowledge_value": 4,
         "parent_dependency": 3,
         "evidence_strength": 4 if has_url else 3,
-        "actionability": 4 if target_type in {"github_project", "official_doc"} else 3,
+        "actionability": 4 if target_type == "github_project" else 2,
         "freshness_risk": 4 if any(word in text for word in ("api", "模型", "github", "官方", "版本")) else 3,
         "novelty": 4,
         "asset_fit": 4 if target_type in ALLOWED_TARGET_TYPES else 2,
@@ -590,7 +591,11 @@ def _candidate_decision(
     if existing_status != "new":
         return "candidate", ["existing_asset"]
     invalid_flags = {
-        "missing_name_and_url",
+        "target_type_not_allowed",
+        "missing_github_locator",
+        "missing_distinctive_search_clues",
+        "missing_open_source_evidence",
+        "missing_project_context",
         "url_contains_credentials",
         "non_https_target_url",
         "local_target_url",
@@ -632,11 +637,15 @@ def _visible_block_reasons(item: dict[str, Any]) -> list[str]:
 
     if target_type not in ALLOWED_TARGET_TYPES:
         reasons.append("target_type_not_allowed")
-    elif target_type == "github_project" and not (item.get("target_url") or item.get("name")):
-        reasons.append("github_name_or_url_required")
+    elif not (item.get("target_url") or item.get("name") or item.get("search_query")):
+        reasons.append("github_locator_required")
 
     blocking_flags = {
-        "missing_name_and_url",
+        "target_type_not_allowed",
+        "missing_github_locator",
+        "missing_distinctive_search_clues",
+        "missing_open_source_evidence",
+        "missing_project_context",
         "url_contains_credentials",
         "non_https_target_url",
         "local_target_url",
@@ -652,18 +661,7 @@ def _visible_block_reasons(item: dict[str, Any]) -> list[str]:
 def _task_kind(target_type: str, subtype: str = "") -> str:
     if target_type == "github_project":
         return "github_project_ingest"
-    if target_type == "official_doc" or subtype == "api_doc":
-        return "official_doc_ingest"
-    return "web_research"
-
-
-def _build_search_query(name: str, target_type: str, subtype: str, context: str) -> str:
-    base = " ".join(part for part in [name, context[:120]] if part).strip()
-    if target_type == "github_project":
-        return f"{base} GitHub repository".strip()
-    if target_type == "official_doc" or subtype == "api_doc":
-        return f"{base} official documentation API".strip()
-    return base[:180]
+    return ""
 
 
 def _default_acceptance_criteria(target_type: str, subtype: str = "") -> list[str]:
@@ -673,17 +671,7 @@ def _default_acceptance_criteria(target_type: str, subtype: str = "") -> list[st
             "提取 README、安装/运行方式、核心能力、维护状态和许可证",
             "写入 GitHub 知识资产，并反链到父资产证据",
         ]
-    if target_type == "official_doc" or subtype == "api_doc":
-        return [
-            "确认来源为官方域名或官方发布渠道",
-            "提取与父资产结论相关的接口、参数、限制、版本和风险",
-            "写入网页/官方文档知识资产，并标明待验证点",
-        ]
-    return [
-        "用至少两个可信来源核验父资产中的关键说法",
-        "区分事实、观点和仍需确认的信息",
-        "写入网页研究资产，并给出可复用结论",
-    ]
+    return []
 
 
 def _normalize_candidate(
@@ -698,16 +686,23 @@ def _normalize_candidate(
     target_url = "" if unsafe_url_reason else canonicalize_url(raw_target_url)
     raw_type = str(raw.get("target_type") or raw.get("derived_kind") or raw.get("candidate_type") or "").strip()
     subtype = str(raw.get("subtype") or raw.get("derived_subtype") or "").strip()
-    target_type = raw_type if raw_type in ALLOWED_TARGET_TYPES else _target_type_from_action(
-        str(raw.get("suggested_action") or raw.get("source_action") or raw.get("reason") or ""),
+    target_type = raw_type or _target_type_from_action(
+        str(raw.get("suggested_action") or raw.get("source_action") or ""),
         name,
         str(raw.get("type") or ""),
     )
-    if target_type not in ALLOWED_TARGET_TYPES:
-        target_type = "web_research"
-    if "api" in subtype.lower() or "api" in str(raw.get("suggested_action") or "").lower():
-        target_type = "official_doc"
-        subtype = "api_doc"
+    organization = _normalize_name(raw.get("organization") or raw.get("owner") or raw.get("author"))
+    purpose = _redact_text(raw.get("purpose") or raw.get("project_purpose"))[:500]
+    feature_keywords = _string_list(
+        raw.get("feature_keywords") or raw.get("featureKeywords"),
+        limit=8,
+    )
+    visual_clues = _string_list(raw.get("visual_clues") or raw.get("visualClues"), limit=6)
+    open_source_evidence = _string_list(
+        raw.get("open_source_evidence") or raw.get("openSourceEvidence"),
+        limit=6,
+    )
+    evidence = _string_list(raw.get("evidence") or raw.get("source_evidence"), limit=6)
     parent_context = _redact_text(
         raw.get("parent_context")
         or raw.get("parentContext")
@@ -715,6 +710,12 @@ def _normalize_candidate(
         or raw.get("context")
         or raw.get("reason")
     )[:500]
+    raw_search_query = _redact_text(raw.get("search_query") or raw.get("searchQuery"))[:220]
+    fallback_query_parts = [name, organization, *feature_keywords]
+    has_structured_nameless_clues = bool(organization and feature_keywords)
+    search_query = raw_search_query
+    if not search_query and (name or has_structured_nameless_clues):
+        search_query = " ".join(part for part in fallback_query_parts if part)[:220]
     fallback_scores = _heuristic_scores(
         name,
         target_type,
@@ -729,19 +730,32 @@ def _normalize_candidate(
         " ".join(_string_list(raw.get("evidence"), limit=6)),
     ]))
     score = _normalized_score(scores)
-    canonical_target = _canonical_target(target_type, name, target_url)
+    canonical_target = _canonical_target(target_type, name, target_url, search_query)
     dedupe_key = _dedupe_key(target_type, canonical_target)
     dedupe_status, matched_asset = _vault_contains_target(vault_path, canonical_target)
 
     downgrade_flags = _string_list(raw.get("downgrade_flags"), limit=8)
-    if not name and not target_url:
-        downgrade_flags.append("missing_name_and_url")
-    if not target_url and target_type == "official_doc":
-        downgrade_flags.append("missing_explicit_url")
+    if target_type not in ALLOWED_TARGET_TYPES:
+        downgrade_flags.append("target_type_not_allowed")
+    if not (name or target_url or search_query):
+        downgrade_flags.append("missing_github_locator")
+    if target_type == "github_project" and not target_url and not name and not (
+        raw_search_query or has_structured_nameless_clues
+    ):
+        downgrade_flags.append("missing_distinctive_search_clues")
     if not target_url and target_type == "github_project":
         downgrade_flags.append("target_resolution_required")
-    if not target_url and target_type == "web_research":
-        downgrade_flags.append("missing_explicit_source")
+    evidence_text = " ".join([
+        target_url,
+        parent_context,
+        *open_source_evidence,
+        *evidence,
+        *visual_clues,
+    ])
+    if target_type == "github_project" and not OPEN_SOURCE_EVIDENCE_RE.search(evidence_text):
+        downgrade_flags.append("missing_open_source_evidence")
+    if target_type == "github_project" and not any((purpose, parent_context, feature_keywords, evidence)):
+        downgrade_flags.append("missing_project_context")
     if unsafe_url_reason:
         downgrade_flags.append(unsafe_url_reason)
     if "[不确定]" in str(raw) or "[看不清]" in str(raw) or "[看不见]" in str(raw):
@@ -754,17 +768,7 @@ def _normalize_candidate(
         execution_status = "rejected"
     elif dedupe_status != "new":
         execution_status = "existing_related"
-    elif not target_url and target_type == "official_doc":
-        execution_status = "needs_target"
-    elif not target_url and target_type == "web_research":
-        execution_status = "needs_target"
     task_kind = _task_kind(target_type, subtype)
-    search_query = _redact_text(raw.get("search_query") or _build_search_query(
-        name,
-        target_type,
-        subtype,
-        parent_context,
-    ))[:220]
     acceptance_criteria = _string_list(
         raw.get("acceptance_criteria") or _default_acceptance_criteria(target_type, subtype),
         limit=6,
@@ -772,12 +776,17 @@ def _normalize_candidate(
 
     return {
         "id": _candidate_id(dedupe_key),
-        "name": name or target_url or "未命名派生线索",
+        "name": name,
         "target_type": target_type,
-        "derived_kind": "api_doc" if subtype == "api_doc" else target_type,
+        "derived_kind": target_type,
         "task_kind": task_kind,
         "target_url": target_url,
         "search_query": search_query,
+        "organization": organization,
+        "purpose": purpose,
+        "feature_keywords": feature_keywords,
+        "visual_clues": visual_clues,
+        "open_source_evidence": open_source_evidence,
         "canonical_target": canonical_target,
         "dedupe_key": dedupe_key,
         "decision": decision,
@@ -788,7 +797,7 @@ def _normalize_candidate(
         "reason": _redact_text(raw.get("reason") or parent_context or raw.get("suggested_action"))[:500],
         "parent_context": parent_context,
         "subject_role": subject_role,
-        "evidence": _string_list(raw.get("evidence") or raw.get("source_evidence"), limit=6),
+        "evidence": evidence,
         "acceptance_criteria": acceptance_criteria,
         "relation_type": _relation_type(target_type, subtype),
         "intended_asset_family": "knowledge_asset",
@@ -821,7 +830,11 @@ def _auto_block_reasons(item: dict[str, Any]) -> list[str]:
         reasons.append("target_type_not_allowed")
     downgrade_flags = set(item.get("downgrade_flags") or [])
     blocking_flags = {
-        "missing_name_and_url",
+        "target_type_not_allowed",
+        "missing_github_locator",
+        "missing_distinctive_search_clues",
+        "missing_open_source_evidence",
+        "missing_project_context",
         "url_contains_credentials",
         "non_https_target_url",
         "local_target_url",
@@ -831,12 +844,10 @@ def _auto_block_reasons(item: dict[str, Any]) -> list[str]:
     }
     for flag in sorted(blocking_flags & downgrade_flags):
         reasons.append(flag)
-    if target_type != "github_project" and not item.get("target_url"):
-        reasons.append("target_url_required")
-    if target_type == "github_project" and not (item.get("target_url") or item.get("name")):
-        reasons.append("github_name_or_url_required")
-    if target_type != "github_project" and "requires_confirmation" in downgrade_flags:
-        reasons.append("requires_confirmation")
+    if target_type == "github_project" and not (
+        item.get("target_url") or item.get("name") or item.get("search_query")
+    ):
+        reasons.append("github_locator_required")
     return sorted(set(reasons))
 
 
@@ -1041,6 +1052,11 @@ def public_derived_tasks(decision: dict[str, Any]) -> list[dict[str, Any]]:
             "taskKind": item.get("task_kind"),
             "targetUrl": item.get("target_url"),
             "searchQuery": item.get("search_query"),
+            "organization": item.get("organization"),
+            "purpose": item.get("purpose"),
+            "featureKeywords": item.get("feature_keywords") or [],
+            "visualClues": item.get("visual_clues") or [],
+            "openSourceEvidence": _string_list(item.get("open_source_evidence") or [], limit=3),
             "canonicalTarget": item.get("canonical_target"),
             "decision": item.get("decision"),
             "status": item.get("execution_status"),

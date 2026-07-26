@@ -21,6 +21,9 @@ const settingsDetailIds = [
 
 assert.doesNotMatch(js, /strategyModel|videoStrategyModel|arkStrategyModel/);
 assert.doesNotMatch(js, /item\.score/, 'derived candidate scores must not be shown in the popup');
+assert.doesNotMatch(js, /official_doc|web_research/, 'popup must not expose removed derivation types');
+assert.match(js, /task\.derivedTasks\.filter\(item => item\?\.targetType === 'github_project'\)/);
+assert.match(js, /请输入公开 GitHub 仓库链接/);
 
 assert.match(html, /class="status-strip"[\s\S]*id="status-agent"[\s\S]*id="status-api"[\s\S]*id="status-cookie"[\s\S]*id="status-vault"/);
 assert.match(html, /<h1>Agent-wiki 控制台<\/h1>/);

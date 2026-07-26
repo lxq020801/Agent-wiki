@@ -36,7 +36,7 @@ from install.vault_lifecycle import (
     VaultLifecycleManager,
     dispatch_vault_lifecycle,
 )
-from server.github_service import GitHubService, GitHubServiceError
+from server.github_service import GitHubService, GitHubServiceError, normalize_owner_repo
 from server.operation_audit import (
     OperationAuditStore,
     OperationWebSocket,
@@ -2073,6 +2073,11 @@ class LibrarianServer:
             '',
         ))
 
+    def _clean_github_repository_url(self, value):
+        clean_url = self._clean_external_url(value)
+        owner_repo = normalize_owner_repo(clean_url)
+        return f'https://github.com/{owner_repo}' if owner_repo else ''
+
     async def handle_derived_task_action(self, msg):
         request_id = msg.get('requestId') or msg.get('request_id') or ''
         parent_task_id = str(msg.get('taskId') or msg.get('parentTaskId') or '').strip()
@@ -2141,6 +2146,17 @@ class LibrarianServer:
                 'candidateId': candidate_id,
                 'timestamp': datetime.now().isoformat(),
             }
+        target_type = str(candidate.get('targetType') or candidate.get('target_type') or '').strip()
+        if target_type != 'github_project':
+            return {
+                'type': 'derived_task_action_rejected',
+                'requestId': request_id,
+                'parentTaskId': parent_task_id,
+                'candidateId': candidate_id,
+                'reason': 'unsupported_target_type',
+                'message': '当前只支持 GitHub 项目派生',
+                'timestamp': datetime.now().isoformat(),
+            }
         candidate_status = str(candidate.get('status') or candidate.get('candidateStatus') or '').strip()
         candidate_decision = str(candidate.get('decision') or '').strip()
         allowed_statuses = {'candidate', 'auto_ready', 'needs_target', 'failed', 'cancelled'}
@@ -2187,7 +2203,7 @@ class LibrarianServer:
             }
         target_url = str(msg.get('targetUrl') or '').strip()
         if target_url:
-            clean_url = self._clean_external_url(target_url)
+            clean_url = self._clean_github_repository_url(target_url)
             if not clean_url:
                 return {
                     'type': 'derived_task_action_rejected',
@@ -2195,12 +2211,12 @@ class LibrarianServer:
                     'parentTaskId': parent_task_id,
                     'candidateId': candidate_id,
                     'reason': 'invalid_target_url',
-                    'message': '派生目标 URL 必须是可信 HTTPS 外部链接',
+                    'message': '派生目标必须是公开 GitHub 仓库链接',
                     'timestamp': datetime.now().isoformat(),
                 }
             candidate['targetUrl'] = clean_url
         elif candidate.get('targetUrl') or candidate.get('target_url'):
-            clean_url = self._clean_external_url(candidate.get('targetUrl') or candidate.get('target_url'))
+            clean_url = self._clean_github_repository_url(candidate.get('targetUrl') or candidate.get('target_url'))
             if not clean_url:
                 return {
                     'type': 'derived_task_action_rejected',
@@ -2208,7 +2224,7 @@ class LibrarianServer:
                     'parentTaskId': parent_task_id,
                     'candidateId': candidate_id,
                     'reason': 'invalid_target_url',
-                    'message': '派生目标 URL 必须是可信 HTTPS 外部链接',
+                    'message': '派生目标必须是公开 GitHub 仓库链接',
                     'timestamp': datetime.now().isoformat(),
                 }
             candidate['targetUrl'] = clean_url
@@ -2336,11 +2352,13 @@ class LibrarianServer:
             if not isinstance(candidate, dict) or candidate.get('autoEligible') is not True:
                 continue
             candidate = dict(candidate)
+            if str(candidate.get('targetType') or candidate.get('target_type') or '') != 'github_project':
+                continue
             if candidate.get('status') not in {'auto_ready', 'candidate'}:
                 continue
             raw_target_url = candidate.get('targetUrl') or candidate.get('target_url') or ''
             if raw_target_url:
-                clean_url = self._clean_external_url(raw_target_url)
+                clean_url = self._clean_github_repository_url(raw_target_url)
                 if not clean_url:
                     self._update_derived_action_item(
                         parent_task_id, candidate.get('id'),

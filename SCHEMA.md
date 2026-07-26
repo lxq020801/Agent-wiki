@@ -82,7 +82,7 @@ vault/
 
 > 以下执行规则描述当前已实现行为，不代表可以据此扩展新的派生类型。
 
-视频/图文知识入库可以生成派生任务候选，例如 GitHub 项目、官方文档、API 文档或网页研究。候选只是运行态决策记录，不是正式知识资产：
+视频/图文知识入库当前只为明确介绍的开源项目生成 GitHub 派生候选。官方文档、API 文档、网页研究、普通产品、公司和泛概念不进入派生候选。候选只是运行态决策记录，不是正式知识资产：
 
 - 不参与 `asset_family` / `type` / `source_media` 分类。
 - 不进入 `index.md`。
@@ -92,13 +92,12 @@ vault/
 
 完整评分、证据、去重状态、执行建议、验收标准、父资产追溯信息必须留在运行审计，不得塞进资产 frontmatter。
 
-高置信、低风险、可解析的 GitHub 项目候选可以自动进入 `derived_ingest` 派生执行队列。`official_doc` 和 `web_research` 只有在目标明确、证据强、父资产强依赖时才进入可见候选；普通补充研究只保留在审计记录。派生工具执行完成后才生成与其他资产结构一致的正式资产，并回写真实存在的 Obsidian wikilink：
+候选必须包含直接开源证据以及项目用途、能力或用法证据。项目名称和 URL 均允许缺失，但此时必须提供组织、功能、画面文字等可区分线索和明确的 GitHub 搜索查询。只有 GitHub 官方 API 返回唯一可信匹配时才可以自动进入 `derived_ingest` 派生执行队列；歧义或未找到时等待确认。派生工具执行完成后才生成与其他资产结构一致的正式资产，并回写真实存在的 Obsidian wikilink：
 
 - `github_project` -> `type: github_project` / `asset_family: knowledge_asset` / `source_media: github`
-- `official_doc` / `web_research` -> `type: web_clip` / `asset_family: knowledge_asset` / `source_media: webpage`，并写 `derived_kind`
 - 父资产 `related` 追加子资产链接；子资产 `derived_from` 和 `related` 回链父资产
 - 候选阶段禁止写未来 `[[wikilink]]`，避免死链
-- 候选数量不设固定上限；筛选依据是对象是否为来源的主要介绍对象，而不是按数量截断
+- 候选数量不设固定上限；筛选依据是来源是否确实介绍了一个开源项目，而不是按数量截断
 - 只有子资产真实写入成功后，才在父子资产元数据中建立可解析的真实关系；失败、歧义或未执行候选不得写入正文或伪装成已完成关系
 
 ---

@@ -24,7 +24,6 @@ import urllib.request
 from dataclasses import dataclass
 from contextlib import contextmanager
 from datetime import datetime
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +71,8 @@ DEFAULT_BRIDGE_ROOT = Path.home() / ".agent-wiki"
 _AUDIT_ROOT_NAME = "run-artifacts"
 AUTO_MATCH_SCORE = 6
 AUTO_MATCH_MARGIN = 2
+NAMELESS_AUTO_MATCH_SCORE = 7
+NAMELESS_AUTO_MATCH_MARGIN = 3
 MAX_GITHUB_SEARCH_QUERIES = 8
 MAX_GITHUB_REPOS_TO_SCORE = 10
 MAX_GITHUB_REPOS_README = 4
@@ -356,8 +357,7 @@ def _looks_like_machine_echo(text: str) -> bool:
         r'"(?:full_name|html_url|stargazers_count)"\s*:',
         text,
     )
-    web_material = re.search(r'"(?:url|domain|text)"\s*:', text) and re.search(r'"title"\s*:', text)
-    return bool(github_material or web_material)
+    return bool(github_material)
 
 
 def _sanitize_generated_body(text: Any) -> str:
@@ -390,45 +390,6 @@ class ResolvedTarget:
     confidence: float
     evidence: list[str]
     raw: dict[str, Any]
-
-
-class TextExtractor(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.parts: list[str] = []
-        self.skip_depth = 0
-        self.title = ""
-        self._in_title = False
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in {"script", "style", "noscript", "svg"}:
-            self.skip_depth += 1
-        if tag == "title":
-            self._in_title = True
-        if tag in {"p", "div", "section", "article", "li", "h1", "h2", "h3", "br"}:
-            self.parts.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in {"script", "style", "noscript", "svg"} and self.skip_depth:
-            self.skip_depth -= 1
-        if tag == "title":
-            self._in_title = False
-
-    def handle_data(self, data: str) -> None:
-        text = re.sub(r"\s+", " ", data).strip()
-        if not text:
-            return
-        if self._in_title:
-            self.title = (self.title + " " + text).strip()
-            return
-        if not self.skip_depth:
-            self.parts.append(text)
-
-    def text(self) -> str:
-        body = "\n".join(self.parts)
-        body = re.sub(r"\n{3,}", "\n\n", body)
-        body = re.sub(r"[ \t]{2,}", " ", body)
-        return body.strip()
 
 
 def _load_task(task_file: Path) -> dict[str, Any]:
@@ -557,30 +518,6 @@ def _json_request(url: str, *, timeout: int = 20) -> dict[str, Any]:
     ) from last_http_error
 
 
-def _text_request(url: str, *, timeout: int = 25) -> tuple[str, str]:
-    _ensure_safe_external_url(url)
-    req = urllib.request.Request(url, headers={
-        "Accept": "text/html, text/plain;q=0.9, */*;q=0.8",
-        "User-Agent": "agent-wiki-derive",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            final_url = getattr(resp, "url", "") or resp.geturl()
-            _ensure_safe_external_url(final_url)
-            raw = resp.read(1_500_000)
-            content_type = resp.headers.get("content-type", "")
-    except urllib.error.HTTPError as exc:
-        raise DeriveError("http_error", f"HTTP {exc.code}: {_display_url(url)}", recoverable=True) from exc
-    except Exception as exc:
-        raise DeriveError("network_error", f"{type(exc).__name__}: {exc}", recoverable=True) from exc
-    text = raw.decode("utf-8", errors="replace")
-    if "html" in content_type.lower() or "<html" in text[:500].lower():
-        parser = TextExtractor()
-        parser.feed(text)
-        return parser.title, parser.text()
-    return "", text.strip()
-
-
 def _ensure_safe_external_url(value: str) -> None:
     parsed = urllib.parse.urlparse(str(value or "").strip())
     if parsed.scheme != "https" or not parsed.netloc:
@@ -658,14 +595,6 @@ def _target_audit_summary(target: ResolvedTarget) -> dict[str, Any]:
             "readme_chars": len(readme),
             "cleaned_readme_chars": len(cleaned_readme),
         }
-    else:
-        text = str(target.raw.get("text") or "") if isinstance(target.raw, dict) else ""
-        raw_summary = {
-            "title": target.raw.get("title") if isinstance(target.raw, dict) else "",
-            "domain": target.raw.get("domain") if isinstance(target.raw, dict) else "",
-            "text": text[:120_000],
-            "text_chars": len(text),
-        }
     return {
         "url": target.url,
         "title": target.title,
@@ -698,13 +627,25 @@ def _candidate_text_values(candidate: dict[str, Any]) -> list[str]:
         "reason",
         "parentContext",
         "parent_context",
+        "organization",
+        "purpose",
         "targetUrl",
         "target_url",
     ):
         value = candidate.get(key)
         if value:
             values.append(str(value))
-    for key in ("evidence", "acceptanceCriteria", "acceptance_criteria"):
+    for key in (
+        "evidence",
+        "acceptanceCriteria",
+        "acceptance_criteria",
+        "featureKeywords",
+        "feature_keywords",
+        "visualClues",
+        "visual_clues",
+        "openSourceEvidence",
+        "open_source_evidence",
+    ):
         value = candidate.get(key)
         if isinstance(value, list):
             values.extend(str(item) for item in value if item)
@@ -830,6 +771,13 @@ def _github_search_queries(candidate: dict[str, Any]) -> list[str]:
         if clean and clean not in queries:
             queries.append(clean)
 
+    explicit_query = str(candidate.get("searchQuery") or candidate.get("search_query") or "").strip()
+    if explicit_query:
+        if re.search(r"\bin:(?:name|description|readme)", explicit_query, re.I):
+            add(explicit_query)
+        else:
+            add(f"{explicit_query} in:name,description,readme")
+
     for alias in aliases:
         if "/" in alias and re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", alias):
             add(alias)
@@ -882,7 +830,12 @@ def _score_repo_match(candidate: dict[str, Any], repo: dict[str, Any], readme: s
         str(candidate.get("reason") or ""),
         str(candidate.get("parent_context") or ""),
         str(candidate.get("parentContext") or ""),
+        str(candidate.get("organization") or ""),
+        str(candidate.get("purpose") or ""),
         " ".join(str(x) for x in candidate.get("evidence") or []),
+        " ".join(str(x) for x in candidate.get("featureKeywords") or candidate.get("feature_keywords") or []),
+        " ".join(str(x) for x in candidate.get("visualClues") or candidate.get("visual_clues") or []),
+        " ".join(str(x) for x in candidate.get("openSourceEvidence") or candidate.get("open_source_evidence") or []),
         str(candidate.get("searchQuery") or candidate.get("search_query") or ""),
     ]).lower()
     description = str(repo.get("description") or "").lower()
@@ -897,6 +850,14 @@ def _score_repo_match(candidate: dict[str, Any], repo: dict[str, Any], readme: s
     full_name = str(repo.get("full_name") or "").lower()
     repo_compact = _compact_identity(repo_name)
     full_compact = _compact_identity(full_name)
+    organization = _compact_identity(candidate.get("organization") or "")
+    owner = repo.get("owner") if isinstance(repo.get("owner"), dict) else {}
+    owner_compact = _compact_identity(owner.get("login") if isinstance(owner, dict) else "")
+    if organization and owner_compact:
+        if organization == owner_compact:
+            score += 4
+        elif organization in owner_compact or owner_compact in organization:
+            score += 2
     alias_score = 0
     for alias in aliases:
         alias_lower = alias.lower()
@@ -1029,7 +990,9 @@ def resolve_github_target(
         raise DeriveError("needs_target", f"GitHub API 未找到项目：{name or query}", recoverable=True)
     best_score, best, best_readme, best_query = scored[0]
     second = scored[1][0] if len(scored) > 1 else 0
-    if best_score < AUTO_MATCH_SCORE or best_score - second < AUTO_MATCH_MARGIN:
+    required_score = AUTO_MATCH_SCORE if name else NAMELESS_AUTO_MATCH_SCORE
+    required_margin = AUTO_MATCH_MARGIN if name else NAMELESS_AUTO_MATCH_MARGIN
+    if best_score < required_score or best_score - second < required_margin:
         _add_artifact(audit_files, "derive_target_resolution", _write_audit_json(
             audit_dir,
             "01-target-resolution.json",
@@ -1041,6 +1004,8 @@ def resolve_github_target(
                 "scored_results": scored_audit,
                 "best_score": best_score,
                 "second_score": second,
+                "required_score": required_score,
+                "required_margin": required_margin,
                 "outcome": "ambiguous_target",
             },
         ))
@@ -1080,41 +1045,6 @@ def resolve_github_target(
     return target
 
 
-def resolve_web_target(
-    candidate: dict[str, Any],
-    target_type: str,
-    *,
-    audit_dir: Path | None = None,
-    audit_files: dict[str, Any] | None = None,
-) -> ResolvedTarget:
-    audit_files = audit_files if audit_files is not None else {}
-    target_url = str(candidate.get("targetUrl") or candidate.get("target_url") or "").strip()
-    if not target_url:
-        raise DeriveError("needs_target", f"{target_type} 派生需要明确 URL", recoverable=True)
-    target_url = _clean_external_url(target_url)
-    title, text = _text_request(target_url)
-    parsed = urllib.parse.urlparse(target_url)
-    target = ResolvedTarget(
-        url=target_url,
-        title=title or str(candidate.get("name") or parsed.netloc or target_url),
-        kind=target_type,
-        confidence=0.85,
-        evidence=["候选已提供明确网页 URL"],
-        raw={"title": title, "text": text[:120_000], "domain": parsed.hostname or ""},
-    )
-    _add_artifact(audit_files, "derive_target_resolution", _write_audit_json(
-        audit_dir,
-        "01-target-resolution.json",
-        {
-            "method": "explicit_web_url",
-            "candidate": candidate,
-            "resolved_target": _target_audit_summary(target),
-            "outcome": "resolved",
-        },
-    ))
-    return target
-
-
 def resolve_target(
     candidate: dict[str, Any],
     *,
@@ -1124,8 +1054,6 @@ def resolve_target(
     target_type = str(candidate.get("targetType") or candidate.get("target_type") or "")
     if target_type == "github_project":
         return resolve_github_target(candidate, audit_dir=audit_dir, audit_files=audit_files)
-    if target_type in {"official_doc", "web_research"}:
-        return resolve_web_target(candidate, target_type, audit_dir=audit_dir, audit_files=audit_files)
     raise DeriveError("unsupported_target_type", f"不支持的派生类型：{target_type}")
 
 
@@ -1278,51 +1206,40 @@ def _format_yaml_list(values: list[str]) -> str:
 
 
 def _tag_list(target_type: str, content: str = "") -> tuple[str, ...]:
+    if target_type != "github_project":
+        raise DeriveError("unsupported_target_type", f"不支持的派生类型：{target_type}")
     tags = _content_tags(content)
-    auxiliary = {
-        "github_project": ("github",),
-        "official_doc": ("official-doc", "webpage"),
-        "web_research": ("web-research", "webpage"),
-    }.get(target_type, ("webpage",))
-    for tag in auxiliary:
-        if tag not in tags:
-            tags.append(tag)
+    if "github" not in tags:
+        tags.append("github")
     return tuple(tags)
 
 
 def _build_prompt(task: dict[str, Any], candidate: dict[str, Any], target: ResolvedTarget, parent_link: str) -> str:
     target_type = str(candidate.get("targetType") or candidate.get("target_type") or target.kind)
+    if target_type != "github_project" or target.kind != "github_project":
+        raise DeriveError("unsupported_target_type", f"不支持的派生类型：{target_type}")
     raw = target.raw
-    if target_type == "github_project":
-        repo = raw.get("repo", {})
-        cleaned_readme = clean_readme(raw.get("readme", ""))
-        source_block = json.dumps({
-            "repo": {
-                "full_name": repo.get("full_name"),
-                "description": repo.get("description"),
-                "language": repo.get("language"),
-                "stars": repo.get("stargazers_count"),
-                "forks": repo.get("forks_count"),
-                "open_issues": repo.get("open_issues_count"),
-                "license": (repo.get("license") or {}).get("spdx_id") if isinstance(repo.get("license"), dict) else "",
-                "pushed_at": repo.get("pushed_at"),
-                "html_url": repo.get("html_url"),
-            },
-            "readme": cleaned_readme,
-        }, ensure_ascii=False)
-        required = (
-            "正文必须依次且仅使用三个二级章节：## 简洁概括、## 完整内容整理、## AI 分析。"
-            "简洁概括说明项目是什么；完整内容整理覆盖来源实际表达的问题、最小可运行路径、核心 API/架构、"
-            "限制与状态；AI 分析使用限定语说明与父来源的关系、采用判断、风险和可复用价值。"
-        )
-    else:
-        source_block = json.dumps({
-            "url": target.url,
-            "title": target.title,
-            "domain": raw.get("domain"),
-            "text": raw.get("text", "")[:50000],
-        }, ensure_ascii=False)
-        required = "来源链路、核心结论、关键事实、与父视频说法对照、可执行建议、风险和不确定"
+    repo = raw.get("repo", {})
+    cleaned_readme = clean_readme(raw.get("readme", ""))
+    source_block = json.dumps({
+        "repo": {
+            "full_name": repo.get("full_name"),
+            "description": repo.get("description"),
+            "language": repo.get("language"),
+            "stars": repo.get("stargazers_count"),
+            "forks": repo.get("forks_count"),
+            "open_issues": repo.get("open_issues_count"),
+            "license": (repo.get("license") or {}).get("spdx_id") if isinstance(repo.get("license"), dict) else "",
+            "pushed_at": repo.get("pushed_at"),
+            "html_url": repo.get("html_url"),
+        },
+        "readme": cleaned_readme,
+    }, ensure_ascii=False)
+    required = (
+        "正文必须依次且仅使用三个二级章节：## 简洁概括、## 完整内容整理、## AI 分析。"
+        "简洁概括说明项目是什么；完整内容整理覆盖来源实际表达的问题、最小可运行路径、核心 API/架构、"
+        "限制与状态；AI 分析使用限定语说明与父来源的关系、采用判断、风险和可复用价值。"
+    )
     context = {
         "candidate_name": candidate.get("name"),
         "target_type": target_type,
@@ -1335,7 +1252,7 @@ def _build_prompt(task: dict[str, Any], candidate: dict[str, Any], target: Resol
     return (
         "你是 Obsidian 知识资产派生工具。请基于给定来源生成一篇中文 Markdown 子资产正文。\n"
         "要求：不要输出 frontmatter；不要编造；不确定处明确标注；内容要可复用、可执行、可验证。"
-        "来源事实必须归因到仓库、README 或网页；AI 判断单列并使用限定语，不得写成来源无法支持的绝对结论。\n"
+        "来源事实必须归因到仓库或 README；AI 判断单列并使用限定语，不得写成来源无法支持的绝对结论。\n"
         f"必须包含这些信息：{required}。\n\n"
         f"父资产与派生上下文：\n{json.dumps(context, ensure_ascii=False, indent=2)}\n\n"
         f"目标来源材料：\n{source_block}\n"
@@ -1355,18 +1272,19 @@ def _child_frontmatter(
 ) -> tuple[str, Path, tuple[str, ...]]:
     date = datetime.now().strftime("%Y%m%d")
     target_type = str(candidate.get("targetType") or candidate.get("target_type") or target.kind)
+    if target_type != "github_project" or target.kind != "github_project":
+        raise DeriveError("unsupported_target_type", f"不支持的派生类型：{target_type}")
     target_material = json.dumps(target.raw, ensure_ascii=False)[:50000]
     tags = _tag_list(target_type, f"{title}\n{target_material}\n{body_text}")
-    if target_type == "github_project":
-        asset_id = _schema_asset_id(config.vault_path, date, "github")
-        rel_dir = Path("知识资产")
-        repo = target.raw.get("repo", {})
-        md_slug = _slug_for_vault(str(repo.get("full_name") or title), str(candidate.get("id") or "derived"), 58)
-        md_path = config.vault_path / rel_dir / f"{date}-{md_slug}.md"
-        license_id = ""
-        if isinstance(repo.get("license"), dict):
-            license_id = str(repo["license"].get("spdx_id") or "")
-        frontmatter = f"""---
+    asset_id = _schema_asset_id(config.vault_path, date, "github")
+    rel_dir = Path("知识资产")
+    repo = target.raw.get("repo", {})
+    md_slug = _slug_for_vault(str(repo.get("full_name") or title), str(candidate.get("id") or "derived"), 58)
+    md_path = config.vault_path / rel_dir / f"{date}-{md_slug}.md"
+    license_id = ""
+    if isinstance(repo.get("license"), dict):
+        license_id = str(repo["license"].get("spdx_id") or "")
+    frontmatter = f"""---
 id: "{asset_id}"
 type: github_project
 asset_family: knowledge_asset
@@ -1396,40 +1314,6 @@ derived_from: {_format_yaml_list([parent_link] if parent_link else [])}
 parent_source_url: "{_yaml_escape(task.get("parent_source_url") or task.get("parentSourceUrl") or "")}"
 verification_status: partially_verified
 evidence_level: primary
-related: {_format_yaml_list([parent_link] if parent_link else [])}
----
-"""
-        return frontmatter, md_path, tags
-
-    asset_id = _schema_asset_id(config.vault_path, date, "web")
-    rel_dir = Path("知识资产")
-    md_slug = _slug_for_vault(title, str(candidate.get("id") or "derived"), 58)
-    md_path = config.vault_path / rel_dir / f"{date}-{md_slug}.md"
-    domain = urllib.parse.urlparse(target.url).hostname or ""
-    derived_kind = "official_doc" if target_type == "official_doc" else "web_research"
-    frontmatter = f"""---
-id: "{asset_id}"
-type: web_clip
-asset_family: knowledge_asset
-source_media: webpage
-ingest_intent: derived_ingest
-title: "{_yaml_escape(title)}"
-source_url: "{_yaml_escape(target.url)}"
-author: "{_yaml_escape(domain)}"
-published: ""
-ingested: {datetime.now().strftime("%Y-%m-%d")}
-updated: {datetime.now().strftime("%Y-%m-%d")}
-tags: {_format_yaml_list(list(tags))}
-domain: "{_yaml_escape(domain)}"
-summary: "{_yaml_escape(summary)}"
-confidence: medium
-weight: 100
-status: active
-derived_kind: {derived_kind}
-derived_from: {_format_yaml_list([parent_link] if parent_link else [])}
-parent_source_url: "{_yaml_escape(task.get("parent_source_url") or task.get("parentSourceUrl") or "")}"
-verification_status: partially_verified
-evidence_level: {"official" if target_type == "official_doc" else "secondary"}
 related: {_format_yaml_list([parent_link] if parent_link else [])}
 ---
 """

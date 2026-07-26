@@ -63,7 +63,7 @@ related: []
 
 | 字段 | 适用类型 | 说明 |
 |------|----------|------|
-| `derived_kind` | `github_project` / `web_clip` | 派生来源类型：`github_project` / `official_doc` / `web_research` |
+| `derived_kind` | `github_project` | 当前派生来源类型仅为 `github_project` |
 | `derived_from` | `github_project` / `web_clip` | 指向父资产的真实 wikilink，必须在父资产存在后写入 |
 | `parent_task_id` | `github_project` / `web_clip` | 触发派生的父任务 ID |
 | `parent_candidate_id` | `github_project` / `web_clip` | 派生候选 ID |

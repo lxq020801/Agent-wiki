@@ -638,18 +638,20 @@ function submitDerivedAction(row, action) {
   const taskId = row.dataset.taskId || '';
   const candidateId = row.dataset.candidateId || '';
   const status = row.dataset.derivedStatus || '';
-  const targetType = row.dataset.targetType || '';
   const input = row.querySelector('[data-role="derived-url"]');
   let targetUrl = action === 'confirm' && input ? input.value.trim() : '';
-  if (action === 'confirm' && !targetUrl && (status === 'needs_target' || ['official_doc', 'web_research'].includes(targetType))) {
-    showHint('task-hint', '请先补充目标 HTTPS 链接', 'warning');
+  if (action === 'confirm' && !targetUrl && status === 'needs_target') {
+    showHint('task-hint', '请先补充 GitHub 仓库链接', 'warning');
     input?.focus();
     return;
   }
   if (action === 'confirm' && targetUrl) {
     try {
       const url = new URL(targetUrl);
-      if (url.protocol !== 'https:') throw new Error('URL 必须是 HTTPS');
+      const parts = url.pathname.split('/').filter(Boolean);
+      if (url.protocol !== 'https:' || url.hostname !== 'github.com' || parts.length < 2) {
+        throw new Error('请输入公开 GitHub 仓库链接');
+      }
     } catch (err) {
       showHint('task-hint', err.message || '目标链接格式不正确', 'error');
       return;
@@ -1643,7 +1645,9 @@ function renderTaskList(targetId, items) {
 }
 
 function appendDerivedPanel(card, task) {
-  const derived = Array.isArray(task.derivedTasks) ? task.derivedTasks : [];
+  const derived = Array.isArray(task.derivedTasks)
+    ? task.derivedTasks.filter(item => item?.targetType === 'github_project')
+    : [];
   if (!derived.length) return;
   const panel = document.createElement('div');
   panel.className = 'derived-panel';
@@ -1706,11 +1710,11 @@ function renderDerivedActions(task, item) {
   const actions = document.createElement('div');
   actions.className = 'derived-actions';
   let input = null;
-  if (status === 'needs_target' || (!item.targetUrl && ['official_doc', 'web_research'].includes(item.targetType))) {
+  if (status === 'needs_target') {
     input = document.createElement('input');
     input.className = 'derived-url-input';
     input.type = 'url';
-    input.placeholder = '补充公开 HTTPS 链接';
+    input.placeholder = '补充 GitHub 仓库链接';
     input.value = item.targetUrl || '';
     input.dataset.role = 'derived-url';
     input.setAttribute('aria-label', `为 ${item.name || '派生候选'} 补充目标链接`);
@@ -1766,11 +1770,7 @@ function derivedStatusLabel(item) {
 }
 
 function targetTypeLabel(type) {
-  return {
-    github_project: 'GitHub 资产',
-    official_doc: '官方/API 文档',
-    web_research: '网页研究'
-  }[type] || type || '';
+  return type === 'github_project' ? 'GitHub 资产' : '';
 }
 
 function taskTone(task) {

@@ -532,9 +532,9 @@ def test_derive_strategy_keeps_all_primary_candidates_dedupes_and_redacts(tmp: P
     )
 
     assert decision["enabled"] is True
-    assert len(decision["items"]) == 11
+    assert len(decision["items"]) == 1
     assert decision["limits"] == {"candidates": None}
-    assert decision["counts"]["suppressed"] == 0
+    assert decision["counts"]["suppressed"] == 10
     assert len({item["dedupe_key"] for item in decision["items"]}) == len(decision["items"])
     existing_items = [
         item for item in decision["items"]
@@ -548,13 +548,11 @@ def test_derive_strategy_keeps_all_primary_candidates_dedupes_and_redacts(tmp: P
     assert all(item.get("execution_status") != "queued" for item in decision["items"])
 
     public = public_derived_tasks(decision)
-    assert len(public) == 11
-    assert all(item["status"] in {"auto_ready", "needs_target", "existing_related"} for item in public)
+    assert len(public) == 1
+    assert public[0]["status"] == "existing_related"
     assert all(item["decision"] == "candidate" for item in public)
     assert all("score" not in item and "confidence" not in item for item in public)
-    generic = next(item for item in public if item["name"] == "AI")
-    assert generic["status"] == "needs_target"
-    assert generic["autoEligible"] is False
+    assert all(item["targetType"] == "github_project" for item in public)
     log_text = (tmp / "derive-runtime" / "logs" / "derive-strategy-events.jsonl").read_text(encoding="utf-8")
     assert "derive_decision" in log_text
     assert "api_key" not in log_text.lower()
@@ -609,6 +607,7 @@ def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp
                 "mentioned_context": "视频说 LangGraph 用于 Agent 状态图和工作流编排。",
                 "reason": "这是父视频方法可执行化的关键项目。",
                 "evidence": ["03:20 口播 LangGraph 做状态图"],
+                "open_source_evidence": ["03:18 字幕明确称 LangGraph 是开源项目"],
                 "confidence": 0.9,
                 "scores": scores,
                 "requires_confirmation": True,
@@ -640,10 +639,85 @@ def test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp
     assert langgraph["status"] == "auto_ready"
     assert "requires_confirmation" not in langgraph["autoBlockReasons"]
     assert "target_resolution_required" not in langgraph["autoBlockReasons"]
-    docs = next(item for item in public if item["name"] == "Some API Docs")
-    assert docs["status"] == "needs_target"
-    assert docs["autoEligible"] is False
-    assert docs["autoBlockReasons"] == ["status_needs_target", "target_url_required"]
+    assert not any(item["name"] == "Some API Docs" for item in public)
+    assert decision["counts"]["suppressed"] == 1
+
+
+def test_derive_strategy_accepts_unnamed_open_source_clues_only(tmp: Path) -> None:
+    import sys
+
+    os.environ["AGENT_WIKI_HOME"] = str(tmp / "derive-unnamed-runtime")
+    sys.path.insert(0, str(SCRIPTS))
+    from derive_strategy import derive_tasks_from_analysis, public_derived_tasks
+
+    analysis = "## 派生决策 JSON\n```json\n" + json.dumps({
+        "candidates": [
+            {
+                "name": "",
+                "target_type": "github_project",
+                "organization": "Acme Labs",
+                "purpose": "本地运行的智能体工作流编排工具",
+                "feature_keywords": ["self-hosted", "agent", "workflow", "orchestration"],
+                "visual_clues": ["终端画面出现 acme-labs 标识"],
+                "search_query": "Acme Labs self-hosted agent workflow orchestration",
+                "mentioned_context": "视频演示了本地部署和工作流编排。",
+                "reason": "项目用于自托管智能体工作流。",
+                "open_source_evidence": ["00:18 字幕明确称这是一个开源项目"],
+                "evidence": ["00:22-00:50 演示本地部署和节点编排"],
+            },
+            {
+                "name": "FLUX 3",
+                "target_type": "github_project",
+                "purpose": "生成 20 秒 AI 视频",
+                "search_query": "FLUX 3 video generation Black Forest Labs",
+                "mentioned_context": "视频比较两款商业视频模型。",
+                "reason": "视频展示模型效果。",
+                "evidence": ["片尾出现 Black Forest Labs Logo"],
+            },
+            {
+                "name": "",
+                "target_type": "github_project",
+                "purpose": "帮助团队管理项目",
+                "mentioned_context": "视频只说这是一个开源工具，没有名称、组织或可区分功能。",
+                "reason": "泛化描述不足以定位具体仓库。",
+                "open_source_evidence": ["字幕称这是开源工具"],
+                "evidence": ["只展示了通用项目管理界面"],
+            },
+            {
+                "name": "Some API Docs",
+                "target_type": "official_doc",
+                "target_url": "https://example.com/api",
+                "reason": "视频引用文档。",
+                "evidence": ["画面出现 API 文档"],
+            },
+        ],
+    }, ensure_ascii=False) + "\n```"
+    vault = tmp / "derive-unnamed-vault"
+    vault.mkdir()
+    decision = derive_tasks_from_analysis(
+        analysis,
+        source_id="unnamed-open-source",
+        source_url="https://v.douyin.com/open-source/",
+        source_media="douyin_video",
+        ingest_intent="knowledge_ingest",
+        vault_path=vault,
+        task_id="unnamed-open-source-task",
+    )
+
+    public = public_derived_tasks(decision)
+    assert len(public) == 1
+    assert public[0]["name"] == ""
+    assert public[0]["targetType"] == "github_project"
+    assert public[0]["searchQuery"] == "Acme Labs self-hosted agent workflow orchestration"
+    assert public[0]["organization"] == "Acme Labs"
+    assert public[0]["status"] == "auto_ready"
+    assert public[0]["autoEligible"] is True
+    assert decision["counts"]["suppressed"] == 3
+    retained_artifact = tmp / "derive-unnamed-runtime" / decision["audit_artifacts"]["files"]["derive_retained_candidates"]
+    retained_text = retained_artifact.read_text(encoding="utf-8")
+    assert "missing_open_source_evidence" in retained_text
+    assert "missing_distinctive_search_clues" in retained_text
+    assert "target_type_not_allowed" in retained_text
 
 
 def test_derive_strategy_allows_safe_urls_and_blocks_unsafe_urls(tmp: Path) -> None:
@@ -669,12 +743,13 @@ def test_derive_strategy_allows_safe_urls_and_blocks_unsafe_urls(tmp: Path) -> N
     analysis = "## 九、派生决策 JSON\n```json\n" + json.dumps({
         "candidates": [
             {
-                "name": "Official Docs",
+                "name": "Safe Repo",
                 "subject_role": "primary",
-                "target_type": "official_doc",
-                "target_url": "https://docs.example.com/api?token=secret&utm_source=x",
-                "reason": "需要核验 API 参数。",
-                "evidence": ["视频出现官方文档名称"],
+                "target_type": "github_project",
+                "target_url": "https://github.com/openai/example?utm_source=x",
+                "reason": "视频介绍它用于 Agent 工作流。",
+                "evidence": ["画面演示项目的 Agent 工作流"],
+                "open_source_evidence": ["字幕明确称这是开源仓库"],
                 "confidence": 0.95,
                 "scores": scores,
             },
@@ -701,10 +776,10 @@ def test_derive_strategy_allows_safe_urls_and_blocks_unsafe_urls(tmp: Path) -> N
         task_id="derive-url-task",
     )
     public = public_derived_tasks(decision)
-    docs = next(item for item in public if item["name"] == "Official Docs")
-    assert docs["targetUrl"] == "https://docs.example.com/api"
-    assert docs["autoEligible"] is True
-    assert docs["status"] == "auto_ready"
+    safe = next(item for item in public if item["name"] == "Safe Repo")
+    assert safe["targetUrl"] == "https://github.com/openai/example"
+    assert safe["autoEligible"] is True
+    assert safe["status"] == "auto_ready"
     assert not any(item["name"] == "Credential Repo" for item in public)
     suppressed = decision["audit_artifacts"]["files"]["derive_retained_candidates"]
     suppressed_text = (tmp / "derive-url-runtime" / suppressed).read_text(encoding="utf-8")
@@ -719,12 +794,13 @@ def test_knowledge_prompts_do_not_force_github_manual_confirmation() -> None:
     video_prompt = (SCRIPTS / "prompts" / "video_knowledge_ingest.md").read_text(encoding="utf-8")
     image_prompt = (SCRIPTS / "prompts" / "image_post_knowledge_ingest.md").read_text(encoding="utf-8")
     for prompt in (video_prompt, image_prompt):
-        assert '"requires_confirmation": false' in prompt
         assert "不设候选数量上限" in prompt
         assert "不使用分数、置信度" in prompt
         assert "只供任务系统读取" in prompt
-        assert "即使缺 URL，也可以设为 `false`" in prompt
-        assert "GitHub API 搜索解析" in prompt
+        assert "项目名称允许为空" in prompt
+        assert "target_type` 只能是 `github_project" in prompt
+        assert '"open_source_evidence"' in prompt
+        assert "官方文档、API 文档、网页研究" in prompt
         assert "## 简洁概括" in prompt
         assert "## 完整内容整理" in prompt
         assert "## AI 分析" in prompt
@@ -760,6 +836,7 @@ def test_derive_strategy_keeps_all_valid_candidates_without_role_gate(tmp: Path)
             "parent_context": f"视频把 {name} 作为案例逐一重点介绍和演示。",
             "reason": f"{name} 是视频的主要介绍对象。",
             "evidence": [f"画面和口播连续展示 {name} 的功能与使用方式"],
+            "open_source_evidence": [f"字幕明确称 {name} 是开源项目"],
             "confidence": 0.95,
             "requires_confirmation": False,
             "scores": scores,
@@ -773,6 +850,7 @@ def test_derive_strategy_keeps_all_valid_candidates_without_role_gate(tmp: Path)
         "parent_context": "视频只在说明依赖时顺带提及 FFmpeg。",
         "reason": "这是背景依赖，不是主要介绍对象。",
         "evidence": ["安装命令中出现一次"],
+        "open_source_evidence": ["安装说明称 FFmpeg 为开源依赖"],
         "confidence": 0.95,
         "scores": scores,
     })
@@ -906,6 +984,64 @@ def test_derive_executor_uses_context_to_disambiguate_same_name_repository() -> 
         derive_executor._json_request = original
 
     assert target.url == "https://github.com/oblien/openship"
+
+
+def test_derive_executor_resolves_unnamed_project_from_structured_clues() -> None:
+    import base64
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    import derive_executor
+
+    matched = {
+        "name": "orchestrator",
+        "full_name": "acme-labs/orchestrator",
+        "description": "Self-hosted agent workflow orchestration platform",
+        "stargazers_count": 500,
+        "owner": {"login": "acme-labs"},
+        "html_url": "https://github.com/acme-labs/orchestrator",
+    }
+    unrelated = {
+        "name": "agent-tools",
+        "full_name": "other/agent-tools",
+        "description": "A collection of agent utilities",
+        "stargazers_count": 1000,
+        "owner": {"login": "other"},
+        "html_url": "https://github.com/other/agent-tools",
+    }
+    search_urls: list[str] = []
+
+    def fake_request(url: str, *, timeout: int = 20):
+        if "search/repositories" in url:
+            search_urls.append(url)
+            return {"items": [matched, unrelated]}
+        if url.endswith("/readme"):
+            text = (
+                "Self-hosted agent workflow orchestration with local deployment"
+                if "/acme-labs/" in url
+                else "General command-line utilities"
+            )
+            return {"content": base64.b64encode(text.encode()).decode()}
+        return matched if "/acme-labs/" in url else unrelated
+
+    original = derive_executor._json_request
+    derive_executor._json_request = fake_request
+    try:
+        target = derive_executor.resolve_github_target({
+            "name": "",
+            "organization": "Acme Labs",
+            "purpose": "本地运行的智能体工作流编排工具",
+            "featureKeywords": ["self-hosted", "agent", "workflow", "orchestration"],
+            "searchQuery": "Acme Labs self-hosted agent workflow orchestration",
+            "openSourceEvidence": ["字幕明确称这是开源项目"],
+            "evidence": ["画面演示本地部署和工作流节点编排"],
+        })
+    finally:
+        derive_executor._json_request = original
+
+    assert target.url == "https://github.com/acme-labs/orchestrator"
+    assert search_urls
+    assert "Acme%20Labs%20self-hosted%20agent%20workflow%20orchestration" in search_urls[0]
 
 
 def test_vault_write_schema(tmp: Path) -> None:
@@ -1110,7 +1246,7 @@ def test_derive_strategy_ignores_candidates_json_outside_derived_section(tmp: Pa
 ## 四、工具、项目、API、关键词
 | 名称 | 类型 | 上下文 | 后续动作 |
 |---|---|---|---|
-| LangGraph | GitHub | Agent 状态图工具 | 派生 GitHub 任务 |
+| LangGraph | GitHub | 开源 Agent 状态图工具 | 派生 GitHub 任务 |
 """
     decision = derive_tasks_from_analysis(
         analysis,
@@ -1624,13 +1760,13 @@ def test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp: Path) 
         },
         "items": [{
             "id": "dt-primary",
-            "name": "Primary API",
-            "target_type": "official_doc",
-            "target_url": "https://example.com/docs/primary-api",
+            "name": "LangGraph",
+            "target_type": "github_project",
+            "target_url": "https://github.com/langchain-ai/langgraph",
             "decision": "candidate",
             "execution_status": "candidate",
             "score": 84,
-            "reason": "需要核验父视频里的 API 参数。",
+            "reason": "视频介绍这个开源项目用于 Agent 状态图。",
         }],
     }
 
@@ -1703,12 +1839,12 @@ def test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp: Path) 
     assert len(summary["derived_tasks"]) == 1
     expected_public = {
         "id": "dt-primary",
-        "name": "Primary API",
-        "targetType": "official_doc",
-        "targetUrl": "https://example.com/docs/primary-api",
+        "name": "LangGraph",
+        "targetType": "github_project",
+        "targetUrl": "https://github.com/langchain-ai/langgraph",
         "decision": "candidate",
         "status": "candidate",
-        "reason": "需要核验父视频里的 API 参数。",
+        "reason": "视频介绍这个开源项目用于 Agent 状态图。",
     }
     for key, value in expected_public.items():
         assert summary["derived_tasks"][0][key] == value
@@ -3537,13 +3673,13 @@ def test_websocket_public_task_status_exposes_derived_candidates(tmp: Path) -> N
     status_dir.mkdir(parents=True)
     derived_tasks = [{
         "id": "dt-status",
-        "name": "Status API",
-        "targetType": "official_doc",
-        "targetUrl": "https://example.com/docs/status-api",
+        "name": "Status Project",
+        "targetType": "github_project",
+        "targetUrl": "https://github.com/example/status-project",
         "decision": "candidate",
         "status": "candidate",
         "score": 82,
-        "reason": "需要核验状态 API。",
+        "reason": "来源明确介绍了这个开源项目。",
     }]
     derived_summary = {"candidate": 1, "rejected": 1, "suppressed": 0}
     audit_artifacts = {
@@ -3690,6 +3826,47 @@ def test_websocket_derived_actions_require_ready_parent_and_valid_state(tmp: Pat
     assert reply["type"] == "derived_task_action_rejected"
     assert reply["reason"] == "candidate_status_not_executable"
 
+    parent_file.write_text(json.dumps({
+        "id": "parent-action",
+        "ok": True,
+        "stage": "done",
+        "source_url": "https://v.douyin.com/action/",
+        "assets": [{"vault_path": str(parent_asset), "derived_tasks": []}],
+        "derived_tasks": [
+            {
+                "id": "dt-legacy-web",
+                "name": "Legacy Docs",
+                "targetType": "official_doc",
+                "decision": "candidate",
+                "status": "candidate",
+            },
+            {
+                "id": "dt-github-target",
+                "name": "LangGraph",
+                "targetType": "github_project",
+                "decision": "candidate",
+                "status": "needs_target",
+            },
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    reply = asyncio.run(server.handle_derived_task_action({
+        "action": "confirm",
+        "taskId": "parent-action",
+        "derivedTaskId": "dt-legacy-web",
+        "targetUrl": "https://example.com/docs",
+    }))
+    assert reply["type"] == "derived_task_action_rejected"
+    assert reply["reason"] == "unsupported_target_type"
+
+    reply = asyncio.run(server.handle_derived_task_action({
+        "action": "confirm",
+        "taskId": "parent-action",
+        "derivedTaskId": "dt-github-target",
+        "targetUrl": "https://example.com/not-a-github-repository",
+    }))
+    assert reply["type"] == "derived_task_action_rejected"
+    assert reply["reason"] == "invalid_target_url"
+
 
 def test_websocket_derived_enqueue_is_idempotent_and_redacts_urls(tmp: Path) -> None:
     import asyncio
@@ -3729,7 +3906,7 @@ def test_websocket_derived_enqueue_is_idempotent_and_redacts_urls(tmp: Path) -> 
     child_id = queued[0]["id"]
     status_file = runtime / "status" / f"{child_id}.json"
     first_status = json.loads(status_file.read_text(encoding="utf-8"))
-    assert first_status["source_url"] == "https://github.com/langchain-ai/langgraph?utm_source=x"
+    assert first_status["source_url"] == "https://github.com/langchain-ai/langgraph"
     assert first_status["ingest_intent"] == "derived_ingest"
     assert "secret" not in status_file.read_text(encoding="utf-8")
 
@@ -4336,6 +4513,7 @@ def test_ai_semantic_title_and_headingless_derived_json_are_preserved_correctly(
             "parent_context": "它是视频唯一的主要介绍对象。",
             "reason": "可形成独立的 GitHub 项目资产。",
             "evidence": ["画面和口播持续展示 InsForge"],
+            "open_source_evidence": ["口播明确称 InsForge 是开源项目"],
             "acceptance_criteria": ["确认官方仓库"],
             "confidence": 0.9,
             "requires_confirmation": False,
@@ -4545,11 +4723,13 @@ def main() -> int:
         test_ingest_url_preserves_share_text_argument()
         test_derive_strategy_keeps_all_primary_candidates_dedupes_and_redacts(tmp)
         test_derive_strategy_marks_high_confidence_github_without_url_auto_ready(tmp)
+        test_derive_strategy_accepts_unnamed_open_source_clues_only(tmp)
         test_derive_strategy_allows_safe_urls_and_blocks_unsafe_urls(tmp)
         test_knowledge_prompts_do_not_force_github_manual_confirmation()
         test_derive_strategy_keeps_all_valid_candidates_without_role_gate(tmp)
         test_derive_executor_github_search_failure_and_ambiguity_are_mocked(tmp)
         test_derive_executor_uses_context_to_disambiguate_same_name_repository()
+        test_derive_executor_resolves_unnamed_project_from_structured_clues()
         test_derive_strategy_ignores_candidates_json_outside_derived_section(tmp)
         test_normalize_ingest_intent_rejects_removed_viral_intent()
         test_vault_write_schema(tmp)

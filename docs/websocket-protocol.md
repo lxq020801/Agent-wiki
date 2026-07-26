@@ -241,7 +241,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 - `confirm`：确认执行派生。`candidate` / `auto_ready` 可首次执行；`needs_target` 补充明确 URL 后可继续；`failed` / `cancelled` 可人工重试。父资产必须已经写入。
 - `ignore`：忽略候选。忽略动作不校验输入框 URL，也不会创建子任务；结果写入 `~/.agent-wiki/derived-actions/{parent_task_id}.json`，后续自动派生不会再次入队。
 
-`official_doc` / `web_research` 或其他缺目标候选必须提供公开 HTTPS URL。URL 不能包含账号密码、localhost/private IP，也会删除 token/key/secret/signature 等敏感 query。
+当前派生候选只允许 `github_project`。候选可以通过项目名或结构化搜索线索自动解析；人工补充目标时必须提供公开 GitHub HTTPS URL。URL 不能包含账号密码、localhost/private IP，也会删除 token/key/secret/signature 等敏感 query。
 
 ```json
 {

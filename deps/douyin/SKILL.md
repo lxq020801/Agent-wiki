@@ -144,7 +144,7 @@ Agent replies.
 Derivation candidate contract:
 
 - Only `knowledge_ingest` generates derivation candidates.
-- Allowed target types: `github_project`, `official_doc`, `web_research`.
+- The only allowed derivation target is `github_project`.
 - Full candidate fields, evidence, dedupe status, parent lineage, and
   acceptance criteria live in runtime `run-artifacts/`.
 - Raw candidate extraction, normalization, target resolution, source material,
@@ -152,15 +152,17 @@ Derivation candidate contract:
   `run-artifacts/`.
 - Candidate-stage Markdown must not contain future `[[wikilink]]` targets. The
   derived executor writes child assets first, then updates parent/child links.
-- Candidate count has no fixed maximum. A structurally valid candidate survives
-  when the model identifies an independently useful, traceable asset; numerical
-  score, confidence, and primary-object thresholds do not hide it.
-- GitHub candidates may omit URL when the project name and context are strong;
-  `derive_executor.py` resolves them through GitHub API search plus README
-  comparison before writing the child asset.
-- GitHub candidates can auto-enqueue after unique official API resolution.
-  Explicit safe URLs for `official_doc` and `web_research` can also auto-enqueue;
-  missing or ambiguous targets remain `needs_target` for confirmation.
+- Candidate count has no fixed maximum. The model only extracts open-source
+  project clues: optional name and organization, purpose, feature keywords,
+  visual clues, direct open-source evidence, and a GitHub search query.
+- GitHub candidates may omit both URL and project name when the source clearly
+  presents an open-source project and provides enough distinctive search clues.
+  `derive_executor.py` resolves them through GitHub API search plus repository
+  description/README comparison before writing the child asset.
+- Only a unique official API match can continue automatically. Missing or
+  ambiguous targets remain `needs_target` for confirmation. Official documents,
+  API documents, web research, ordinary products, companies, and generic concepts
+  do not enter the derivation candidate list.
 - Do not write candidate references, full candidate objects, `scores`,
   `evidence`, `dedupe`, or execution status objects into asset frontmatter.
 
