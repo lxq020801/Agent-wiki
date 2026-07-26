@@ -62,11 +62,16 @@ port = 8765
     cfg = load_config(config)
     assert cfg.vault_path == vault.resolve()
     assert cfg.vault_relative_root == "知识资产"
-    assert cfg.default_quality == "quality"
     assert not hasattr(cfg, "strategy_model")
-    assert cfg.video_fps_mode == "fixed_5"
-    assert cfg.fps_min == 2.0
-    assert cfg.quality_params("quality")["fps_mode"] == "fixed_5"
+    for removed in (
+        "default_quality",
+        "balanced_target_frames",
+        "quality_target_frames",
+        "fps_min",
+        "fps_max",
+        "video_fps_mode",
+    ):
+        assert not hasattr(cfg, removed)
 
 
 def test_config_loader_rejects_invalid_ark_endpoints(tmp: Path) -> None:
@@ -98,11 +103,6 @@ analyzer = "doubao-seed-2-0-lite-260428"
 analyzer_fallback = "doubao-seed-2-0-mini-260428"
 
 [analysis]
-default_quality = "quality"
-balanced_target_frames = 240
-quality_target_frames = 1250
-fps_min = 0.2
-fps_max = 5.0
 file_active_timeout_sec = 120
 
 [douyin]
@@ -307,7 +307,7 @@ def test_ingest_url_preserves_share_text_argument() -> None:
     assert calls
     cmd, cwd = calls[0]
     assert cmd[3] == share_text
-    assert cmd[4:] == ["--quality", "quality"]
+    assert cmd[4:] == []
     assert "--intent" not in cmd
     assert "--intents" not in cmd
     assert cwd == ROOT / "deps" / "douyin"
@@ -362,18 +362,15 @@ class FakeResult:
     text: str = "这是一个测试视频，展示 Agent 入库流程。"
     file_id: str = "file-test"
     fps_used: float = 1.0
-    quality: str = "quality"
     model: str = "doubao-seed-2-0-lite-260428"
     target_frames: int = 1250
     actual_frames_estimate: int = 61
-    truncated: bool = False
 
 
 @dataclass
 class FakeImageResult:
     text: str = "这组图文介绍了一个 AI 求职工具，突出简历模板和职位投递流程。"
     file_id: str = "inline-images"
-    quality: str = "quality"
     model: str = "doubao-seed-2-0-lite-260428"
     image_count: int = 2
     usage: dict | None = None
@@ -392,11 +389,6 @@ def _fake_config(tmp: Path, vault: Path, runtime_name: str = "test-runtime"):
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        default_quality="quality",
-        balanced_target_frames=240,
-        quality_target_frames=1250,
-        fps_min=0.2,
-        fps_max=5.0,
         file_active_timeout_sec=120,
         cookie_path=runtime / "cookie" / "douyin.txt",
         vault_path=vault,
@@ -934,11 +926,6 @@ def test_vault_write_schema(tmp: Path) -> None:
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        default_quality="quality",
-        balanced_target_frames=240,
-        quality_target_frames=1250,
-        fps_min=0.2,
-        fps_max=5.0,
         file_active_timeout_sec=120,
         cookie_path=runtime / "cookie" / "douyin.txt",
         vault_path=vault,
@@ -1174,11 +1161,6 @@ def test_vault_write_includes_derived_tasks_and_record(tmp: Path) -> None:
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        default_quality="quality",
-        balanced_target_frames=240,
-        quality_target_frames=1250,
-        fps_min=0.2,
-        fps_max=5.0,
         file_active_timeout_sec=120,
         cookie_path=runtime / "cookie" / "douyin.txt",
         vault_path=vault,
@@ -1403,11 +1385,6 @@ def test_image_post_vault_write_schema(tmp: Path) -> None:
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        default_quality="quality",
-        balanced_target_frames=240,
-        quality_target_frames=1250,
-        fps_min=0.2,
-        fps_max=5.0,
         file_active_timeout_sec=120,
         cookie_path=runtime / "cookie" / "douyin.txt",
         vault_path=vault,
@@ -1511,11 +1488,6 @@ def test_vault_write_uses_knowledge_root_and_rejects_removed_intent(tmp: Path) -
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        default_quality="quality",
-        balanced_target_frames=240,
-        quality_target_frames=1250,
-        fps_min=0.2,
-        fps_max=5.0,
         file_active_timeout_sec=120,
         cookie_path=runtime / "cookie" / "douyin.txt",
         vault_path=vault,
@@ -1575,11 +1547,6 @@ def test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp: Path) 
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        default_quality="quality",
-        balanced_target_frames=240,
-        quality_target_frames=1250,
-        fps_min=0.2,
-        fps_max=5.0,
         file_active_timeout_sec=120,
         cookie_path=runtime / "cookie" / "douyin.txt",
         vault_path=vault,
@@ -1630,13 +1597,11 @@ def test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp: Path) 
             text="knowledge_ingest 输出",
             file_id="file-one-upload",
             fps_used=1.0,
-            quality="quality",
             model=cfg.analyzer_model,
             duration_sec=61,
             target_frames=1250,
             actual_frames_estimate=61,
             usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
-            truncated=False,
             audit_artifacts=analysis_audit_artifacts,
         )
 
@@ -1712,7 +1677,6 @@ def test_run_task_single_knowledge_ingest_preserves_derived_pipeline(tmp: Path) 
         summary = asyncio.run(ingest.run_task(
             task_id="single-ingest",
             url="https://v.douyin.com/test/",
-            quality="quality",
             ingest_intent="knowledge_ingest",
             config=cfg,
             sw=sw,
@@ -1906,21 +1870,20 @@ def test_websocket_config_writer(tmp: Path) -> None:
     assert cfg.ark_api_key == "test-key"
     assert cfg.vault_path == vault.resolve()
     assert cfg.vault_relative_root == "知识资产"
-    assert cfg.default_quality == "quality"
-    assert cfg.quality_target_frames == 1250
-    assert cfg.fps_min == 2.0
-    assert cfg.fps_max == 5.0
     assert cfg.response_timeout_sec == 900
     assert not hasattr(cfg, "strategy_model")
     assert cfg.chunk_concurrency == 4
-    assert cfg.video_fps_mode == "fixed_5"
     assert server.task_concurrency == 3
 
     config_path = tmp / "ws-runtime" / "config.toml"
     config_text = config_path.read_text(encoding="utf-8")
     assert "task_concurrency = 3" in config_text
     assert "chunk_concurrency = 4" in config_text
-    assert 'video_fps_mode = "fixed_5"' in config_text
+    assert "video_fps_mode" not in config_text
+    assert "default_quality" not in config_text
+    assert "target_frames" not in config_text
+    assert "fps_min" not in config_text
+    assert "fps_max" not in config_text
     assert "strategy =" not in config_text
     assert "analyzer_fallback =" not in config_text
     assert oct(config_path.stat().st_mode & 0o777) == "0o600"
@@ -2008,10 +1971,10 @@ def test_analyzer_uses_system_fixed_fps_without_prescan(tmp: Path) -> None:
 
     async def fake_upload(client, path, *, fps, model):
         uploads.append((Path(path).name, fps, model))
-        return SimpleNamespace(id="file-adaptive", status="processing", filename="private.mp4")
+        return SimpleNamespace(id="file-fixed", status="processing", filename="private.mp4")
 
     async def fake_wait(*args, **kwargs):
-        return SimpleNamespace(id="file-adaptive", status="active")
+        return SimpleNamespace(id="file-fixed", status="active")
 
     async def fake_stream(*args, **kwargs):
         return analyzer.ResponseCallResult(
@@ -2048,9 +2011,8 @@ def test_analyzer_uses_system_fixed_fps_without_prescan(tmp: Path) -> None:
             api_key="test-key",
             endpoint="https://ark.cn-beijing.volces.com/api/v3",
             model="doubao-seed-2-0-lite-260428",
-            source_id="source-adaptive",
-            audit_id="task-adaptive",
-            quality_params={"fps_mode": "auto", "target_frames": 1250},
+            source_id="source-fixed",
+            audit_id="task-fixed",
             on_progress=on_progress,
         ))
     finally:
@@ -2066,7 +2028,7 @@ def test_analyzer_uses_system_fixed_fps_without_prescan(tmp: Path) -> None:
     assert result.actual_frames_estimate == 257
     assert not any(stage.startswith("prescanning_") for stage, _ in progress)
     assert any(stage == "fps_decided" and info["mode"] == "fixed_5" for stage, info in progress)
-    evidence_path = runtime / "run-artifacts" / "task-adaptive" / "01-sampling" / "evidence.json"
+    evidence_path = runtime / "run-artifacts" / "task-fixed" / "01-sampling" / "evidence.json"
     evidence_text = evidence_path.read_text(encoding="utf-8")
     evidence = json.loads(evidence_text)
     vendor = evidence["truth_boundaries"]["vendor_returned_facts"]
@@ -2501,7 +2463,6 @@ def test_chunk_analysis_uses_one_fps_without_semantic_context(tmp: Path) -> None
             files_client=SimpleNamespace(),
             responses_client=SimpleNamespace(),
             model="doubao-seed-2-0-lite-260428",
-            quality="quality",
             full_duration=470.0,
             source_id="aweme-strategy",
             audit_dir=audit_dir,
@@ -2601,7 +2562,6 @@ def test_chunk_analysis_retries_transient_stream_failure(tmp: Path) -> None:
             files_client=SimpleNamespace(),
             responses_client=SimpleNamespace(),
             model="doubao-seed-2-0-lite-260428",
-            quality="quality",
             full_duration=470.0,
             source_id="aweme-retry",
             audit_dir=audit_dir,
@@ -2701,7 +2661,6 @@ def test_chunk_analysis_reuses_existing_chunk_artifact_on_rerun(tmp: Path) -> No
             files_client=SimpleNamespace(),
             responses_client=SimpleNamespace(),
             model="doubao-seed-2-0-lite-260428",
-            quality="quality",
             full_duration=470.0,
             source_id="aweme-resume",
             audit_dir=audit_dir,
@@ -2790,7 +2749,6 @@ def test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp: Path) 
             files_client=SimpleNamespace(),
             responses_client=SimpleNamespace(),
             model="doubao-seed-2-0-lite-260428",
-            quality="quality",
             full_duration=120.0,
             source_id="aweme-memory",
             file_active_timeout_sec=120,
@@ -2981,11 +2939,6 @@ analyzer = "doubao-seed-2.0-lite"
 analyzer_fallback = "doubao-seed-2.0-mini"
 
 [analysis]
-default_quality = "quality"
-balanced_target_frames = 240
-quality_target_frames = 1250
-fps_min = 0.2
-fps_max = 5.0
 file_active_timeout_sec = 120
 
 [douyin]
@@ -4064,11 +4017,6 @@ def test_derive_executor_execute_task_writes_child_and_backlinks(tmp: Path) -> N
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        default_quality="quality",
-        balanced_target_frames=240,
-        quality_target_frames=1250,
-        fps_min=0.2,
-        fps_max=5.0,
         file_active_timeout_sec=120,
         cookie_path=tmp / "cookie.txt",
         vault_path=vault,

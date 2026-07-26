@@ -66,7 +66,6 @@ class FakeResult:
     )
     file_id: str = "file-test"
     fps_used: float = 1.0
-    quality: str = "quality"
     model: str = "doubao-seed-2-0-lite-260428"
     target_frames: int = 1250
     actual_frames_estimate: int = 61
@@ -84,11 +83,6 @@ def _config(tmp: Path, vault: Path, runtime_name: str = "runtime") -> Config:
         ark_api_key="test",
         ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
         analyzer_model="doubao-seed-2-0-lite-260428",
-        default_quality="quality",
-        balanced_target_frames=240,
-        quality_target_frames=1250,
-        fps_min=0.2,
-        fps_max=5.0,
         file_active_timeout_sec=120,
         cookie_path=runtime / "cookie" / "douyin.txt",
         vault_path=vault,
@@ -637,7 +631,6 @@ class ImagePipelineCacheTests(unittest.TestCase):
                 summary = asyncio.run(ingest.run_task(
                     task_id="image-task",
                     url=meta.source_url,
-                    quality="quality",
                     ingest_intent="knowledge_ingest",
                     config=cfg,
                     sw=FakeStatusWriter(),

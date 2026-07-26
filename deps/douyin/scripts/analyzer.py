@@ -17,13 +17,11 @@ analyzer.py — 火山方舟视频拆解
      1280 是方舟硬上限
   ⑤ Files API 默认托管空间支持 ≤512MB；超过 512MB P0 直接失败
   ⑥ file_id 模式必须等 file.status == "active" 才能分析
-  ⑦ file_id 模式同一视频换 quality 必须重新上传
-  ⑧ 所选 fps 超过 1250 帧安全目标时，按同一 fps 机械切片，
-     单片最长 600s，相邻切片重叠 10s
+  ⑦ 超过 1250 帧安全目标时，按同一 fps 机械切片，
+     单片 250s，相邻切片重叠 10s
 
 公共契约：
-    analyze_video(video_path, prompt, *, config, quality="quality",
-                  on_progress=None) -> AnalyzeResult
+    analyze_video(video_path, prompt, *, config, on_progress=None) -> AnalyzeResult
 """
 from __future__ import annotations
 
@@ -86,13 +84,11 @@ class AnalyzeResult:
     text: str                       # 流式拼接后的完整文本
     file_id: str
     fps_used: float
-    quality: str                    # 'balanced' | 'quality'
     model: str
     duration_sec: float
     target_frames: int
     actual_frames_estimate: int
     usage: dict = field(default_factory=dict)   # token usage（如果 API 返回）
-    truncated: bool = False         # 抽帧数超 1280 硬上限时为 True
     response_id: Optional[str] = None
     chunked: bool = False
     chunk_count: int = 1
@@ -105,7 +101,6 @@ class ImageAnalyzeResult:
     """Ark image-post analysis result."""
     text: str
     file_id: str
-    quality: str
     model: str
     image_count: int
     usage: dict = field(default_factory=dict)
@@ -204,8 +199,6 @@ def get_duration_sec(video_path: Path) -> float:
     return dur
 
 
-# 火山 Seed 2.0 系列单视频抽帧硬上限
-_FRAMES_HARD_CAP = 1280
 # 项目侧安全目标：比硬上限留 30 帧冗余，避免擦边导致服务端再抽样。
 _FRAMES_SAFE_TARGET = 1250
 # 知识分析上传使用系统固定 5fps。
@@ -226,7 +219,6 @@ _FILE_SIZE_HARD_LIMIT = 500 * 1024 * 1024  # 500MB safe limit
 _INLINE_IMAGE_TOTAL_SIZE_LIMIT = 45 * 1024 * 1024
 _IMAGE_COUNT_LIMIT = 18
 _CHUNK_OVERLAP_SEC = 10.0
-_ANALYSIS_CHUNK_MAX_LEN_SEC = 600.0
 _CHUNK_ANALYSIS_CONCURRENCY = 2
 _RESPONSE_MEMORY_TTL_SEC = 3 * 24 * 60 * 60
 _STRATEGY_LOG_NAME = "video-strategy-events.jsonl"
@@ -697,10 +689,7 @@ def _chunk_plan(
         return []
     plan: list[dict[str, float | int]] = []
     start = 0.0
-    chunk_len = min(
-        _ANALYSIS_CHUNK_MAX_LEN_SEC,
-        _FRAMES_SAFE_TARGET / SYSTEM_VIDEO_FPS,
-    )
+    chunk_len = _FRAMES_SAFE_TARGET / SYSTEM_VIDEO_FPS
     stride = chunk_len - _CHUNK_OVERLAP_SEC
     index = 1
     while start < duration_sec:
@@ -1306,8 +1295,6 @@ async def analyze_video(
     model: str,
     file_api_key: Optional[str] = None,
     file_endpoint: Optional[str] = None,
-    quality: str = "quality",
-    quality_params: Optional[dict] = None,
     source_id: Optional[str] = None,
     audit_id: Optional[str] = None,
     analysis_key: str = "default",
@@ -1326,8 +1313,6 @@ async def analyze_video(
           使用同一个普通 Ark key/endpoint
       model: Files API 预处理用的模型 ID（必须传，否则回落 640 帧）
               同时也是 Responses API 推理用的模型
-      quality: 'balanced' | 'quality'
-      quality_params: 仅为兼容旧调用保留，不再影响系统固定 5fps。
       file_active_timeout_sec: 等 file active 的最长秒数
       response_timeout_sec: 等 Responses API 返回的最长秒数
       on_progress: async (stage:str, info:dict) -> None，可选进度回调
@@ -1341,8 +1326,6 @@ async def analyze_video(
         model=model,
         file_api_key=file_api_key,
         file_endpoint=file_endpoint,
-        quality=quality,
-        quality_params=quality_params,
         source_id=source_id,
         audit_id=audit_id,
         file_active_timeout_sec=file_active_timeout_sec,
@@ -1362,8 +1345,6 @@ async def analyze_video_many(
     model: str,
     file_api_key: Optional[str] = None,
     file_endpoint: Optional[str] = None,
-    quality: str = "quality",
-    quality_params: Optional[dict] = None,
     source_id: Optional[str] = None,
     audit_id: Optional[str] = None,
     file_active_timeout_sec: int = 120,
@@ -1396,8 +1377,7 @@ async def analyze_video_many(
             "video_file_name": video_path.name,
             "intents": list(prompts),
             "analysis_model": model,
-            "quality": quality,
-            "video_fps_mode": sampling_mode,
+            "sampling_mode": sampling_mode,
             "created_at": time.time(),
         }))
         for intent, prompt in prompts.items():
@@ -1423,7 +1403,6 @@ async def analyze_video_many(
     fps = SYSTEM_VIDEO_FPS
     target_frames = _FRAMES_SAFE_TARGET
     actual_frames_est = int(fps * duration)
-    will_truncate = actual_frames_est > _FRAMES_HARD_CAP
     sampling_evidence = _new_sampling_evidence(
         duration_sec=duration,
         decision=decision,
@@ -1434,8 +1413,6 @@ async def analyze_video_many(
         "fps": fps,
         "target_frames": target_frames,
         "actual_frames_estimate": actual_frames_est,
-        "will_truncate": will_truncate,
-        "quality": quality,
         "mode": sampling_mode,
         "decision_reasons": decision.get("decision_reasons"),
         "fallback_applied": decision.get("fallback_applied"),
@@ -1487,7 +1464,6 @@ async def analyze_video_many(
                 files_client=files_client,
                 responses_client=responses_client,
                 model=model,
-                quality=quality,
                 full_duration=duration,
                 source_id=memory_source_id,
                 audit_dir=audit_root,
@@ -1621,13 +1597,11 @@ async def analyze_video_many(
             text=text,
             file_id=file_id,
             fps_used=fps,
-            quality=quality,
             model=model,
             duration_sec=duration,
             target_frames=target_frames,
             actual_frames_estimate=actual_frames_est,
             usage=usage,
-            truncated=will_truncate,
             response_id=call.response_id,
             audit_artifacts={"dir": _audit_rel(audit_root) if audit_root else "", "files": audit_files},
         )
@@ -1643,7 +1617,6 @@ async def _analyze_video_chunks(
     files_client: Any,
     responses_client: Any,
     model: str,
-    quality: str,
     full_duration: float,
     source_id: str,
     audit_dir: Optional[Path] = None,
@@ -1670,7 +1643,6 @@ async def _analyze_video_chunks(
         chunk_duration = float(plan_item["end_sec"]) - float(plan_item["start_sec"])
         fps = SYSTEM_VIDEO_FPS
         target_frames = _FRAMES_SAFE_TARGET
-        will_truncate = int(fps * chunk_duration) > _FRAMES_HARD_CAP
         actual_frames_est = int(fps * chunk_duration)
         base_chunk_meta = {
             "part_index": part_index,
@@ -1680,7 +1652,6 @@ async def _analyze_video_chunks(
             "fps": fps,
             "target_frames": target_frames,
             "actual_frames_estimate": actual_frames_est,
-            "truncated": will_truncate,
         }
         intent_prompts: dict[str, str] = {}
         missing_intents: list[str] = []
@@ -2009,7 +1980,6 @@ async def _analyze_video_chunks(
                 float(item.get("fps", SYSTEM_VIDEO_FPS))
                 for item in ordered_chunks
             ),
-            quality=quality,
             model=model,
             duration_sec=full_duration,
             target_frames=_FRAMES_SAFE_TARGET,
@@ -2018,7 +1988,6 @@ async def _analyze_video_chunks(
                 for item in ordered_chunks
             ),
             usage=final_usage,
-            truncated=False,
             response_id=final_response_id,
             chunked=True,
             chunk_count=total,
@@ -2035,7 +2004,6 @@ async def analyze_images(
     api_key: str,
     endpoint: str,
     model: str,
-    quality: str = "quality",
     analysis_key: str = "default",
     response_timeout_sec: int = 900,
     on_progress: ProgressCb = None,
@@ -2048,7 +2016,6 @@ async def analyze_images(
         api_key=api_key,
         endpoint=endpoint,
         model=model,
-        quality=quality,
         response_timeout_sec=response_timeout_sec,
         on_progress=on_progress,
     )
@@ -2062,7 +2029,6 @@ async def analyze_images_many(
     api_key: str,
     endpoint: str,
     model: str,
-    quality: str = "quality",
     response_timeout_sec: int = 900,
     on_progress: ProgressCb = None,
 ) -> dict[str, ImageAnalyzeResult]:
@@ -2118,7 +2084,6 @@ async def analyze_images_many(
         results[intent] = ImageAnalyzeResult(
             text=text,
             file_id="inline-images",
-            quality=quality,
             model=model,
             image_count=len(used_paths),
             usage=usage,
@@ -2141,9 +2106,6 @@ def _cli_main() -> int:
     parser.add_argument(
         "--prompt-file",
         default=None,
-    )
-    parser.add_argument(
-        "--quality", default="quality", choices=["balanced", "quality"],
     )
     parser.add_argument(
         "--model", default="doubao-seed-2-0-lite-260428",
@@ -2187,7 +2149,6 @@ def _cli_main() -> int:
             endpoint=args.endpoint,
             model=args.model,
             chunk_concurrency=args.chunk_concurrency,
-            quality=args.quality,
             analysis_key="knowledge_ingest",
             on_progress=_progress,
         )
@@ -2202,12 +2163,10 @@ def _cli_main() -> int:
     print("=" * 60)
     print(f"file_id: {result.file_id}")
     print(f"model:   {result.model}")
-    print(f"fps:     {result.fps_used} ({result.quality})")
+    print(f"fps:     {result.fps_used}")
     print(f"duration: {result.duration_sec:.1f}s, "
           f"~{result.actual_frames_estimate} frames "
           f"(target {result.target_frames})")
-    if result.truncated:
-        print("⚠️  超 1280 帧硬上限，火山做了均匀抽样")
     print(f"usage:   {result.usage}")
     print("=" * 60)
     print(result.text)

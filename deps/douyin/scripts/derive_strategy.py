@@ -20,11 +20,6 @@ from typing import Any
 
 _AUDIT_ROOT_NAME = "run-artifacts"
 ALLOWED_TARGET_TYPES = {"github_project", "official_doc", "web_research"}
-CANDIDATE_THRESHOLD = 72
-VISIBLE_SCORE_THRESHOLD = 85
-VISIBLE_CONFIDENCE_THRESHOLD = 0.8
-AUTO_SCORE_THRESHOLD = 80
-AUTO_CONFIDENCE_THRESHOLD = 0.75
 
 SCORE_WEIGHTS = {
     "knowledge_value": 1.4,
@@ -588,9 +583,7 @@ def _frontmatter_target_values(frontmatter: str) -> list[str]:
     return values
 
 
-def _decision_from_score(
-    score: int,
-    scores: dict[str, int],
+def _candidate_decision(
     downgrade_flags: list[str],
     existing_status: str,
 ) -> tuple[str, list[str]]:
@@ -609,7 +602,7 @@ def _decision_from_score(
     return ("reject", reasons) if reasons else ("candidate", [])
 
 
-def _subject_role(raw: dict[str, Any], scores: dict[str, int], context: str) -> str:
+def _subject_role(raw: dict[str, Any], context: str) -> str:
     role = str(raw.get("subject_role") or raw.get("object_role") or "").strip().lower()
     if role in {"primary", "main", "主要", "主要对象", "主要介绍对象"}:
         return "primary"
@@ -678,13 +671,13 @@ def _default_acceptance_criteria(target_type: str, subtype: str = "") -> list[st
         return [
             "确认 canonical GitHub 仓库 URL 与视频/图文线索一致",
             "提取 README、安装/运行方式、核心能力、维护状态和许可证",
-            "写入 GitHub 项目资产，并反链到父资产证据",
+            "写入 GitHub 知识资产，并反链到父资产证据",
         ]
     if target_type == "official_doc" or subtype == "api_doc":
         return [
             "确认来源为官方域名或官方发布渠道",
             "提取与父资产结论相关的接口、参数、限制、版本和风险",
-            "写入网页剪藏/官方文档资产，并标明待验证点",
+            "写入网页/官方文档知识资产，并标明待验证点",
         ]
     return [
         "用至少两个可信来源核验父资产中的关键说法",
@@ -730,7 +723,7 @@ def _normalize_candidate(
         parent_context,
     )
     scores = _normalize_scores(raw.get("scores"), fallback_scores)
-    subject_role = _subject_role(raw, scores, " ".join([
+    subject_role = _subject_role(raw, " ".join([
         parent_context,
         _redact_text(raw.get("reason")),
         " ".join(_string_list(raw.get("evidence"), limit=6)),
@@ -755,7 +748,7 @@ def _normalize_candidate(
         downgrade_flags.append("uncertain_evidence")
     if bool(raw.get("requires_confirmation")):
         downgrade_flags.append("requires_confirmation")
-    decision, reject_reasons = _decision_from_score(score, scores, downgrade_flags, dedupe_status)
+    decision, reject_reasons = _candidate_decision(downgrade_flags, dedupe_status)
     execution_status = "candidate"
     if decision == "reject":
         execution_status = "rejected"

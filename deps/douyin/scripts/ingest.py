@@ -1028,7 +1028,6 @@ async def run_task(
     *,
     task_id: str,
     url: str,
-    quality: str,
     ingest_intent: str | None = None,
     config: Config,
     sw: StatusWriter,
@@ -1121,7 +1120,6 @@ async def run_task(
                 sw=sw,
                 meta=meta,
                 image_paths=image_paths,
-                quality=quality,
                 ingest_intent=ingest_intent,
             )
 
@@ -1186,7 +1184,6 @@ async def run_task(
             model=config.analyzer_model,
             file_api_key=config.files_api_key,
             file_endpoint=config.files_endpoint,
-            quality=quality,
             source_id=meta.aweme_id,
             audit_id=task_id,
             analysis_key=ingest_intent,
@@ -1308,11 +1305,9 @@ async def run_task(
         "analysis": {
             "file_id": result.file_id,
             "fps_used": result.fps_used,
-            "quality": result.quality,
             "model": result.model,
             "target_frames": result.target_frames,
             "actual_frames_estimate": result.actual_frames_estimate,
-            "truncated": result.truncated,
             "chunked": chunked,
             "chunk_count": chunk_count,
             "chunks": getattr(result, "chunks", []),
@@ -1332,7 +1327,6 @@ async def run_image_post_task(
     sw: StatusWriter,
     meta: VideoMeta,
     image_paths: list[Path],
-    quality: str,
     ingest_intent: str = DEFAULT_INGEST_INTENT,
 ) -> dict[str, Any]:
     """执行抖音图文拆解分支。"""
@@ -1352,7 +1346,6 @@ async def run_image_post_task(
             api_key=config.ark_api_key,
             endpoint=config.ark_endpoint,
             model=config.analyzer_model,
-            quality=quality,
             analysis_key=ingest_intent,
             response_timeout_sec=config.response_timeout_sec,
             on_progress=an_progress,
@@ -1456,7 +1449,6 @@ async def run_image_post_task(
         },
         "analysis": {
             "file_id": result.file_id,
-            "quality": result.quality,
             "model": result.model,
             "image_count": result.image_count,
             "truncated": result.truncated,
@@ -1491,9 +1483,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     g.add_argument("--task", type=Path,
                    help="inbox task JSON path (compatibility mode)")
     g.add_argument("--url", help="Douyin URL or share text (Agent/P0 mode)")
-    p.add_argument("--quality", default=None,
-                   choices=["balanced", "quality"],
-                   help=argparse.SUPPRESS)
     p.add_argument("--config", default=None, type=Path,
                    help="自定义 config.toml 路径")
     return p.parse_args(argv)
@@ -1538,10 +1527,9 @@ def main(argv: list[str] | None = None) -> int:
     status_dir = base_dir / "status"
     cache_root = base_dir / "cache" / "videos"
 
-    # ── 2. 确定 url / quality / ingest_intent ──
+    # ── 2. 确定 url / ingest_intent ──
     if task_data is not None:
         url = task_data.get("url")
-        quality = "quality"
         intent_raw = (
             task_data.get("ingest_intent")
             or task_data.get("ingestIntent")
@@ -1558,7 +1546,6 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     else:
         url = args.url
-        quality = "quality"
         intent_raw = DEFAULT_INGEST_INTENT
 
     try:
@@ -1609,7 +1596,6 @@ def main(argv: list[str] | None = None) -> int:
         }
     sw.update(
         stage="started",
-        quality=quality,
         source_url=url,
         ingest_intent=ingest_intent,
         asset_family=_intent_profile(ingest_intent)["asset_family"],
@@ -1620,7 +1606,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         try:
             summary = asyncio.run(run_task(
-                task_id=task_id, url=url, quality=quality,
+                task_id=task_id, url=url,
                 ingest_intent=ingest_intent,
                 config=config, sw=sw, cache_dir=cache_dir,
                 image_cache_dir=image_cache_dir,

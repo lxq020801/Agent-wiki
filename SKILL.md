@@ -41,8 +41,7 @@ description: "给 Agent 看的当前运行说明：记录已经实现的本地�
 
 ```text
 知识资产/
-├── *.md        --- 来源知识、工具、方法、步骤、风险
-└── GitHub项目/ --- 已导入或由抖音来源派生的公开 GitHub 项目资产
+└── *.md        --- 所有正式资产；来源和形成方式记录在 Markdown 元数据中
 ```
 
 frontmatter 必须同时记录 `asset_family`、`source_media`、`ingest_intent` 和 `source_url`。抖音视频和图文来源统一记录 `asset_family: knowledge_asset` 与 `ingest_intent: knowledge_ingest`，并保留可追溯的来源字段。
@@ -55,7 +54,6 @@ frontmatter 必须同时记录 `asset_family`、`source_media`、`ingest_intent`
 ~/.agent-wiki/
 ├── config.toml      --- 扩展写入，Agent 读取
 ├── vault-registry.json --- 当前库的用户名称、规范化路径和稳定身份
-├── vault-migrations/   --- 迁移预览、校验和回退记录
 ├── cookie/
 ├── cache/
 ├── run/             --- 托管服务 PID 与进程身份元数据

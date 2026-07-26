@@ -43,7 +43,6 @@ from server.operation_audit import (
     new_operation_id,
     normalize_identifier,
 )
-from video_sampling import SYSTEM_FPS_MODE
 
 
 PRODUCT_ID = "agent-wiki"
@@ -107,12 +106,6 @@ VAULT_COMPLETION_STAGES = {
     "vault_scan": "vault_scan_completed",
     "vault_select_folder": "vault_select_folder_completed",
     "vault_select_confirm": "vault_select_confirm_completed",
-    "vault_create": "vault_create_completed",
-    "vault_switch": "vault_switch_completed",
-    "vault_candidate_confirm": "vault_candidate_confirmed",
-    "vault_migration_preview": "vault_migration_preview_completed",
-    "vault_migration_execute": "vault_migration_execute_completed",
-    "vault_migration_rollback": "vault_migration_rollback_completed",
 }
 for _vault_message_type in VAULT_LIFECYCLE_REQUEST_TYPES:
     OPERATION_TYPE_BY_MESSAGE[_vault_message_type] = f"vault.{_vault_message_type.removeprefix('vault_')}"
@@ -384,7 +377,7 @@ PROVIDERS = {
         "endpoint_fields": ("arkEndpoint", "doubaoEndpoint", "endpoint"),
         "endpoint": "https://ark.cn-beijing.volces.com/api/v3",
         "model": "doubao-seed-2-0-lite-260428",
-        "fallback": "doubao-seed-2-0-mini-260428",
+        "mini": "doubao-seed-2-0-mini-260428",
     },
 }
 DEFAULT_PROVIDER = "doubao"
@@ -1155,10 +1148,6 @@ class LibrarianServer:
                     'ok': result.get('ok'),
                     'requiresUserAction': result.get('requiresUserAction'),
                     'errorCode': result.get('errorCode'),
-                    'migrationId': (
-                        (result.get('migration') or {}).get('migrationId')
-                        if isinstance(result.get('migration'), dict) else ''
-                    ),
                 },
                 error=(
                     {
@@ -3208,7 +3197,6 @@ class LibrarianServer:
         if lifecycle_status.get('state') == 'ready':
             active_vault = lifecycle_status.get('activeVault') or {}
             vault_path = str(active_vault.get('vaultPath') or vault_path)
-        quality = 'quality'
         model = None if legacy_agent_plan_payload else (
             video_config.get('analyzerModel')
             or config_data.get('model')
@@ -3232,9 +3220,6 @@ class LibrarianServer:
             incoming_chunk_concurrency if incoming_chunk_concurrency is not None else existing_chunk_concurrency,
             default=_normalize_chunk_concurrency(existing_chunk_concurrency),
         )
-        # FPS is a system policy. Ignore legacy client/config mode values.
-        video_fps_mode = SYSTEM_FPS_MODE
-
         previous_active_key = _provider_api_key(config_path, previous_provider)
         if legacy_agent_plan_payload:
             # 旧扩展可能把 Agent Plan key 放在通用 apiKey，不能自动写成普通 Ark key。
@@ -3272,12 +3257,6 @@ client_id = "{_toml_escape(existing_github_client_id)}"
 analyzer = "{_toml_escape(model)}"
 
 [analysis]
-default_quality = "{_toml_escape(quality)}"
-video_fps_mode = "{_toml_escape(video_fps_mode)}"
-balanced_target_frames = 240
-quality_target_frames = 1250
-fps_min = 2.0
-fps_max = 5.0
 file_active_timeout_sec = 120
 response_timeout_sec = 900
 chunk_concurrency = {int(chunk_concurrency)}
@@ -3416,7 +3395,7 @@ task_concurrency = {int(task_concurrency)}
         chunk_concurrency = _normalize_chunk_concurrency(
             _simple_config_value(config_path, 'analysis', 'chunk_concurrency', '2')
         )
-        preset = 'mini' if model == _provider_default(DEFAULT_PROVIDER, 'fallback') else 'lite'
+        preset = 'mini' if model == _provider_default(DEFAULT_PROVIDER, 'mini') else 'lite'
         return {
             'ok': True,
             'state': 'ready',

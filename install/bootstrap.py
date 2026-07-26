@@ -69,12 +69,6 @@ endpoint = "https://ark.cn-beijing.volces.com/api/v3"
 analyzer = "doubao-seed-2-0-lite-260428"
 
 [analysis]
-video_fps_mode = "fixed_5"
-default_quality = "quality"
-balanced_target_frames = 240
-quality_target_frames = 1250
-fps_min = 2.0
-fps_max = 5.0
 file_active_timeout_sec = 120
 
 [douyin]
@@ -503,9 +497,9 @@ def check_vault(result: CheckResult) -> None:
         )
         return
     lifecycle = VaultLifecycleManager(runtime_root=RUNTIME_ROOT, config_path=CONFIG_PATH)
-    switched = lifecycle.switch(vault_path=vault)
-    if not switched.get("ok"):
-        result.missing_user_actions.append(switched.get("message") or "请在扩展中选择 Agent-wiki 知识库。")
+    selected = lifecycle.select_folder(vault_path=vault)
+    if not selected.get("ok"):
+        result.missing_user_actions.append(selected.get("message") or "请在扩展中选择 Agent-wiki 知识库。")
         return
     result.actions.append(f"vault selected by explicit config: {vault}")
     result.actions.append(f"vault structure ready: {vault}")
@@ -532,7 +526,7 @@ def bootstrap(
         else:
             lifecycle = VaultLifecycleManager(runtime_root=RUNTIME_ROOT, config_path=CONFIG_PATH)
             try:
-                initialized = lifecycle.initialize_explicit_empty_vault(selected)
+                initialized = lifecycle.select_folder(vault_path=selected)
             except VaultLifecycleError as exc:
                 result.add_warning(str(exc), fatal=True)
             else:

@@ -11,7 +11,6 @@ config_loader.py — 读取并校验 ~/.agent-wiki/config.toml
     Config.provider
     Config.ark_api_key / .ark_endpoint  # 字节跳动火山方舟 Ark 凭据/端点
     Config.analyzer_model
-    Config.quality_params(quality) -> dict
     Config.vault_path / .vault_relative_root
     Config.cookie_path
 """
@@ -22,8 +21,6 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-
-from video_sampling import SYSTEM_FPS_MODE
 
 try:
     import tomllib  # Python 3.11+
@@ -98,11 +95,6 @@ class Config:
     # models
     analyzer_model: str
     # analysis
-    default_quality: str
-    balanced_target_frames: int
-    quality_target_frames: int
-    fps_min: float
-    fps_max: float
     file_active_timeout_sec: int
     # douyin
     cookie_path: Path
@@ -124,34 +116,11 @@ class Config:
     files_endpoint: str = DEFAULT_DOUBAO_ENDPOINT
     response_timeout_sec: int = 900
     chunk_concurrency: int = 2
-    video_fps_mode: str = SYSTEM_FPS_MODE
 
     # 计算属性（不暴露给 toml）
     @property
     def bridge_root(self) -> Path:
         return self.config_file.parent
-
-    def quality_params(self, quality: str) -> dict:
-        """返回指定质量档位的参数。
-
-        quality: 'balanced' | 'quality'
-        """
-        if quality not in ("balanced", "quality"):
-            raise ConfigError(
-                f"未知 quality 档位: '{quality}'，只支持 'balanced' 或 'quality'"
-            )
-        target = (
-            self.quality_target_frames
-            if quality == "quality"
-            else self.balanced_target_frames
-        )
-        return {
-            "target_frames": target,
-            "fps_min": self.fps_min,
-            "fps_max": self.fps_max,
-            "fps_mode": self.video_fps_mode,
-        }
-
 
 def _get(d: dict, *keys, default=None, required=False, config_file=None):
     """安全地从嵌套 dict 取值。"""
@@ -229,33 +198,6 @@ def load_config(path: Optional[Path] = None) -> Config:
         default="doubao-seed-2-0-lite-260428",
     )
     # analysis
-    configured_quality = _get(data, "analysis", "default_quality", default="quality")
-    if configured_quality not in ("balanced", "quality"):
-        raise ConfigError(
-            f"[analysis].default_quality 必须是 'balanced' 或 'quality'，"
-            f"实际：'{configured_quality}'"
-        )
-    # P0 产品路径固定走 quality。balanced 只保留为内部调试参数，
-    # 旧配置里的 balanced 不应影响 Agent 入库质量。
-    default_quality = "quality"
-    balanced_target_frames = int(
-        _get(data, "analysis", "balanced_target_frames", default=240)
-    )
-    quality_target_frames = int(
-        _get(data, "analysis", "quality_target_frames", default=1250)
-    )
-    # fps_min/fps_max remain readable for old config files, but model uploads
-    # are now constrained to the confirmed 2-5 FPS product range.
-    fps_min = max(2.0, min(5.0, float(
-        _get(data, "analysis", "fps_min", default=2.0)
-    )))
-    fps_max = max(2.0, min(5.0, float(
-        _get(data, "analysis", "fps_max", default=5.0)
-    )))
-    if fps_min > fps_max:
-        raise ConfigError("[analysis].fps_min 不能大于 fps_max")
-    # 旧配置可能仍包含 auto/fixed_2/fixed_3；正式运行统一固定 5fps。
-    video_fps_mode = SYSTEM_FPS_MODE
     file_active_timeout_sec = int(
         _get(data, "analysis", "file_active_timeout_sec", default=120)
     )
@@ -309,11 +251,6 @@ def load_config(path: Optional[Path] = None) -> Config:
         ark_api_key=ark_api_key,
         ark_endpoint=ark_endpoint,
         analyzer_model=analyzer_model,
-        default_quality=default_quality,
-        balanced_target_frames=balanced_target_frames,
-        quality_target_frames=quality_target_frames,
-        fps_min=fps_min,
-        fps_max=fps_max,
         file_active_timeout_sec=file_active_timeout_sec,
         response_timeout_sec=response_timeout_sec,
         cookie_path=cookie_path,
@@ -331,7 +268,6 @@ def load_config(path: Optional[Path] = None) -> Config:
         files_api_key=files_api_key,
         files_endpoint=files_endpoint,
         chunk_concurrency=chunk_concurrency,
-        video_fps_mode=video_fps_mode,
     )
 
 
@@ -358,14 +294,6 @@ client_id = ""
 analyzer = "doubao-seed-2-0-lite-260428"
 
 [analysis]
-# 视频模型统一固定 5fps；不做本地预扫描或按内容动态决策。
-video_fps_mode = "fixed_5"
-# balanced 仅保留为调试兼容档。
-default_quality = "quality"
-balanced_target_frames = 240
-quality_target_frames = 1250
-fps_min = 2.0
-fps_max = 5.0
 file_active_timeout_sec = 120
 # Responses API 分析超时；防止网络/代理/云端异常时无限占用 worker。
 response_timeout_sec = 900
@@ -412,8 +340,7 @@ if __name__ == "__main__":
             print(f"  provider: {cfg.provider}")
             print(f"  vault: {cfg.vault_path}")
             print(f"  model: {cfg.analyzer_model}")
-            print(f"  quality: {cfg.default_quality}")
-            print(f"  video fps mode: {cfg.video_fps_mode}")
+            print("  video fps: 5 (system fixed)")
         except ConfigError as e:
             print(f"✗ 配置错误：{e}", file=sys.stderr)
             sys.exit(1)

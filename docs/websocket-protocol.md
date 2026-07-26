@@ -61,7 +61,7 @@
 ### `config_update`
 
 同步模型配置。当前扩展不再发送 `vaultPath`；旧客户端即使携带该字段，服务端也不会据此选择或改写知识库。
-扩展不发送质量档；服务端固定 `[analysis].default_quality = "quality"`。
+扩展不发送质量档或 FPS 配置；服务端固定使用 `5 FPS` 和 `1250` 帧安全目标。
 所有视频理解使用 `videoAnalysis.analyzerModel`。旧客户端携带的 `strategyModel` 会被无声忽略。
 `server.taskConcurrency` 控制任务队列同时处理多少个入库任务，范围 `1-4`，缺省为 `2`。
 `videoAnalysis.chunkConcurrency` 控制单个长视频内几个切片并发分析，范围 `1-4`，缺省为 `2`。
@@ -162,7 +162,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 
 抖音任务固定使用 `ingest_intent: knowledge_ingest`：直接写入 `知识资产/`，生成一份 `knowledge_asset` 来源笔记。该字段由服务端写入任务和状态，扩展不再发送可选入库意图。
 
-所选 FPS 导致预估帧数超过 `1250` 时，执行层会使用同一 FPS 机械切片，并在任务进度中出现：
+固定 `5 FPS` 导致预估帧数超过 `1250` 时，执行层会使用同一 FPS 机械切片，并在任务进度中出现：
 
 - `chunking_plan`
 - `chunk_uploading`
@@ -494,8 +494,6 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 | `vault_select_folder` | 无 | 无 | 本地服务打开系统原生文件夹选择器；浏览器不提交绝对路径 |
 | `vault_select_confirm` | `selectionId` | 无 | 确认在非空未标记目录中补齐缺失的最小结构；已有内容不覆盖 |
 
-`vault_create`、`vault_switch`、`vault_candidate_confirm` 和 `vault_migration_*` 仅保留后端兼容边界，当前扩展 UI 不再发送这些消息，也不展示新建/迁移两套工作流。
-
 统一回包：
 
 ```json
@@ -517,14 +515,13 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
     },
     "obsidianRoots": [],
     "vaultCandidates": [],
-    "selection": null,
-    "migration": null
+    "selection": null
   },
   "timestamp": "2026-07-15T10:00:00"
 }
 ```
 
-所有响应固定包含 `contractVersion`、`ok`、`operation`、`state`、`requiresUserAction`、`message`、`activeVault`、`obsidianRoots`、`vaultCandidates`、`selection`、`migration`。失败时可额外包含稳定的 `errorCode`。
+所有响应固定包含 `contractVersion`、`ok`、`operation`、`state`、`requiresUserAction`、`message`、`activeVault`、`obsidianRoots`、`vaultCandidates` 和 `selection`。失败时可额外包含稳定的 `errorCode`。
 
 字段边界：
 

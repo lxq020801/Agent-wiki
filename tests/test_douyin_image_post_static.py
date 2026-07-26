@@ -23,7 +23,6 @@ if str(SCRIPTS) not in sys.path:
 class FakeImageResult:
     text: str = "这是一篇图文作品分析，提炼了画面顺序、信息重点和可复用方法。"
     file_id: str = "inline-images"
-    quality: str = "quality"
     model: str = "doubao-seed-2-0-lite-260428"
     image_count: int = 2
     usage: dict[str, Any] = field(default_factory=lambda: {"total_tokens": 9})
@@ -78,11 +77,6 @@ class DouyinImagePostStaticTests(unittest.TestCase):
             ark_api_key="dummy-key",
             ark_endpoint="https://ark.cn-beijing.volces.com/api/v3",
             analyzer_model="doubao-seed-2-0-lite-260428",
-            default_quality="quality",
-            balanced_target_frames=240,
-            quality_target_frames=1250,
-            fps_min=0.2,
-            fps_max=5.0,
             file_active_timeout_sec=120,
             cookie_path=runtime / "cookie" / "douyin.txt",
             vault_path=vault,
@@ -306,7 +300,6 @@ class DouyinImagePostStaticTests(unittest.TestCase):
                 summary = asyncio.run(ingest.run_task(
                     task_id="image-task",
                     url=meta.source_url,
-                    quality="quality",
                     ingest_intent="knowledge_ingest",
                     config=cfg,
                     sw=status_writer,

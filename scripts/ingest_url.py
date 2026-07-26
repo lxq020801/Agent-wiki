@@ -35,8 +35,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         str(ingest),
         "--url",
         args.url,
-        "--quality",
-        "quality",
     ]
     return subprocess.run(cmd, cwd=ROOT / "deps" / "douyin").returncode
 

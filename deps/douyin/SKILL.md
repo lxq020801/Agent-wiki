@@ -82,10 +82,10 @@ The WebSocket control server writes:
   error.
 - Ordinary Ark Responses content uses `{"type": "input_video", "file_id": ...}`
   plus an `input_text` prompt.
-- The current runtime fixes analysis to `quality` and model uploads to 5 FPS.
-  It does not run a local visual-change prescan. Legacy `video_fps_mode`
-  values are ignored and normalized to `fixed_5` when config is rewritten.
-  The Chrome extension does not expose legacy quality or target-frame settings.
+- The current runtime has no quality/FPS mode configuration. Model uploads use
+  the system-wide fixed 5 FPS value and do not run a local visual-change prescan.
+  Legacy quality, target-frame, FPS range, and `video_fps_mode` keys are ignored
+  and removed when config is rewritten.
 - Re-upload when fps/model preprocessing changes; do not cache `file_id`.
 - Responses memory is short-term only. Store returned `response_id` under
   `~/.agent-wiki/responses-memory/` for 3 days; never write it into
