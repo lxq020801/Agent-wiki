@@ -1036,12 +1036,14 @@ select {
 }
 
 .ingest-fps-group {
+  position: relative;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 7px;
   margin: 0 0 9px;
 }
 
 .ingest-fps-button {
+  position: relative;
   display: flex;
   min-width: 0;
   min-height: 40px;
@@ -1073,6 +1075,63 @@ select {
 
 .ingest-fps-button.selected small {
   color: var(--success);
+}
+
+.fps-tooltip {
+  position: absolute;
+  top: calc(100% + 7px);
+  z-index: 20;
+  display: flex;
+  visibility: hidden;
+  width: 236px;
+  max-width: calc(var(--popup-width) - 46px);
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  opacity: 0;
+  background: var(--panel);
+  box-shadow: 0 10px 24px var(--modal-shadow);
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  text-align: left;
+  transition: opacity 120ms ease, visibility 120ms ease;
+}
+
+.fps-tooltip-left {
+  left: 0;
+}
+
+.fps-tooltip-center {
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.fps-tooltip-right {
+  right: 0;
+}
+
+.fps-tooltip-drawback {
+  padding-top: 5px;
+  border-top: 1px solid var(--soft-border);
+  color: var(--text-secondary);
+}
+
+.fps-tooltip-drawback em {
+  color: var(--warning);
+  font-style: normal;
+  font-weight: 700;
+}
+
+.ingest-fps-button:hover .fps-tooltip,
+.ingest-fps-button:focus-visible .fps-tooltip {
+  visibility: visible;
+  opacity: 1;
 }
 
 .choice-button {

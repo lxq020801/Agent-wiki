@@ -2071,7 +2071,7 @@ def test_video_fps_tiers_are_fixed_per_task() -> None:
             {"part_index": 2, "start_sec": threshold - 10.0, "end_sec": threshold + 0.001, "overlap_sec": 10.0},
         ]
 
-    assert normalize_video_fps(None) == 5.0
+    assert normalize_video_fps(None) == 1.0
     for invalid in (0, 3, 6, True, "auto"):
         try:
             normalize_video_fps(invalid)
@@ -2087,7 +2087,7 @@ def test_mechanical_chunk_plan_uses_one_fps_without_semantic_strategy() -> None:
     sys.path.insert(0, str(SCRIPTS))
     import analyzer
 
-    plan = analyzer._chunk_plan(520.809)
+    plan = analyzer._chunk_plan(520.809, 5)
     assert [(item["start_sec"], item["end_sec"]) for item in plan] == [
         (0.0, 250.0),
         (240.0, 490.0),
@@ -2367,9 +2367,11 @@ def test_video_chunk_threshold_and_memory_store(tmp: Path) -> None:
     assert analyzer.should_chunk_video(626, 2) is True
     assert analyzer.should_chunk_video(250, 5) is False
     assert analyzer.should_chunk_video(251, 5) is True
-    assert analyzer._chunk_plan(250) == []
-    assert len(analyzer._chunk_plan(300)) == 2
-    plan = analyzer._chunk_plan(601)
+    assert analyzer._chunk_plan(1250) == []
+    assert len(analyzer._chunk_plan(1251)) == 2
+    assert analyzer._chunk_plan(250, 5) == []
+    assert len(analyzer._chunk_plan(300, 5)) == 2
+    plan = analyzer._chunk_plan(601, 5)
     assert len(plan) == 3
     assert plan[0]["start_sec"] == 0
     assert plan[1]["start_sec"] == 240
@@ -2618,6 +2620,7 @@ def test_chunk_analysis_uses_one_fps_without_semantic_context(tmp: Path) -> None
             files_client=SimpleNamespace(),
             responses_client=SimpleNamespace(),
             model="doubao-seed-2-0-lite-260428",
+            video_fps=5,
             full_duration=470.0,
             source_id="aweme-strategy",
             audit_dir=audit_dir,
@@ -2717,6 +2720,7 @@ def test_chunk_analysis_retries_transient_stream_failure(tmp: Path) -> None:
             files_client=SimpleNamespace(),
             responses_client=SimpleNamespace(),
             model="doubao-seed-2-0-lite-260428",
+            video_fps=5,
             full_duration=470.0,
             source_id="aweme-retry",
             audit_dir=audit_dir,
@@ -2816,6 +2820,7 @@ def test_chunk_analysis_reuses_existing_chunk_artifact_on_rerun(tmp: Path) -> No
             files_client=SimpleNamespace(),
             responses_client=SimpleNamespace(),
             model="doubao-seed-2-0-lite-260428",
+            video_fps=5,
             full_duration=470.0,
             source_id="aweme-resume",
             audit_dir=audit_dir,
@@ -2904,6 +2909,7 @@ def test_chunk_synthesis_without_response_id_does_not_refresh_memory(tmp: Path) 
             files_client=SimpleNamespace(),
             responses_client=SimpleNamespace(),
             model="doubao-seed-2-0-lite-260428",
+            video_fps=5,
             full_duration=120.0,
             source_id="aweme-memory",
             file_active_timeout_sec=120,
@@ -3707,8 +3713,8 @@ def test_websocket_accepts_task_request(tmp: Path) -> None:
         (Path(os.environ["AGENT_WIKI_HOME"]) / "inbox" / f"{defaulted['task']['id']}.json")
         .read_text(encoding="utf-8")
     )
-    assert defaulted["task"]["videoFps"] == 5.0
-    assert default_task["video_fps"] == 5.0
+    assert defaulted["task"]["videoFps"] == 1.0
+    assert default_task["video_fps"] == 1.0
 
     snapshot = server.task_status_snapshot()
     assert snapshot["running"] == 2

@@ -9,7 +9,7 @@
 - 格式：JSON text message
 - Origin：允许 Chrome 扩展和本地无 Origin 测试客户端；拒绝普通网页 Origin
 - 敏感信息：服务端状态响应不得返回 API Key、Cookie、Bearer token
-- 当前产品版本：`0.4.7`
+- 当前产品版本：`0.4.8`
 - 当前协议版本：`1`
 
 连接建立后可以先读取状态，但配置、Cookie、模型检查、入库和派生操作必须通过版本握手。新服务会拒绝旧扩展的写操作；新扩展连接缺少完整运行身份的旧服务时，只保留状态诊断并暂停同步与入库。
@@ -43,7 +43,7 @@
   "type": "handshake",
   "client": "agent-wiki-extension",
   "product": "agent-wiki",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "protocolVersion": 1
 }
 ```
@@ -61,7 +61,7 @@
 ### `config_update`
 
 同步模型配置。当前扩展不再发送 `vaultPath`；旧客户端即使携带该字段，服务端也不会据此选择或改写知识库。
-FPS 不是全局配置。扩展在每次 `task_request` 中发送固定档位 `videoFps: 1 | 2 | 5`；旧客户端未发送时服务端默认使用 `5 FPS`。服务端始终使用 `1250` 帧安全目标。
+FPS 不是全局配置。扩展在每次 `task_request` 中发送固定档位 `videoFps: 1 | 2 | 5`；旧客户端未发送时服务端默认使用 `1 FPS`。服务端始终使用 `1250` 帧安全目标。
 所有视频理解使用 `videoAnalysis.analyzerModel`。旧客户端携带的 `strategyModel` 会被无声忽略。
 `server.taskConcurrency` 控制任务队列同时处理多少个入库任务，范围 `1-4`，缺省为 `2`。
 `videoAnalysis.chunkConcurrency` 控制单个长视频内几个切片并发分析，范围 `1-4`，缺省为 `2`。
@@ -194,7 +194,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 }
 ```
 
-`videoFps` 只允许 `1`、`2`、`5`，分别对应省成本、均衡、精细；缺省为 `5`。非法值返回 `task_rejected` / `invalid_video_fps`。固定 `1250` 帧目标下，三档的切片门槛依次为 `1250`、`625`、`250` 秒。任务重试继承原任务档位。
+`videoFps` 只允许 `1`、`2`、`5`；缺省为日常推荐的 `1`。非法值返回 `task_rejected` / `invalid_video_fps`。固定 `1250` 帧目标下，三档的切片门槛依次为 `1250`、`625`、`250` 秒。任务重试继承原任务档位。
 
 ### `task_status_request`
 
@@ -264,11 +264,11 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 ```json
 {
   "type": "agent_ready",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "protocolVersion": 1,
   "runtime": {
     "product": "agent-wiki",
-    "productVersion": "0.4.7",
+    "productVersion": "0.4.8",
     "protocolVersion": 1,
     "sourceRevision": "3c7ea9e0158a",
     "buildId": "src-0123456789abcdef",
@@ -312,7 +312,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
   "type": "handshake_ack",
   "runtime": {
     "product": "agent-wiki",
-    "productVersion": "0.4.7",
+    "productVersion": "0.4.8",
     "protocolVersion": 1,
     "sourceRevision": "3c7ea9e0158a",
     "buildId": "src-0123456789abcdef",
@@ -322,7 +322,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
     "state": "compatible",
     "canOperate": true,
     "message": "扩展、服务与协议版本一致。",
-    "clientVersion": "0.4.7",
+    "clientVersion": "0.4.8",
     "clientProtocolVersion": 1
   }
 }
@@ -338,8 +338,8 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
 {
   "type": "protocol_rejected",
   "reason": "version_mismatch",
-  "message": "扩展 v0.0.9 与服务 v0.4.7 不一致。",
-  "runtime": { "product": "agent-wiki", "productVersion": "0.4.7", "protocolVersion": 1 }
+  "message": "扩展 v0.0.9 与服务 v0.4.8 不一致。",
+  "runtime": { "product": "agent-wiki", "productVersion": "0.4.8", "protocolVersion": 1 }
 }
 ```
 
@@ -353,7 +353,7 @@ Endpoint 必须是可信 HTTPS 地址，不能包含账号密码，也不能是 
   "status": {
     "runtime": {
       "product": "agent-wiki",
-      "productVersion": "0.4.7",
+      "productVersion": "0.4.8",
       "protocolVersion": 1,
       "sourceRevision": "3c7ea9e0158a",
       "buildId": "src-0123456789abcdef",

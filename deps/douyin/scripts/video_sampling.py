@@ -5,7 +5,7 @@ from typing import Any
 
 
 ALLOWED_VIDEO_FPS = (1.0, 2.0, 5.0)
-DEFAULT_VIDEO_FPS = 5.0
+DEFAULT_VIDEO_FPS = 1.0
 POLICY_VERSION = "task-fixed-video-fps-v1"
 
 

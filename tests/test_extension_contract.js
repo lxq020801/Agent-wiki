@@ -48,7 +48,7 @@ async function main() {
     },
     notifications: { create() {} },
     runtime: {
-      getManifest: () => ({ version: '0.4.7' }),
+      getManifest: () => ({ version: '0.4.8' }),
       lastError: null,
       onInstalled: extensionEvent(),
       onMessage: extensionEvent(),
@@ -110,7 +110,7 @@ async function main() {
     type: 'handshake',
     client: 'agent-wiki-background',
     product: 'agent-wiki',
-    version: '0.4.7',
+    version: '0.4.8',
     protocolVersion: 1
   });
   assert.match(socket.sent[0].operationId, /^handshake-/);
@@ -127,7 +127,7 @@ async function main() {
 
   const compatibleRuntime = {
     product: 'agent-wiki',
-    productVersion: '0.4.7',
+    productVersion: '0.4.8',
     protocolVersion: 1,
     sourceRevision: 'abcdef123456',
     buildId: 'src-1234567890abcdef',
@@ -139,12 +139,12 @@ async function main() {
     compatibility: {
       state: 'compatible',
       canOperate: true,
-      clientVersion: '0.4.7',
+      clientVersion: '0.4.8',
       clientProtocolVersion: 1
     }
   })})`, context);
   assert.equal(stored.runtimeCompatibility.canOperate, true);
-  assert.equal(stored.agentRuntime.productVersion, '0.4.7');
+  assert.equal(stored.agentRuntime.productVersion, '0.4.8');
   const automaticVaultScan = socket.sent.find(message => message.type === 'vault_scan');
   assert.ok(automaticVaultScan, 'compatible handshake must trigger one automatic vault scan');
   assert.equal(automaticVaultScan.data.source, 'extension_handshake');
@@ -191,7 +191,7 @@ async function main() {
   assert.equal(stored.lastDouyinTaskRequest.taskId, 'task-contract');
   assert.equal(stored.lastDouyinTaskRequest.url, candidate.url);
   assert.equal(stored.lastDouyinTaskRequest.videoFps, 2);
-  assert.equal(vm.runInContext('normalizeVideoIngestFps(undefined)', context), 5);
+  assert.equal(vm.runInContext('normalizeVideoIngestFps(undefined)', context), 1);
   assert.equal(vm.runInContext('normalizeVideoIngestFps(1)', context), 1);
   assert.equal(vm.runInContext('normalizeVideoIngestFps("5")', context), 5);
   assert.throws(

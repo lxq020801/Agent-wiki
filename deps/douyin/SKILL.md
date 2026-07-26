@@ -83,7 +83,7 @@ The WebSocket control server writes:
 - Ordinary Ark Responses content uses `{"type": "input_video", "file_id": ...}`
   plus an `input_text` prompt.
 - The current runtime has no adaptive quality/FPS configuration. Each task uses
-  one explicit fixed 1, 2, or 5 FPS value (default 5) and does not run a local visual-change prescan.
+  one explicit fixed 1, 2, or 5 FPS value (default 1) and does not run a local visual-change prescan.
   Legacy quality, target-frame, FPS range, and `video_fps_mode` keys are ignored
   and removed when config is rewritten.
 - Re-upload when fps/model preprocessing changes; do not cache `file_id`.

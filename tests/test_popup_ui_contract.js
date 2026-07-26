@@ -78,19 +78,34 @@ assert.match(videoSettingsSection, /id="task-concurrency" value="2"/);
 assert.match(videoSettingsSection, /id="chunk-concurrency" value="2"/);
 
 const ingestCard = html.match(/<section class="action-block primary-action ingest-card">[\s\S]*?<\/section>/)?.[0] || '';
-assert.match(ingestCard, /id="ingest-video-fps" value="5"/);
+assert.match(ingestCard, /id="ingest-video-fps" value="1"/);
 assert.match(ingestCard, /class="choice-group ingest-fps-group" role="radiogroup" aria-label="视频拆解精度"/);
-for (const [fps, label] of [[1, '省成本'], [2, '均衡'], [5, '精细']]) {
+for (const [fps, label] of [[1, '日常推荐'], [2, '更多细节'], [5, '频繁切镜']]) {
   assert.match(
     ingestCard,
     new RegExp(`role="radio"[^>]+data-control="ingest-video-fps"[^>]+data-value="${fps}"[\\s\\S]*?<b>${fps} FPS<\\/b><small>${label}<\\/small>`)
   );
 }
 assert.equal((ingestCard.match(/aria-checked="true"/g) || []).length, 1);
-assert.match(ingestCard, /aria-checked="true"[^>]+data-control="ingest-video-fps"[^>]+data-value="5"/);
+assert.match(ingestCard, /aria-checked="true"[^>]+aria-describedby="fps-tooltip-1"[^>]+data-control="ingest-video-fps"[^>]+data-value="1"/);
+assert.equal((ingestCard.match(/role="tooltip"/g) || []).length, 3);
+for (const fps of [1, 2, 5]) {
+  assert.match(ingestCard, new RegExp(`aria-describedby="fps-tooltip-${fps}"`));
+  assert.match(ingestCard, new RegExp(`id="fps-tooltip-${fps}" role="tooltip"`));
+}
+assert.match(ingestCard, /适合：大多数口播、教程和常规视频，成本与效果平衡较好。/);
+assert.match(ingestCard, /缺点：<\/em>快速闪过的画面或很短的镜头可能遗漏。/);
+assert.match(ingestCard, /适合：对画面细节要求更高的场景。/);
+assert.match(ingestCard, /缺点：<\/em>成本约为 1 FPS 的两倍，也会增加重复画面。/);
+assert.match(ingestCard, /适合：画面连续跳动、切换频繁，需要精细识别镜头的场景。/);
+assert.match(ingestCard, /缺点：<\/em>重复与干扰信息较多、成本更高，结果可能不如 1\/2 FPS 准确。/);
 assert.match(css, /\.ingest-fps-group\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
 assert.match(css, /\.ingest-fps-button\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?flex-direction:\s*column/);
+assert.match(css, /\.fps-tooltip\s*\{[\s\S]*?visibility:\s*hidden;[\s\S]*?opacity:\s*0;[\s\S]*?background:\s*var\(--panel\)/);
+assert.match(css, /\.ingest-fps-button:hover \.fps-tooltip,[\s\S]*?\.ingest-fps-button:focus-visible \.fps-tooltip\s*\{[\s\S]*?visibility:\s*visible;[\s\S]*?opacity:\s*1/);
+assert.match(css, /\.fps-tooltip-drawback em\s*\{[\s\S]*?color:\s*var\(--warning\)/);
 assert.match(js, /const ALLOWED_VIDEO_INGEST_FPS = new Set\(\[1, 2, 5\]\)/);
+assert.match(js, /const DEFAULT_VIDEO_INGEST_FPS = 1/);
 assert.match(js, /'videoIngestFps'[\s\S]*?setControlValue\('ingest-video-fps', normalizeVideoIngestFps\(result\.videoIngestFps\)\)/);
 assert.match(js, /action:\s*'submitDouyinIngestFromPopup',[\s\S]*?videoFps/);
 assert.match(js, /chrome\.storage\.local\.set\(\{ videoIngestFps \}\)/);

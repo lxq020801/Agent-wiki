@@ -1837,7 +1837,7 @@ class LibrarianServer:
         if raw is None and isinstance(msg.get('data'), dict):
             raw = msg['data'].get('videoFps')
         if raw is None or raw == '':
-            return 5.0
+            return 1.0
         if isinstance(raw, bool):
             return None
         try:
@@ -2639,7 +2639,7 @@ class LibrarianServer:
             parent_id=source_operation_id,
             params={
                 'retryOfTaskId': task_id,
-                'videoFps': task.get('video_fps', 5.0),
+                'videoFps': task.get('video_fps', 1.0),
             },
             stage='retry_queued',
         )
@@ -2657,7 +2657,7 @@ class LibrarianServer:
             'source': task.get('source') or 'retry',
             'source_url': task.get('url') or '',
             'ingest_intent': task.get('ingest_intent') or DEFAULT_INGEST_INTENT,
-            'video_fps': task.get('video_fps', 5.0),
+            'video_fps': task.get('video_fps', 1.0),
             'retry_of_task_id': task_id,
         })
         if self.enable_task_runner:

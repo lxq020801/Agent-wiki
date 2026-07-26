@@ -92,16 +92,28 @@
           <div class="preview-meta" id="douyin-preview-meta">打开抖音页面后自动检测；也可以粘贴分享链接。</div>
         </div>
       </div>
-      <input type="hidden" id="ingest-video-fps" value="5">
+      <input type="hidden" id="ingest-video-fps" value="1">
       <div class="choice-group ingest-fps-group" role="radiogroup" aria-label="视频拆解精度">
-        <button class="choice-button ingest-fps-button" type="button" role="radio" aria-checked="false" data-control="ingest-video-fps" data-value="1">
-          <b>1 FPS</b><small>省成本</small>
+        <button class="choice-button ingest-fps-button selected" type="button" role="radio" aria-checked="true" aria-describedby="fps-tooltip-1" data-control="ingest-video-fps" data-value="1">
+          <b>1 FPS</b><small>日常推荐</small>
+          <span class="fps-tooltip fps-tooltip-left" id="fps-tooltip-1" role="tooltip">
+            <span>适合：大多数口播、教程和常规视频，成本与效果平衡较好。</span>
+            <span class="fps-tooltip-drawback"><em>缺点：</em>快速闪过的画面或很短的镜头可能遗漏。</span>
+          </span>
         </button>
-        <button class="choice-button ingest-fps-button" type="button" role="radio" aria-checked="false" data-control="ingest-video-fps" data-value="2">
-          <b>2 FPS</b><small>均衡</small>
+        <button class="choice-button ingest-fps-button" type="button" role="radio" aria-checked="false" aria-describedby="fps-tooltip-2" data-control="ingest-video-fps" data-value="2">
+          <b>2 FPS</b><small>更多细节</small>
+          <span class="fps-tooltip fps-tooltip-center" id="fps-tooltip-2" role="tooltip">
+            <span>适合：对画面细节要求更高的场景。</span>
+            <span class="fps-tooltip-drawback"><em>缺点：</em>成本约为 1 FPS 的两倍，也会增加重复画面。</span>
+          </span>
         </button>
-        <button class="choice-button ingest-fps-button selected" type="button" role="radio" aria-checked="true" data-control="ingest-video-fps" data-value="5">
-          <b>5 FPS</b><small>精细</small>
+        <button class="choice-button ingest-fps-button" type="button" role="radio" aria-checked="false" aria-describedby="fps-tooltip-5" data-control="ingest-video-fps" data-value="5">
+          <b>5 FPS</b><small>频繁切镜</small>
+          <span class="fps-tooltip fps-tooltip-right" id="fps-tooltip-5" role="tooltip">
+            <span>适合：画面连续跳动、切换频繁，需要精细识别镜头的场景。</span>
+            <span class="fps-tooltip-drawback"><em>缺点：</em>重复与干扰信息较多、成本更高，结果可能不如 1/2 FPS 准确。</span>
+          </span>
         </button>
       </div>
       <div class="button-row">
